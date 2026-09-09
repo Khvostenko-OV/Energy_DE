@@ -1,0 +1,29 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "permission": {
+    "bash": {
+      "*": "ask",
+      "ls *": "allow",
+      "python *": "allow",
+      "git status *": "allow",
+      "git diff *": "allow",
+      "git log *": "allow",
+      "git add *": "allow",
+      "git commit *": "allow",
+      "git push *": "ask",
+      "gh issue list *": "allow",
+      "gh issue view *": "allow",
+      "gh issue create *": "allow",
+      "gh repo view *": "allow",
+      "npm *": "ask",
+      "rm *": "deny",
+      "sudo *": "deny",
+      "curl *": "deny"
+    },
+    "edit": {
+      "*": "allow"
+    },
+    "webfetch": "ask"
+  }
+}
