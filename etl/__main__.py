@@ -3,6 +3,7 @@ import logging
 import click
 
 from etl.config import get_engine
+from etl.extract import SOURCES, extract_source
 
 
 @click.group()
@@ -14,22 +15,26 @@ def cli(verbose: bool):
 
 
 @cli.command()
-@click.argument("source", default="bioenergy")
+@click.argument("source", default="all")
 def extract(source: str):
-    """Extract source data into the raw schema."""
+    """Extract unit sources into the raw schema. Defaults to all six sources."""
     engine = get_engine()
 
-    if source == "bioenergy":
-        from etl.extract import extract_bioenergy
-
-        report = extract_bioenergy(engine)
+    if source == "all":
+        sources = list(SOURCES)
+    elif source in SOURCES:
+        sources = [source]
     else:
-        raise click.BadParameter(f"Unknown source: {source}")
+        choices = ", ".join(list(SOURCES) + ["all"])
+        raise click.BadParameter(f"Unknown source: {source}. Choose from {choices}.")
 
-    click.echo(f"\nExtraction report ({report.source}):")
-    click.echo(report.summary())
+    reports = [extract_source(src, engine) for src in sources]
 
-    if not report.passed:
+    for r in reports:
+        click.echo(f"\nExtraction report ({r.source}):")
+        click.echo(r.summary())
+
+    if any(not r.passed for r in reports):
         raise SystemExit(1)
 
 
@@ -38,7 +43,7 @@ def run_all():
     """Run all ETL stages."""
     click.echo("Running extract stage...")
     ctx = click.get_current_context()
-    ctx.invoke(extract, source="bioenergy")
+    ctx.invoke(extract)
     click.echo("\nAll stages complete.")
 
 
