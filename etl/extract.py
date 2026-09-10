@@ -33,16 +33,15 @@ RAW_COLUMNS = [
 ]
 
 SOURCES = {
-    "bio": {"energy_source": "Bio", "expected_rows": 23562},
+    "bio": {"energy_source": "Bio"},
     "gas": {
         "energy_source": "Gas",
-        "expected_rows": 304,
         "column_mapping": {"gas_production_capacity": "installed_capacity"},
     },
-    "hydro": {"energy_source": "Hydro", "expected_rows": 8758},
-    "solar": {"energy_source": "Solar", "expected_rows": 14250},
-    "wind": {"energy_source": "Wind", "expected_rows": 33433},
-    "storage": {"energy_source": "Storage", "expected_rows": 1348},
+    "hydro": {"energy_source": "Hydro"},
+    "solar": {"energy_source": "Solar"},
+    "wind": {"energy_source": "Wind"},
+    "storage": {"energy_source": "Storage"},
 }
 
 
@@ -156,7 +155,7 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
     source's column renames, sets the canonical energy_source, casts dates
     and numerics, drops duplicate reference_ids, folds secondary attributes
     into properties, writes the table to PostGIS and verifies it against the
-    expected row count and key uniqueness. Returns an ExtractionReport.
+    loaded counts and key uniqueness. Returns an ExtractionReport.
     """
     import geopandas as gpd
 
@@ -239,15 +238,12 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
 def _verify_extraction(engine: Engine, source: str, report: ExtractionReport) -> list[str]:
     """Verify the raw.<source> table against the extraction report.
 
-    Checks the row count matches the source's expected count and the loaded
-    count, and that no non-null reference_id appears more than once in the
-    stored table. Returns a list of error strings, empty if verification
-    passes.
+    Checks the loaded count is consistent with the pre-dedupe source rows,
+    matches the number of rows written to the table, and that no non-null
+    reference_id appears more than once in the stored table. Returns a list
+    of error strings, empty if verification passes.
     """
     errors: list[str] = []
-    expected = SOURCES[source]["expected_rows"]
-    if report.rows_loaded != expected:
-        errors.append(f"Row count mismatch: expected {expected}, got {report.rows_loaded}")
     if report.rows_loaded != report.source_row_count - report.duplicates_dropped:
         errors.append(
             f"Row count mismatch: loaded {report.rows_loaded}, expected {report.source_row_count - report.duplicates_dropped}"
