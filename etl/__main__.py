@@ -3,7 +3,7 @@ import logging
 import click
 
 from etl.config import get_engine
-from etl.extract import extract_source, resolve_extract_targets
+from etl.extract import DEFAULT_MANIFEST, extract_source, resolve_extract_targets
 
 
 @click.group()
@@ -15,13 +15,13 @@ def cli(verbose: bool):
 
 
 @cli.command()
-@click.argument("target", default="")
+@click.argument("target", default=str(DEFAULT_MANIFEST))
 def extract(target: str):
     """Extract unit sources from a manifest of file names.
 
-    TARGET is the manifest file path, a single source key (bio, gas, hydro,
-    solar, wind, storage), or empty to load all sources from the default
-    manifest (data/geo/sources.txt).
+    TARGET is the manifest file path (file names resolve against the
+    manifest's directory), or a single source key (bio, gas, hydro, solar,
+    wind, storage).
     """
     engine = get_engine()
     log = logging.getLogger(__name__)

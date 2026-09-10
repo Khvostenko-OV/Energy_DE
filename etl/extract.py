@@ -22,15 +22,6 @@ DEFAULT_MANIFEST = DATA_DIR / "sources.txt"
 
 FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
 
-UNIT_SOURCE_FILES = [
-    "Bioenergy_V20260203.gpkg",
-    "Gas_Producer_V20260203.gpkg",
-    "Hydropower_V20260203.gpkg",
-    "Solar_Energy_V20260203.gpkg",
-    "Wind_Energy_V20260203.gpkg",
-    "Energy_Storage_V20260203.gpkg",
-]
-
 RAW_COLUMNS = [
     "energy_source",
     "installed_capacity",
@@ -162,11 +153,6 @@ def source_from_filename(filename: str) -> str:
     return match.group(1).lower()
 
 
-def write_sources_manifest(path: Path = DEFAULT_MANIFEST) -> None:
-    """Write the unit source file names to the manifest file, one per line."""
-    path.write_text("\n".join(UNIT_SOURCE_FILES) + "\n")
-
-
 def read_sources_manifest(path: Path) -> list[Path]:
     """Read a manifest file and resolve its entries to absolute paths.
 
@@ -181,24 +167,24 @@ def read_sources_manifest(path: Path) -> list[Path]:
 def resolve_extract_targets(target: str) -> list[Path]:
     """Resolve the CLI extract target to the list of files to load.
 
-    An existing file path is read as a manifest. A known source key loads the
+    An existing file path is read as a manifest, and each file name is
+    resolved against the manifest's directory. A known source key loads the
     matching entry from the default manifest. An empty target loads every
-    source in the default manifest, generating it first if absent.
+    source in the default manifest.
     """
-    if target and Path(target).is_file():
-        return read_sources_manifest(Path(target))
-    if target and target not in SOURCES:
-        raise ValueError(f"Unknown target: {target}")
+    if target in ("", None):
+        target = str(DEFAULT_MANIFEST)
 
-    manifest = DEFAULT_MANIFEST
-    if not manifest.is_file():
-        write_sources_manifest(manifest)
-        log.info("Generated manifest at %s", manifest)
+    path = Path(target)
+    if path.is_file():
+        return read_sources_manifest(path)
 
-    paths = read_sources_manifest(manifest)
     if target in SOURCES:
-        paths = [p for p in paths if source_from_filename(p.name) == target]
-    return paths
+        if not DEFAULT_MANIFEST.is_file():
+            raise ValueError(f"Manifest not found: {DEFAULT_MANIFEST}")
+        return [p for p in read_sources_manifest(DEFAULT_MANIFEST) if source_from_filename(p.name) == target]
+
+    raise ValueError(f"Manifest not found: {target}")
 
 
 def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionReport:
