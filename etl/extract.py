@@ -16,10 +16,6 @@ log = logging.getLogger(__name__)
 
 RAW_SCHEMA = "raw"
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "geo"
-
-DEFAULT_MANIFEST = DATA_DIR / "sources.txt"
-
 FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
 
 RAW_COLUMNS = [
@@ -151,40 +147,6 @@ def source_from_filename(filename: str) -> str:
     if not match:
         raise ValueError(f"Cannot map filename {filename!r} to an energy source")
     return match.group(1).lower()
-
-
-def read_sources_manifest(path: Path) -> list[Path]:
-    """Read a manifest file and resolve its entries to absolute paths.
-
-    Blank lines and lines starting with '#' are ignored; the remaining file
-    names are resolved against the manifest's directory.
-    """
-    with open(path) as fh:
-        names = [line.strip() for line in fh if line.strip() and not line.strip().startswith("#")]
-    return [path.parent / name for name in names]
-
-
-def resolve_extract_targets(target: str) -> list[Path]:
-    """Resolve the CLI extract target to the list of files to load.
-
-    An existing file path is read as a manifest, and each file name is
-    resolved against the manifest's directory. A known source key loads the
-    matching entry from the default manifest. An empty target loads every
-    source in the default manifest.
-    """
-    if target in ("", None):
-        target = str(DEFAULT_MANIFEST)
-
-    path = Path(target)
-    if path.is_file():
-        return read_sources_manifest(path)
-
-    if target in SOURCES:
-        if not DEFAULT_MANIFEST.is_file():
-            raise ValueError(f"Manifest not found: {DEFAULT_MANIFEST}")
-        return [p for p in read_sources_manifest(DEFAULT_MANIFEST) if source_from_filename(p.name) == target]
-
-    raise ValueError(f"Manifest not found: {target}")
 
 
 def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionReport:

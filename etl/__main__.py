@@ -1,9 +1,10 @@
 import logging
+from pathlib import Path
 
 import click
 
 from etl.config import get_engine
-from etl.extract import DEFAULT_MANIFEST, extract_source, resolve_extract_targets
+from etl.extract import extract_source
 
 
 @click.group()
@@ -15,24 +16,29 @@ def cli(verbose: bool):
 
 
 @cli.command()
-@click.argument("target", default=str(DEFAULT_MANIFEST))
+@click.argument("target")
 def extract(target: str):
-    """Extract unit sources from a manifest of file names.
+    """Extract unit sources listed in a manifest file.
 
-    TARGET is the manifest file path (file names resolve against the
-    manifest's directory), or a single source key (bio, gas, hydro, solar,
-    wind, storage).
+    TARGET is the manifest file path. Each file name on its own line is
+    resolved against the manifest's directory.
     """
     engine = get_engine()
     log = logging.getLogger(__name__)
 
-    try:
-        paths = resolve_extract_targets(target)
-    except Exception as e:
-        raise click.BadParameter(str(e))
+    manifest = Path(target)
+    if not manifest.is_file():
+        raise click.BadParameter(f"Manifest not found: {target}")
 
-    log.info("Extracting %d source file(s)", len(paths))
-    reports = [extract_source(p, engine) for p in paths]
+    data_dir = manifest.parent
+    filenames = [
+        line.strip()
+        for line in manifest.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    log.info("Extracting %d source file(s) from %s", len(filenames), manifest)
+    reports = [extract_source(data_dir / f, engine) for f in filenames]
 
     for r in reports:
         click.echo(f"\nExtraction report ({r.source}):")
@@ -47,7 +53,7 @@ def run_all():
     """Run all ETL stages."""
     click.echo("Running extract stage...")
     ctx = click.get_current_context()
-    ctx.invoke(extract)
+    ctx.invoke(extract, target="data/geo/sources.txt")
     click.echo("\nAll stages complete.")
 
 
