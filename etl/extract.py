@@ -152,13 +152,14 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
     """
     import geopandas as gpd
 
-    engine = engine or get_engine()
     report = ExtractionReport(
         source="", source_row_count=0, rows_loaded=0, duplicates_dropped=0, properties_empty=0
     )
 
     t0 = time.perf_counter()
     try:
+        engine = engine or get_engine()
+
         source = source_from_filename(file_path.name)
         if not source:
             raise ValueError(f"Cannot map filename {file_path.name!r} to an energy source")
