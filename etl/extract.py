@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,11 +18,25 @@ RAW_SCHEMA = "raw"
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "geo"
 
+DEFAULT_MANIFEST = DATA_DIR / "sources.txt"
+
+FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
+
+UNIT_SOURCE_FILES = [
+    "Bioenergy_V20260203.gpkg",
+    "Gas_Producer_V20260203.gpkg",
+    "Hydropower_V20260203.gpkg",
+    "Solar_Energy_V20260203.gpkg",
+    "Wind_Energy_V20260203.gpkg",
+    "Energy_Storage_V20260203.gpkg",
+]
+
 RAW_COLUMNS = [
     "energy_source",
     "installed_capacity",
     "commissioning_date",
     "decommissioning_date",
+    "storage_capacity",
     "x_coordinates",
     "y_coordinates",
     "geo_accuracy",
@@ -31,37 +46,16 @@ RAW_COLUMNS = [
 ]
 
 SOURCES = {
-    "bio": {
-        "file": "Bioenergy_V20260203.gpkg",
-        "energy_source": "Bio",
-        "expected_rows": 23562,
-    },
+    "bio": {"energy_source": "Bio", "expected_rows": 23562},
     "gas": {
-        "file": "Gas_Producer_V20260203.gpkg",
         "energy_source": "Gas",
         "expected_rows": 304,
         "column_mapping": {"gas_production_capacity": "installed_capacity"},
     },
-    "hydro": {
-        "file": "Hydropower_V20260203.gpkg",
-        "energy_source": "Hydro",
-        "expected_rows": 8758,
-    },
-    "solar": {
-        "file": "Solar_Energy_V20260203.gpkg",
-        "energy_source": "Solar",
-        "expected_rows": 14250,
-    },
-    "wind": {
-        "file": "Wind_Energy_V20260203.gpkg",
-        "energy_source": "Wind",
-        "expected_rows": 33433,
-    },
-    "storage": {
-        "file": "Energy_Storage_V20260203.gpkg",
-        "energy_source": "Storage",
-        "expected_rows": 1348,
-    },
+    "hydro": {"energy_source": "Hydro", "expected_rows": 8758},
+    "solar": {"energy_source": "Solar", "expected_rows": 14250},
+    "wind": {"energy_source": "Wind", "expected_rows": 33433},
+    "storage": {"energy_source": "Storage", "expected_rows": 1348},
 }
 
 
@@ -106,14 +100,21 @@ def _ensure_schema(engine: Engine) -> None:
 
 
 def _cast_types(df: pandas.DataFrame) -> None:
-    """Cast dates and numeric columns to the uniform raw shape in place."""
-    date_cols = ["commissioning_date", "decommissioning_date", "reference_date"]
-    for col in date_cols:
+    """Cast columns to the raw shape in place.
+
+    Commissioning and decommissioning dates keep the day resolution of the
+    source data; reference_date keeps its full timestamp including the time
+    of day.
+    """
+    for col in ("commissioning_date", "decommissioning_date"):
         if col in df.columns:
             df[col] = df[col].apply(
                 lambda x: x[:10] if isinstance(x, str) and len(x) >= 10 else x
             )
             df[col] = pandas.to_datetime(df[col], errors="coerce").dt.date
+
+    if "reference_date" in df.columns:
+        df["reference_date"] = pandas.to_datetime(df["reference_date"], errors="coerce")
 
     df["installed_capacity"] = df["installed_capacity"].astype(float)
     df["x_coordinates"] = df["x_coordinates"].astype(float)
@@ -149,34 +150,91 @@ def _build_properties(df: pandas.DataFrame) -> int:
     return int((df["properties"].apply(len) == 0).sum())
 
 
-def extract_source(source: str, engine: Engine | None = None) -> ExtractionReport:
+def source_from_filename(filename: str) -> str:
+    """Map a source file name to its canonical source key via regex.
+
+    The match is case-insensitive, so 'Bioenergy_V20260203.gpkg' maps to
+    'bio', 'Energy_Storage_V20260203.gpkg' to 'storage', and so on.
+    """
+    match = re.search(FILENAME_PATTERN, filename, re.IGNORECASE)
+    if not match:
+        raise ValueError(f"Cannot map filename {filename!r} to an energy source")
+    return match.group(1).lower()
+
+
+def write_sources_manifest(path: Path = DEFAULT_MANIFEST) -> None:
+    """Write the unit source file names to the manifest file, one per line."""
+    path.write_text("\n".join(UNIT_SOURCE_FILES) + "\n")
+
+
+def read_sources_manifest(path: Path) -> list[Path]:
+    """Read a manifest file and resolve its entries to absolute paths.
+
+    Blank lines and lines starting with '#' are ignored; the remaining file
+    names are resolved against the manifest's directory.
+    """
+    with open(path) as fh:
+        names = [line.strip() for line in fh if line.strip() and not line.strip().startswith("#")]
+    return [path.parent / name for name in names]
+
+
+def resolve_extract_targets(target: str) -> list[Path]:
+    """Resolve the CLI extract target to the list of files to load.
+
+    An existing file path is read as a manifest. A known source key loads the
+    matching entry from the default manifest. An empty target loads every
+    source in the default manifest, generating it first if absent.
+    """
+    if target and Path(target).is_file():
+        return read_sources_manifest(Path(target))
+    if target and target not in SOURCES:
+        raise ValueError(f"Unknown target: {target}")
+
+    manifest = DEFAULT_MANIFEST
+    if not manifest.is_file():
+        write_sources_manifest(manifest)
+        log.info("Generated manifest at %s", manifest)
+
+    paths = read_sources_manifest(manifest)
+    if target in SOURCES:
+        paths = [p for p in paths if source_from_filename(p.name) == target]
+    return paths
+
+
+def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionReport:
     """Extract one unit source GPKG into its raw table.
 
-    Loads the source file, applies the source's column renames, sets the
-    canonical energy_source, casts dates and numerics, drops duplicate
-    reference_ids, folds secondary attributes into properties, writes the
-    table to PostGIS and verifies it against the expected row count and
-    key uniqueness. Returns an ExtractionReport.
+    The energy source is derived from the file name via regex. Applies the
+    source's column renames, sets the canonical energy_source, casts dates
+    and numerics, drops duplicate reference_ids, folds secondary attributes
+    into properties, writes the table to PostGIS and verifies it against the
+    expected row count and key uniqueness. Returns an ExtractionReport.
     """
     import geopandas as gpd
 
-    if source not in SOURCES:
-        raise ValueError(f"Unknown source: {source}")
+    engine = engine or get_engine()
+
+    try:
+        source = source_from_filename(file_path.name)
+    except ValueError as e:
+        log.error("Skipping %s: %s", file_path.name, e)
+        return ExtractionReport(
+            source=file_path.name, source_row_count=0, rows_loaded=0,
+            duplicates_dropped=0, properties_empty=0, errors=[str(e)],
+        )
 
     config = SOURCES[source]
-    engine = engine or get_engine()
     report = ExtractionReport(source=source, source_row_count=0, rows_loaded=0, duplicates_dropped=0, properties_empty=0)
 
     t0 = time.perf_counter()
-    log.info("Start data extraction (%s)", source)
+    log.info("Extracting %s from %s", source, file_path.name)
 
     try:
         _ensure_schema(engine)
         t1 = time.perf_counter()
 
-        gpkg_path = DATA_DIR / config["file"]
-        log.info("Reading %s...", gpkg_path.name)
-        df = gpd.read_file(gpkg_path)
+        log.info("Reading %s...", file_path.name)
+        df = gpd.read_file(file_path)
         report.source_row_count = len(df)
         t2 = time.perf_counter()
         log.info("%d rows loaded, time %.3fs", len(df), t2 - t1)
@@ -217,9 +275,14 @@ def extract_source(source: str, engine: Engine | None = None) -> ExtractionRepor
 
     except Exception as e:
         report.errors.append(f"Extraction failed: {e}")
-        log.error("Extraction failed: %s", e)
+        log.exception("Extraction failed for %s", file_path.name)
 
     report.total_time = time.perf_counter() - t0
+    if report.errors:
+        for err in report.errors:
+            log.error("Extraction failed for %s: %s", source, err)
+    else:
+        log.info("Extraction passed for %s (%d rows)", source, report.rows_loaded)
     log.info("Total time: %.3fs", report.total_time)
 
     return report

@@ -3,7 +3,7 @@ import logging
 import click
 
 from etl.config import get_engine
-from etl.extract import SOURCES, extract_source
+from etl.extract import extract_source, resolve_extract_targets
 
 
 @click.group()
@@ -11,24 +11,28 @@ from etl.extract import SOURCES, extract_source
 def cli(verbose: bool):
     """Energy DE ETL pipeline."""
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(format="%(message)s", level=level)
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=level)
 
 
 @cli.command()
-@click.argument("source", default="all")
-def extract(source: str):
-    """Extract unit sources into the raw schema. Defaults to all six sources."""
+@click.argument("target", default="")
+def extract(target: str):
+    """Extract unit sources from a manifest of file names.
+
+    TARGET is the manifest file path, a single source key (bio, gas, hydro,
+    solar, wind, storage), or empty to load all sources from the default
+    manifest (data/geo/sources.txt).
+    """
     engine = get_engine()
+    log = logging.getLogger(__name__)
 
-    if source == "all":
-        sources = list(SOURCES)
-    elif source in SOURCES:
-        sources = [source]
-    else:
-        choices = ", ".join(list(SOURCES) + ["all"])
-        raise click.BadParameter(f"Unknown source: {source}. Choose from {choices}.")
+    try:
+        paths = resolve_extract_targets(target)
+    except Exception as e:
+        raise click.BadParameter(str(e))
 
-    reports = [extract_source(src, engine) for src in sources]
+    log.info("Extracting %d source file(s)", len(paths))
+    reports = [extract_source(p, engine) for p in paths]
 
     for r in reports:
         click.echo(f"\nExtraction report ({r.source}):")
