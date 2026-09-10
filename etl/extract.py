@@ -24,6 +24,7 @@ RAW_COLUMNS = [
     "commissioning_date",
     "decommissioning_date",
     "storage_capacity",
+    "storage_type",
     "x_coordinates",
     "y_coordinates",
     "geo_accuracy",
@@ -94,10 +95,10 @@ def _cast_types(df: pandas.DataFrame) -> None:
     if "reference_date" in df.columns:
         df["reference_date"] = pandas.to_datetime(df["reference_date"], errors="coerce")
 
-    df["installed_capacity"] = df["installed_capacity"].astype(float)
-    df["x_coordinates"] = df["x_coordinates"].astype(float)
-    df["y_coordinates"] = df["y_coordinates"].astype(float)
-    df["geo_accuracy"] = df["geo_accuracy"].astype(int)
+    df["installed_capacity"] = df["installed_capacity"].astype("Float64")
+    df["x_coordinates"] = df["x_coordinates"].astype("Float64")
+    df["y_coordinates"] = df["y_coordinates"].astype("Float64")
+    df["geo_accuracy"] = df["geo_accuracy"].astype("Int64")
 
 
 def _drop_duplicate_reference_ids(df: pandas.DataFrame) -> int:
