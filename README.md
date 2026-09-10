@@ -28,8 +28,7 @@ Greenfield. The pipeline is not implemented yet. Design work is done:
 | Germany boundaries (state, regions + EEZ, districts, municipalities) | `data/geo/germany_*.gpkg`                 |
 | Source documentation                                                 | `data/geo/data_descriptor_V20260203.xlsx` |
 
-Actual filenames are the `V20260203` versions and differ from `TechnicalSpecification.md`
-(the gas file is `Gas_Producer_V20260203.gpkg`). The files are authoritative.
+All files are 2026-02-03 versions. The files are authoritative.
 
 ## Pipeline
 
