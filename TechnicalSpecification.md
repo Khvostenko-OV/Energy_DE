@@ -15,7 +15,7 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 | Bioenergy            | Locations of power generation units of bioenergy systems       | Bioenergy_V20250101.gpkg             | Point        |
 | Cogeneration Units   | Locations of cogeneration units connected to bioenergy systems | Cogeneration_Units_V20250101.gpkg    | Point        |
 | Energy Storage       | Locations of energy storage units greater than 100 kW          | Energy_Storage_V20250101.gpkg        | Point        |
-| Gas Production       | Location of gas production systems                             | Gas_Production_V20250101.gpkg        | Point        |
+| Gas Production       | Location of gas production systems                             | Gas_Producer_V20250101.gpkg          | Point        |
 | Hydropower           | Locations of hydropower systems                                | Hydropower_V20250101.gpkg            | Point        |
 | Solarenergy Polygons | Polygons of solar energy systems                               | Solar_Energy_Polygons_V20250101.gpkg | Multipolygon |
 | Solar Energy         | Locations of solar energy systems                              | Solar_Energy_V20250101.gpkg          | Point        |
