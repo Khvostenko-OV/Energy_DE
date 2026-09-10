@@ -133,10 +133,11 @@ def source_from_filename(filename: str) -> str:
 
     The match is case-insensitive, so 'Bioenergy_V20260203.gpkg' maps to
     'bio', 'Energy_Storage_V20260203.gpkg' to 'storage', and so on.
+    Returns an empty string when the file name cannot be mapped.
     """
     match = re.search(FILENAME_PATTERN, filename, re.IGNORECASE)
     if not match:
-        raise ValueError(f"Cannot map filename {filename!r} to an energy source")
+        return ""
     return match.group(1).lower()
 
 
@@ -152,22 +153,19 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
     import geopandas as gpd
 
     engine = engine or get_engine()
-
-    try:
-        source = source_from_filename(file_path.name)
-    except ValueError as e:
-        log.error("Skipping %s: %s", file_path.name, e)
-        return ExtractionReport(
-            source=file_path.name, source_row_count=0, rows_loaded=0,
-            duplicates_dropped=0, properties_empty=0, errors=[str(e)],
-        )
-
-    report = ExtractionReport(source=source, source_row_count=0, rows_loaded=0, duplicates_dropped=0, properties_empty=0)
+    report = ExtractionReport(
+        source="", source_row_count=0, rows_loaded=0, duplicates_dropped=0, properties_empty=0
+    )
 
     t0 = time.perf_counter()
-    log.info("Extracting %s from %s", source, file_path.name)
-
     try:
+        source = source_from_filename(file_path.name)
+        if not source:
+            raise ValueError(f"Cannot map filename {file_path.name!r} to an energy source")
+        report.source = source
+
+        log.info("Extracting %s from %s", source, file_path.name)
+
         _ensure_schema(engine)
         t1 = time.perf_counter()
 
@@ -212,15 +210,17 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
         log.info("Verification done, time %.3fs", t7 - t6)
 
     except Exception as e:
+        if not report.source:
+            report.source = file_path.name
         report.errors.append(f"Extraction failed: {e}")
         log.exception("Extraction failed for %s", file_path.name)
 
     report.total_time = time.perf_counter() - t0
     if report.errors:
         for err in report.errors:
-            log.error("Extraction failed for %s: %s", source, err)
+            log.error("Extraction failed for %s: %s", report.source, err)
     else:
-        log.info("Extraction passed for %s (%d rows)", source, report.rows_loaded)
+        log.info("Extraction passed for %s (%d rows)", report.source, report.rows_loaded)
     log.info("Total time: %.3fs", report.total_time)
 
     return report
