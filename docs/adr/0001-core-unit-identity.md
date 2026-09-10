@@ -1,0 +1,5 @@
+# Core unit identity: natural key plus surrogate primary key
+
+The spec assigns `unit_id str` in staging and `unit_id int` in core, and requires incremental append-or-update. Inspection showed `reference_id` is unique within every loaded source file and globally across the six files, so we key identity on `(energy_source, reference_id)` as a unique constraint in core, backed by a surrogate integer primary key. Incremental loads upsert on the natural key. The 39 solar rows with no `reference_id` (Fraunhofer-sourced) get a synthetic hash key derived from `source + x/y + installed_capacity + commissioning_date`, flagged in `quality_checks` as `synthetic_identity`.
+
+Considered rejecting the surrogate and keeping a readable string key end-to-end, and full-rebuild-per-run; the spec's integer core key and the need for stable upsert semantics decided it.

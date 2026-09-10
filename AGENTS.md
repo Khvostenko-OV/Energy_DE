@@ -33,3 +33,17 @@ Gotchas:
 ## Verification
 No tests, linters, or formatters exist yet. A sensible first milestone: get the Extract stage
 reading a `.gpkg` into a GeoDataFrame inside the venv and print the schema of `data_descriptor` columns.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` at the repo root, ADRs in `docs/adr/`. See `docs/agents/domain.md`.

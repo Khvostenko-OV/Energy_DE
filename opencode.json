@@ -5,6 +5,7 @@
     "bash": {
       "*": "ask",
       "ls *": "allow",
+      "echo *": "allow",
       "python *": "allow",
       "git status *": "allow",
       "git diff *": "allow",
@@ -16,6 +17,7 @@
       "gh issue view *": "allow",
       "gh issue create *": "allow",
       "gh repo view *": "allow",
+      "gh label *": "allow",
       "npm *": "ask",
       "rm *": "deny",
       "sudo *": "deny",
