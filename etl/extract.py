@@ -32,16 +32,8 @@ RAW_COLUMNS = [
     "geometry",
 ]
 
-SOURCES = {
-    "bio": {"energy_source": "Bio"},
-    "gas": {
-        "energy_source": "Gas",
-        "column_mapping": {"gas_production_capacity": "installed_capacity"},
-    },
-    "hydro": {"energy_source": "Hydro"},
-    "solar": {"energy_source": "Solar"},
-    "wind": {"energy_source": "Wind"},
-    "storage": {"energy_source": "Storage"},
+COLUMN_MAPPING = {
+    "gas": {"gas_production_capacity": "installed_capacity"},
 }
 
 
@@ -170,7 +162,6 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
             duplicates_dropped=0, properties_empty=0, errors=[str(e)],
         )
 
-    config = SOURCES[source]
     report = ExtractionReport(source=source, source_row_count=0, rows_loaded=0, duplicates_dropped=0, properties_empty=0)
 
     t0 = time.perf_counter()
@@ -186,10 +177,10 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
         t2 = time.perf_counter()
         log.info("%d rows loaded, time %.3fs", len(df), t2 - t1)
 
-        for old, new in config.get("column_mapping", {}).items():
+        for old, new in COLUMN_MAPPING.get(source, {}).items():
             df = df.rename(columns={old: new})
 
-        df["energy_source"] = config["energy_source"]
+        df["energy_source"] = source
 
         log.info("Casting types...")
         _cast_types(df)
