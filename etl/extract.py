@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
+from typing import Iterable
 
+import numpy
 import pandas
-from sqlalchemy import text
+from geoalchemy2 import Geometry
+from sqlalchemy import Date, DateTime, Float, Integer, String, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
@@ -30,45 +36,120 @@ RAW_COLUMNS = [
     "geo_accuracy",
     "reference_id",
     "reference_date",
-    "geometry",
 ]
 
 COLUMN_MAPPING = {
     "gas": {"gas_production_capacity": "installed_capacity"},
 }
 
+UNIT_COLUMN_TYPES = [
+    ("energy_source", "TEXT"),
+    ("installed_capacity", "DOUBLE PRECISION"),
+    ("commissioning_date", "DATE"),
+    ("decommissioning_date", "DATE"),
+    ("storage_type", "TEXT"),
+    ("storage_capacity", "DOUBLE PRECISION"),
+    ("x_coordinates", "DOUBLE PRECISION"),
+    ("y_coordinates", "DOUBLE PRECISION"),
+    ("geo_accuracy", "BIGINT"),
+    ("reference_id", "TEXT"),
+    ("reference_date", "TIMESTAMP"),
+    ("secondary_attributes", "JSONB"),
+]
+
+BOUNDARY_FILE_LEVELS = {
+    "boundary": 0,
+    "regions": 1,
+    "districts": 2,
+    "munis": 3,
+}
+
 
 @dataclass
 class ExtractionReport:
-    """Result of an extract stage run: row counts, timing and verification outcome."""
+    """Result of one unit source extract: counts, version and verification outcome."""
 
-    source: str
-    source_row_count: int
-    rows_loaded: int
-    duplicates_dropped: int
-    properties_empty: int
+    source: str = ""
+    source_row_count: int = 0
+    rows_loaded: int = 0
+    duplicates_dropped: int = 0
+    attributes_empty: int = 0
+    loaded_to: str | None = None
+    skipped: bool = False
     errors: list[str] = field(default_factory=list)
     total_time: float = 0.0
 
     @property
     def passed(self) -> bool:
-        """True if the extraction completed without errors."""
+        """True if the extract completed without errors (a skip is also a pass)."""
         return not self.errors
 
     def summary(self) -> str:
-        """Render the report as a human-readable summary string."""
         lines = [
             f"  Source file rows : {self.source_row_count}",
             f"  Rows loaded      : {self.rows_loaded}",
             f"  Duplicates dropped: {self.duplicates_dropped}",
-            f"  Properties empty : {self.properties_empty}",
-            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
+            f"  Empty attributes  : {self.attributes_empty}",
+            f"  Loaded to        : {self.loaded_to or '-'}",
+            f"  Status           : {'SKIPPED (already loaded)' if self.skipped else ('PASS' if self.passed else 'FAIL')}",
             f"  Total time       : {self.total_time:.3f}s",
         ]
         if self.errors:
             for e in self.errors:
                 lines.append(f"  ERROR: {e}")
         return "\n".join(lines)
+
+
+@dataclass
+class BoundariesReport:
+    """Result of the boundary reference-data load."""
+
+    loaded: bool = False
+    rows_by_level: dict[int, int] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def passed(self) -> bool:
+        return not self.errors
+
+    def summary(self) -> str:
+        lines = [
+            f"  Loaded           : {'yes' if self.loaded else 'no (already present or error)'}",
+            "  Rows by level    : " + (", ".join(f"{k}={v}" for k, v in sorted(self.rows_by_level.items())) or "-"),
+            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
+        ]
+        if self.errors:
+            for e in self.errors:
+                lines.append(f"  ERROR: {e}")
+        return "\n".join(lines)
+
+
+def _unit_dtype() -> dict:
+    return {
+        "energy_source": String,
+        "installed_capacity": Float,
+        "commissioning_date": Date,
+        "decommissioning_date": Date,
+        "storage_type": String,
+        "storage_capacity": Float,
+        "x_coordinates": Float,
+        "y_coordinates": Float,
+        "geo_accuracy": Integer,
+        "reference_id": String,
+        "reference_date": DateTime,
+        "secondary_attributes": JSONB,
+        "geometry": Geometry(geometry_type="POINT", srid=4326),
+    }
+
+
+def _boundaries_dtype() -> dict:
+    return {
+        "country_iso": String,
+        "name": String,
+        "level": Integer,
+        "area": Float,
+        "geometry": Geometry(geometry_type="MULTIPOLYGON", srid=4326),
+    }
 
 
 def _ensure_schema(engine: Engine) -> None:
@@ -78,12 +159,157 @@ def _ensure_schema(engine: Engine) -> None:
         conn.commit()
 
 
+def _create_log_table(engine: Engine) -> None:
+    """Create the append-only loaded_files log if it does not exist."""
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS {RAW_SCHEMA}.loaded_files (
+                    filename    TEXT,
+                    filesize    BIGINT,
+                    modified_at TIMESTAMPTZ,
+                    loaded_at   TIMESTAMPTZ,
+                    loaded_to   TEXT
+                )
+                """
+            )
+        )
+        conn.commit()
+
+
+def _create_boundaries_table(engine: Engine) -> None:
+    """Create the non-versioned boundaries reference table if it does not exist."""
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE IF NOT EXISTS {RAW_SCHEMA}.boundaries (
+                    country_iso TEXT,
+                    name        TEXT,
+                    level       INT,
+                    area        DOUBLE PRECISION,
+                    geometry    geometry(MultiPolygon,4326)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"CREATE INDEX IF NOT EXISTS idx_boundaries_geometry "
+                f"ON {RAW_SCHEMA}.boundaries USING GIST (geometry)"
+            )
+        )
+        conn.commit()
+
+
+def _create_versioned_table(engine: Engine, table_name: str) -> None:
+    """Create one versioned raw unit table with the canonical column set."""
+    columns = ",\n    ".join(f"{name} {typ}" for name, typ in UNIT_COLUMN_TYPES)
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                f"CREATE TABLE {RAW_SCHEMA}.{table_name} (\n    {columns},\n"
+                f"    geometry geometry(Point,4326)\n)"
+            )
+        )
+        conn.execute(
+            text(
+                f"CREATE INDEX idx_{table_name}_geometry "
+                f"ON {RAW_SCHEMA}.{table_name} USING GIST (geometry)"
+            )
+        )
+        conn.commit()
+
+
+def _existing_raw_tables(engine: Engine) -> set[str]:
+    """Return the names of all tables currently in the raw schema."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = :schema"
+            ),
+            {"schema": RAW_SCHEMA},
+        ).fetchall()
+        return {r[0] for r in rows}
+
+
+def _next_version_table(existing_tables: Iterable[str], source: str, day: date) -> str:
+    """Compute the next versioned table name for a source on a given day.
+
+    Versions follow raw.<source>_<YYYYMMDD>_<n> with a per-source counter that
+    resets daily: the largest existing counter for the day is incremented,
+    starting at 1 when none exists.
+    """
+    prefix = f"{source}_{day:%Y%m%d}_"
+    counters = []
+    for name in existing_tables:
+        if name.startswith(prefix) and name[len(prefix):].isdigit():
+            counters.append(int(name[len(prefix):]))
+    return f"{prefix}{max(counters, default=0) + 1}"
+
+
+def _is_logged(engine: Engine, signature: tuple[str, int, float]) -> bool:
+    """True if the (filename, filesize, modified_at) load signature is logged."""
+    filename, filesize, modified_at = signature
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                f"SELECT 1 FROM {RAW_SCHEMA}.loaded_files "
+                "WHERE filename = :filename AND filesize = :filesize "
+                "AND modified_at = to_timestamp(:modified_at) LIMIT 1"
+            ),
+            {"filename": filename, "filesize": filesize, "modified_at": modified_at},
+        ).first()
+        return row is not None
+
+
+def _log_load(
+    engine: Engine, filename: str, filesize: int, modified_at: float, loaded_to: str
+) -> None:
+    """Append one row to loaded_files recording a completed load action."""
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO {RAW_SCHEMA}.loaded_files "
+                "(filename, filesize, modified_at, loaded_at, loaded_to) "
+                "VALUES (:filename, :filesize, to_timestamp(:modified_at), now(), :loaded_to)"
+            ),
+            {
+                "filename": filename,
+                "filesize": filesize,
+                "modified_at": modified_at,
+                "loaded_to": loaded_to,
+            },
+        )
+        conn.commit()
+
+
+def _drop_unlogged_table(engine: Engine, table_name: str | None) -> None:
+    """Drop a versioned table that was created but never logged.
+
+    A failed load must not leave a dead, unlogged version permanently in the
+    datalake (the next run would otherwise count it toward the version
+    counter). Successful, logged versions are never dropped.
+    """
+    if not table_name:
+        return
+    try:
+        with engine.connect() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {RAW_SCHEMA}.{table_name}"))
+            conn.commit()
+        log.warning("Dropped unlogged version table %s.%s after failed load", RAW_SCHEMA, table_name)
+    except Exception as e:
+        log.warning("Failed to drop unlogged version table %s.%s: %s", RAW_SCHEMA, table_name, e)
+
+
 def _cast_types(df: pandas.DataFrame) -> None:
     """Cast columns to the raw shape in place.
 
     Commissioning and decommissioning dates keep the day resolution of the
     source data; reference_date keeps its full timestamp including the time
-    of day.
+    of day (the incremental-load freshness gate downstream).
     """
     for col in ("commissioning_date", "decommissioning_date"):
         if col in df.columns:
@@ -99,6 +325,8 @@ def _cast_types(df: pandas.DataFrame) -> None:
     df["x_coordinates"] = df["x_coordinates"].astype("Float64")
     df["y_coordinates"] = df["y_coordinates"].astype("Float64")
     df["geo_accuracy"] = df["geo_accuracy"].astype("Int64")
+    if "storage_capacity" in df.columns:
+        df["storage_capacity"] = df["storage_capacity"].astype("Float64")
 
 
 def _drop_duplicate_reference_ids(df: pandas.DataFrame) -> int:
@@ -114,19 +342,30 @@ def _drop_duplicate_reference_ids(df: pandas.DataFrame) -> int:
     return before - len(df)
 
 
-def _build_properties(df: pandas.DataFrame) -> int:
-    """Fold secondary attributes into a properties dictionary column.
+def _json_default(value: object) -> object:
+    """Convert numpy scalars to native types so secondary attributes stay valid JSON."""
+    if isinstance(value, (numpy.integer, numpy.floating)):
+        return value.item()
+    return str(value)
 
-    All columns outside RAW_COLUMNS are collapsed into a per-row dictionary,
-    dropping null/empty values. Returns the count of rows whose properties
-    dictionary is empty.
+
+def _build_secondary_attributes(df: pandas.DataFrame) -> int:
+    """Fold secondary attributes into a jsonb-ready column and serialize it.
+
+    All columns outside RAW_COLUMNS (and the geometry) are collapsed into a
+    per-row JSON document, dropping null/empty values. Returns the count of
+    rows whose document is empty.
     """
-    props_cols = [c for c in df.columns if c not in RAW_COLUMNS]
-    df["properties"] = df[props_cols].apply(
+    attr_cols = [c for c in df.columns if c not in set(RAW_COLUMNS) and c not in ("geometry", "secondary_attributes")]
+    df["secondary_attributes"] = df[attr_cols].apply(
         lambda row: {k: v for k, v in row.items() if not pandas.isna(v)},
         axis=1,
     )
-    return int((df["properties"].apply(len) == 0).sum())
+    empty = int((df["secondary_attributes"].apply(len) == 0).sum())
+    df["secondary_attributes"] = df["secondary_attributes"].apply(
+        lambda d: json.dumps(d, default=_json_default)
+    )
+    return empty
 
 
 def source_from_filename(filename: str) -> str:
@@ -142,21 +381,38 @@ def source_from_filename(filename: str) -> str:
     return match.group(1).lower()
 
 
-def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionReport:
-    """Extract one unit source GPKG into its raw table.
+def boundary_level_from_filename(filename: str) -> int | None:
+    """Map a boundary file name to its administrative level (0-3).
 
-    The energy source is derived from the file name via regex. Applies the
-    source's column renames, sets the canonical energy_source, casts dates
-    and numerics, drops duplicate reference_ids, folds secondary attributes
-    into properties, writes the table to PostGIS and verifies it against the
-    loaded counts and key uniqueness. Returns an ExtractionReport.
+    'germany_boundary.gpkg' -> 0 (country outline), 'germany_regions.gpkg'
+    -> 1 (regions + EEZ), 'germany_districts.gpkg' -> 2 (districts),
+    'germany_munis.gpkg' -> 3 (municipalities). Returns None for files that
+    are not boundary files.
+    """
+    stem = Path(filename).stem
+    if not stem.startswith("germany_"):
+        return None
+    return BOUNDARY_FILE_LEVELS.get(stem[len("germany_"):])
+
+
+def extract_source(
+    file_path: Path, engine: Engine | None = None, force: bool = False
+) -> ExtractionReport:
+    """Extract one unit source GPKG into a new versioned raw table.
+
+    The energy source is derived from the file name. If the file's load
+    signature (filename, filesize, modified_at) is already logged it is
+    skipped unless force is set, in which case a new version is appended
+    alongside a new loaded_files row. Each successful load writes
+    raw.<source>_<YYYYMMDD>_<n> and verifies counts and reference_id
+    uniqueness against the stored table.
     """
     import geopandas as gpd
 
-    report = ExtractionReport(
-        source="", source_row_count=0, rows_loaded=0, duplicates_dropped=0, properties_empty=0
-    )
-
+    report = ExtractionReport()
+    table_created = False
+    log_row_written = False
+    created_table: str | None = None
     t0 = time.perf_counter()
     try:
         engine = engine or get_engine()
@@ -169,56 +425,90 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
         log.info("Extracting %s from %s", source, file_path.name)
 
         _ensure_schema(engine)
-        t1 = time.perf_counter()
+        _create_log_table(engine)
 
-        log.info("Reading %s...", file_path.name)
-        df = gpd.read_file(file_path)
-        report.source_row_count = len(df)
-        t2 = time.perf_counter()
-        log.info("%d rows loaded, time %.3fs", len(df), t2 - t1)
+        stat = file_path.stat()
+        signature = (file_path.name, stat.st_size, stat.st_mtime)
 
-        for old, new in COLUMN_MAPPING.get(source, {}).items():
-            df = df.rename(columns={old: new})
+        if _is_logged(engine, signature) and not force:
+            report.skipped = True
+            log.info("Skipping %s: already loaded", file_path.name)
+        else:
+            if force and _is_logged(engine, signature):
+                log.info("Force reload requested for %s", file_path.name)
 
-        df["energy_source"] = source
+            t1 = time.perf_counter()
+            log.info("Reading %s...", file_path.name)
+            df = gpd.read_file(file_path)
+            report.source_row_count = len(df)
+            t2 = time.perf_counter()
+            log.info("%d rows loaded, time %.3fs", len(df), t2 - t1)
 
-        log.info("Casting types...")
-        _cast_types(df)
-        t3 = time.perf_counter()
-        log.info("Type casting done, time %.3fs", t3 - t2)
+            for old, new in COLUMN_MAPPING.get(source, {}).items():
+                df = df.rename(columns={old: new})
 
-        log.info("Dropping duplicates...")
-        report.duplicates_dropped = _drop_duplicate_reference_ids(df)
-        t4 = time.perf_counter()
-        log.info("%d duplicates removed, %d remaining, time %.3fs", report.duplicates_dropped, len(df), t4 - t3)
+            df["energy_source"] = source
 
-        log.info("Building properties...")
-        report.properties_empty = _build_properties(df)
-        t5 = time.perf_counter()
-        log.info("%d empty properties, time %.3fs", report.properties_empty, t5 - t4)
+            log.info("Casting types...")
+            _cast_types(df)
+            t3 = time.perf_counter()
+            log.info("Type casting done, time %.3fs", t3 - t2)
 
-        cols_to_keep = [c for c in RAW_COLUMNS if c in df.columns] + ["properties"]
-        df = df[cols_to_keep]
+            log.info("Dropping duplicates...")
+            report.duplicates_dropped = _drop_duplicate_reference_ids(df)
+            t4 = time.perf_counter()
+            log.info(
+                "%d duplicates removed, %d remaining, time %.3fs",
+                report.duplicates_dropped, len(df), t4 - t3,
+            )
 
-        log.info("Writing to PostGIS (%s)...", source)
-        df.to_postgis(source, engine, schema=RAW_SCHEMA, if_exists="replace", index=False)
-        report.rows_loaded = len(df)
-        t6 = time.perf_counter()
-        log.info("%d rows written, time %.3fs", report.rows_loaded, t6 - t5)
+            log.info("Building secondary attributes...")
+            report.attributes_empty = _build_secondary_attributes(df)
+            t5 = time.perf_counter()
+            log.info("%d empty attributes, time %.3fs", report.attributes_empty, t5 - t4)
 
-        log.info("Verifying extraction...")
-        report.errors = _verify_extraction(engine, source, report)
-        t7 = time.perf_counter()
-        log.info("Verification done, time %.3fs", t7 - t6)
+            keep_cols = [c for c in RAW_COLUMNS if c in df.columns] + [
+                "geometry",
+                "secondary_attributes",
+            ]
+            df = df[keep_cols]
+
+            table_name = _next_version_table(
+                _existing_raw_tables(engine), source, date.today()
+            )
+            log.info("Writing to %s.%s ...", RAW_SCHEMA, table_name)
+            _create_versioned_table(engine, table_name)
+            table_created = True
+            created_table = table_name
+            df.to_postgis(
+                table_name, engine, schema=RAW_SCHEMA, if_exists="append",
+                index=False, dtype=_unit_dtype(),
+            )
+            report.loaded_to = table_name
+            report.rows_loaded = len(df)
+            t6 = time.perf_counter()
+            log.info("%d rows written, time %.3fs", report.rows_loaded, t6 - t5)
+
+            _log_load(engine, file_path.name, stat.st_size, stat.st_mtime, table_name)
+            log_row_written = True
+
+            log.info("Verifying extraction...")
+            report.errors = _verify_extraction(engine, table_name, report)
+            t7 = time.perf_counter()
+            log.info("Verification done, time %.3fs", t7 - t6)
 
     except Exception as e:
         if not report.source:
             report.source = file_path.name
         report.errors.append(f"Extraction failed: {e}")
+        if table_created and not log_row_written and engine is not None:
+            _drop_unlogged_table(engine, created_table)
         log.exception("Extraction failed for %s", file_path.name)
 
     report.total_time = time.perf_counter() - t0
-    if report.errors:
+    if report.skipped:
+        log.info("Skipped %s (already loaded)", file_path.name)
+    elif report.errors:
         for err in report.errors:
             log.error("Extraction failed for %s: %s", report.source, err)
     else:
@@ -228,36 +518,164 @@ def extract_source(file_path: Path, engine: Engine | None = None) -> ExtractionR
     return report
 
 
-def _verify_extraction(engine: Engine, source: str, report: ExtractionReport) -> list[str]:
-    """Verify the raw.<source> table against the extraction report.
+def _verify_extraction(engine: Engine, table_name: str, report: ExtractionReport) -> list[str]:
+    """Verify the loaded versioned table against the extraction report.
 
-    Checks the loaded count is consistent with the pre-dedupe source rows,
-    matches the number of rows written to the table, and that no non-null
-    reference_id appears more than once in the stored table. Returns a list
-    of error strings, empty if verification passes.
+    Checks the loaded count is consistent with the pre-dedupe source rows and
+    matches the number of rows stored, and that no non-null reference_id
+    appears more than once in the stored table. Returns a list of error
+    strings, empty if verification passes.
     """
     errors: list[str] = []
-    if report.rows_loaded != report.source_row_count - report.duplicates_dropped:
+    expected = report.source_row_count - report.duplicates_dropped
+    if report.rows_loaded != expected:
         errors.append(
-            f"Row count mismatch: loaded {report.rows_loaded}, expected {report.source_row_count - report.duplicates_dropped}"
+            f"Row count mismatch: loaded {report.rows_loaded}, expected {expected}"
         )
 
     with engine.connect() as conn:
         row = conn.execute(
-            text(f"SELECT COUNT(*) FROM {RAW_SCHEMA}.{source}")
+            text(f"SELECT COUNT(*) FROM {RAW_SCHEMA}.{table_name}")
         ).scalar()
         if row != report.rows_loaded:
-            errors.append(f"Row count mismatch: expected {report.rows_loaded}, got {row}")
+            errors.append(
+                f"Row count mismatch in {table_name}: expected {report.rows_loaded}, got {row}"
+            )
 
-        row = conn.execute(
+        dups = conn.execute(
             text(
                 f"SELECT COUNT(*) FROM ("
-                f"SELECT reference_id FROM {RAW_SCHEMA}.{source} "
+                f"SELECT reference_id FROM {RAW_SCHEMA}.{table_name} "
                 f"WHERE reference_id IS NOT NULL "
-                f"GROUP BY reference_id HAVING COUNT(*) > 1) dups"
+                f"GROUP BY reference_id HAVING COUNT(*) > 1) d"
             )
         ).scalar()
-        if row > 0:
-            errors.append(f"Duplicate reference_ids found: {row}")
+        if dups > 0:
+            errors.append(f"Duplicate reference_ids found in {table_name}: {dups}")
+
+    return errors
+
+
+def extract_boundaries(data_dir: Path, engine: Engine | None = None) -> BoundariesReport:
+    """Load germany_*.gpkg boundary files into raw.boundaries if it is empty.
+
+    Levels are mapped from the file name; area is computed in km² via PostGIS.
+    Boundaries are reference data: never versioned and never tracked in
+    loaded_files. A complete table (all levels present) is skipped; a partial
+    one is topped up with whichever levels are missing, so an interrupted
+    earlier run heals itself on the next run.
+    """
+    import geopandas as gpd
+
+    report = BoundariesReport()
+    try:
+        engine = engine or get_engine()
+        _ensure_schema(engine)
+        _create_boundaries_table(engine)
+
+        with engine.connect() as conn:
+            present_levels = {
+                row[0]
+                for row in conn.execute(
+                    text(f"SELECT DISTINCT level FROM {RAW_SCHEMA}.boundaries")
+                ).fetchall()
+            }
+
+        boundary_files = sorted(Path(data_dir).glob("germany_*.gpkg"))
+        pending: list[tuple[Path, int]] = []
+        for f in boundary_files:
+            level = boundary_level_from_filename(f.name)
+            if level is None:
+                log.warning("No boundary level mapping for %s; skipping", f.name)
+                continue
+            pending.append((f, level))
+
+        if all(level in present_levels for _, level in pending):
+            log.info(
+                "Boundaries already loaded (levels %s); skipping",
+                sorted(present_levels),
+            )
+            return report
+
+        for f, level in pending:
+            if level in present_levels:
+                log.info("Level %d already present; skipping %s", level, f.name)
+                continue
+            log.info("Loading %s as level %d", f.name, level)
+            gdf = gpd.read_file(f)
+            if "name" not in gdf.columns:
+                raise ValueError(f"{f.name} has no 'name' column")
+            out = gpd.GeoDataFrame(
+                {
+                    "country_iso": "DEU",
+                    "name": gdf["name"],
+                    "level": level,
+                    "area": 0.0,
+                },
+                geometry=gdf.geometry,
+                crs=gdf.crs,
+            )
+            out.to_postgis(
+                "boundaries", engine, schema=RAW_SCHEMA, if_exists="append",
+                index=False, dtype=_boundaries_dtype(),
+            )
+            report.rows_by_level[level] = len(out)
+
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    f"UPDATE {RAW_SCHEMA}.boundaries "
+                    f"SET area = ST_Area(geometry::geography) / 1e6"
+                )
+            )
+            conn.commit()
+        report.loaded = bool(report.rows_by_level)
+        report.errors = _verify_boundaries(engine)
+    except Exception as e:
+        report.errors.append(f"Boundary load failed: {e}")
+        log.exception("Boundary load failed")
+
+    return report
+
+
+def _verify_boundaries(engine: Engine) -> list[str]:
+    """Verify the boundaries table carries levels 0-3, one level-0 row, and areas."""
+    errors: list[str] = []
+    with engine.connect() as conn:
+        counts = dict(
+            conn.execute(
+                text(
+                    f"SELECT level, COUNT(*) FROM {RAW_SCHEMA}.boundaries "
+                    f"GROUP BY level ORDER BY level"
+                )
+            ).fetchall()
+        )
+        names = conn.execute(
+            text(
+                f"SELECT level, name FROM {RAW_SCHEMA}.boundaries "
+                f"ORDER BY level LIMIT 1"
+            )
+        )
+
+        for level in range(4):
+            if level not in counts:
+                errors.append(f"Boundaries missing level {level}")
+
+        if counts.get(0, 0) != 1:
+            errors.append(f"Expected exactly 1 country-outline row at level 0, got {counts.get(0)}")
+
+        bad_area = conn.execute(
+            text(
+                f"SELECT COUNT(*) FROM {RAW_SCHEMA}.boundaries "
+                f"WHERE area IS NULL OR area <= 0"
+            )
+        ).scalar()
+        if bad_area:
+            errors.append(f"{bad_area} boundaries have null or non-positive area")
+
+        if not errors:
+            levels = ", ".join(f"{k}:{counts[k]}" for k in sorted(counts))
+            level_names = ", ".join(f"{row[1]}" for row in names.fetchall())
+            log.info("Boundaries verified (%s rows; sample names: %s)", levels, level_names)
 
     return errors
