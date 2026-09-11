@@ -28,7 +28,7 @@ Gotchas:
 ## Conventions to follow
 - Where the spec and files conflict, the files/source datasets win — note the discrepancy rather than silently assuming.
 - Follow the spec's ETL stages exactly (extract → staging → core → marts), including normalized
-  `parameters` / `units_parameters` dimension tables and materialized views.
+  `properties` / `units_properties` dimension tables and the materialized-view marts.
 
 ## Verification
 No tests, linters, or formatters exist yet. A sensible first milestone: get the Extract stage

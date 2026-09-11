@@ -59,7 +59,7 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 - Insert into **storages** data from Units table storage (only good records)
 - Transfer primary keys for dimension tables
 - Create indexes
-- Quality check. Flag collisions, add property 'collision' with collisions descripion, 
+- Quality check. Flag collisions, add property 'collision' with collisions description, 
 add property 'close_to' with reference to close unit
   1. Close location. Distance between units < 10m (only if geo_accuracy=1)
   2. Onshore unit in the sea
@@ -67,8 +67,8 @@ add property 'close_to' with reference to close unit
 
 #### Incremental load 
 - Input: list of tables to be loaded
-- Append-or-update **generators** table with records from Units tables (use geometry, reference_date for update)
-- Append-or-update **storages** table with records from Units table storage (use geometry, reference_date for update)
+- Append-or-update **generators** table with records from Units tables (using reference_id, reference_date for update)
+- Append-or-update **storages** table with records from Units table storage (using reference_id, reference_date for update)
 - Transfer primary keys for dimension tables
 - Quality check
 
@@ -106,45 +106,45 @@ add property 'close_to' with reference to close unit
 | loaded_to   | str       |
 
 #### Units tables: bio, gas, hydro, solar, wind
-| Column                 | Data type | Description                                       |
-|------------------------|-----------|---------------------------------------------------|
-| energy_source          | str       | Type of unit (bio, gas, hydro, solar, wind)       |
-| installed_capacity     | float     | Kilowatt (kW)                                     |
-| commissioning_date     | date      | Commissioning date of the system                  |
-| decommissioning_date   | date      | Decommissioning date of the system                |
-| x_coordinates          | float     | Longitude WGS-84                                  |
-| y_coordinates          | float     | Latitude WGS-84                                   |
-| geo_accuracy           | int       | 1/2                                               |
-| reference_id           | str       | Reference id of the record in the original source |
-| reference_date         | timestamp | Timestamp of the record in the original source    |
-| geometry               | point     | WGS-84                                            |
-| properties             | json      | Dictionary of secondary attributes                |
+| Column               | Data type | Description                                       |
+|----------------------|-----------|---------------------------------------------------|
+| energy_source        | str       | Type of unit (bio, gas, hydro, solar, wind)       |
+| installed_capacity   | float     | Kilowatt (kW)                                     |
+| commissioning_date   | date      | Commissioning date of the system                  |
+| decommissioning_date | date      | Decommissioning date of the system                |
+| x_coordinates        | float     | Longitude WGS-84                                  |
+| y_coordinates        | float     | Latitude WGS-84                                   |
+| geo_accuracy         | int       | 1/2                                               |
+| reference_id         | str       | Reference id of the record in the original source |
+| reference_date       | timestamp | Timestamp of the record in the original source    |
+| geometry             | point     | WGS-84                                            |
+| secondary_attributes | jsonb     | Dictionary of secondary attributes                |
 
 #### Units table: storage
-| Column               | Data type | Description                                        |
-|----------------------|-----------|----------------------------------------------------|
-| energy_source        | str       | Type of unit (storage)                             |
-| installed_capacity   | float     | Kilowatt (kW)                                      |
-| commissioning_date   | date      | Commissioning date of the system                   |
-| decommissioning_date | date      | Decommissioning date of the system                 |
-| storage_type         | str       | Type of energy storage system                      |
-| storage_capacity     | float     | Usable energy storage capacity Kilowatt-hour (kWh) |
-| x_coordinates        | float     | Longitude WGS-84                                   |
-| y_coordinates        | float     | Latitude WGS-84                                    |
-| geo_accuracy         | int       | 1/2                                                |
-| reference_id         | str       | Reference id of the record in the original source  |
-| reference_date       | date      | Timestamp of the record in the original source     |
-| geometry             | point     | WGS-84                                             |
-| properties           | json      | Dictionary of secondary attributes                 |
+| Column                | Data type | Description                                        |
+|-----------------------|-----------|----------------------------------------------------|
+| energy_source         | str       | Type of unit (storage)                             |
+| installed_capacity    | float     | Kilowatt (kW)                                      |
+| commissioning_date    | date      | Commissioning date of the system                   |
+| decommissioning_date  | date      | Decommissioning date of the system                 |
+| storage_type          | str       | Type of energy storage system                      |
+| storage_capacity      | float     | Usable energy storage capacity Kilowatt-hour (kWh) |
+| x_coordinates         | float     | Longitude WGS-84                                   |
+| y_coordinates         | float     | Latitude WGS-84                                    |
+| geo_accuracy          | int       | 1/2                                                |
+| reference_id          | str       | Reference id of the record in the original source  |
+| reference_date        | date      | Timestamp of the record in the original source     |
+| geometry              | point     | WGS-84                                             |
+| secondary_attributes  | jsonb     | Dictionary of secondary attributes                 |
 
 #### boundaries
-| Column           | Data type | Description                                         |
-|------------------|-----------|-----------------------------------------------------|
-| country_iso      | str       | DEU                                                 |
-| name             | str       | name of area                                        |
-| level            | int       | Administrative level 0 - county,..,3 - municipality |
-| area             | float     | km2                                                 |
-| geometry         | point     | WGS-84                                              |
+| Column           | Data type    | Description                                         |
+|------------------|--------------|-----------------------------------------------------|
+| country_iso      | str          | DEU                                                 |
+| name             | str          | name of area                                        |
+| level            | int          | Administrative level 0 - county,..,3 - municipality |
+| area             | float        | km2                                                 |
+| geometry         | multipolygon | WGS-84                                              |
 
 
 ### 2. Staging
@@ -164,7 +164,7 @@ add property 'close_to' with reference to close unit
 | region               | str       | Bundesland / Sea                                  |
 | district             | str       | Landkreis                                         |
 | municipality         | str       | Gemeinde                                          |
-| bad_quality          | bool      | flag bad quality record                           |
+| bad_quality          | bool      | Flag bad quality record                           |
 
 #### Units table: storage
 | Column               | Data type | Description                                        |
@@ -183,17 +183,17 @@ add property 'close_to' with reference to close unit
 | region               | str       | Bundesland / Sea                                   |
 | district             | str       | Landkreis                                          |
 | municipality         | str       | Gemeinde                                           |
-| bad_quality          | bool      | flag bad quality record                            |
+| bad_quality          | bool      | Flag bad quality record                            |
 
 ### Dimension tables (normalized, one set for each Unit table)
-#### parameters
+#### properties
 | Column        | Data type |
 |---------------|-----------|
 | param_id      | int pk    |
 | name          | str       |
 | value         | str       |
 | (name, value) | unique    |
-#### units_parameters
+#### units_properties
 | Column              | Data type |
 |---------------------|-----------|
 | unit_id             | int fk    |
@@ -217,6 +217,7 @@ add property 'close_to' with reference to close unit
 | region               | str       | Bundesland / Sea                                  |
 | district             | str       | Landkreis                                         |
 | municipality         | str       | Gemeinde                                          |
+| collision            | bool      | Flag collisions                                    |
 
 #### storages
 | Column               | Data type | Description                                        |
@@ -235,16 +236,17 @@ add property 'close_to' with reference to close unit
 | region               | str       | Bundesland / Sea                                   |
 | district             | str       | Landkreis                                          |
 | municipality         | str       | Gemeinde                                           |
+| collision            | bool      | Flag collisions                                    |
 
 ### Dimension tables (double set)
-#### parameters
+#### properties
 | Column        | Data type |
 |---------------|-----------|
 | param_id      | int pk    |
 | name          | str       |
 | value         | str       |
 | (name, value) | unique    |
-#### units_parameters
+#### units_properties
 | Column              | Data type |
 |---------------------|-----------|
 | unit_id             | int fk    |
