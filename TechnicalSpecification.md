@@ -39,7 +39,7 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 - Convert secondary properties to dictionary, place it to column 'properties'
 - Save to PostGIS datalake. Table names should contain source type, date of load, number of load
 #### Load administrative and maritime boundaries
-- Load .gpkg files with boundaries into table **boundaries** if not exist
+- Load .gpkg files with boundaries into table **boundaries**
 ### 2. Transform
 - Input: list of tables to be transformed
 - Add primary keys
@@ -118,7 +118,7 @@ add property 'close_to' with reference to close unit
 | reference_id         | str       | Reference id of the record in the original source |
 | reference_date       | timestamp | Timestamp of the record in the original source    |
 | geometry             | point     | WGS-84                                            |
-| secondary_attributes | jsonb     | Dictionary of secondary attributes                |
+| secondary_attributes | text      | Dictionary of secondary attributes                |
 
 #### Units table: storage
 | Column                | Data type | Description                                        |
@@ -135,7 +135,7 @@ add property 'close_to' with reference to close unit
 | reference_id          | str       | Reference id of the record in the original source  |
 | reference_date        | date      | Timestamp of the record in the original source     |
 | geometry              | point     | WGS-84                                             |
-| secondary_attributes  | jsonb     | Dictionary of secondary attributes                 |
+| secondary_attributes  | text      | Dictionary of secondary attributes                 |
 
 #### boundaries
 | Column           | Data type    | Description                                         |
