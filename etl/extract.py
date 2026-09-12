@@ -180,7 +180,7 @@ def extract_boundaries(manifest: Path) -> BoundariesReport:
                 raise ValueError(f"{filename} has no 'name' column")
 
             out = gdf.rename(columns=BOUNDARY_COLUMN_MAPPING)
-            drop = [c for c in out.columns if c not in BOUNDARY_RAW_COLUMNS and c != "geometry"]
+            drop = [c for c in out.columns if c not in BOUNDARY_RAW_COLUMNS]
             out = out.drop(columns=drop)
             out["level"] = level
             out["area"] = 0.0

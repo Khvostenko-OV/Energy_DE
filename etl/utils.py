@@ -44,7 +44,7 @@ BOUNDARY_FILE_LEVELS = {
 
 BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
-BOUNDARY_RAW_COLUMNS = ("country_iso", "name")
+BOUNDARY_RAW_COLUMNS = ("country_iso", "name", "geometry")
 
 
 @dataclass
