@@ -12,7 +12,7 @@ from typing import Iterable
 import numpy
 import pandas
 from geoalchemy2 import Geometry
-from sqlalchemy import Date, DateTime, Float, Integer, String, text
+from sqlalchemy import Float, Integer, String, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 
@@ -41,21 +41,6 @@ RAW_COLUMNS = [
 COLUMN_MAPPING = {
     "gas": {"gas_production_capacity": "installed_capacity"},
 }
-
-UNIT_COLUMN_TYPES = [
-    ("energy_source", "TEXT"),
-    ("installed_capacity", "DOUBLE PRECISION"),
-    ("commissioning_date", "DATE"),
-    ("decommissioning_date", "DATE"),
-    ("storage_type", "TEXT"),
-    ("storage_capacity", "DOUBLE PRECISION"),
-    ("x_coordinates", "DOUBLE PRECISION"),
-    ("y_coordinates", "DOUBLE PRECISION"),
-    ("geo_accuracy", "BIGINT"),
-    ("reference_id", "TEXT"),
-    ("reference_date", "TIMESTAMP"),
-    ("secondary_attributes", "JSONB"),
-]
 
 BOUNDARY_FILE_LEVELS = {
     "boundary": 0,
@@ -124,24 +109,6 @@ class BoundariesReport:
         return "\n".join(lines)
 
 
-def _unit_dtype() -> dict:
-    return {
-        "energy_source": String,
-        "installed_capacity": Float,
-        "commissioning_date": Date,
-        "decommissioning_date": Date,
-        "storage_type": String,
-        "storage_capacity": Float,
-        "x_coordinates": Float,
-        "y_coordinates": Float,
-        "geo_accuracy": Integer,
-        "reference_id": String,
-        "reference_date": DateTime,
-        "secondary_attributes": JSONB,
-        "geometry": Geometry(geometry_type="POINT", srid=4326),
-    }
-
-
 def _boundaries_dtype() -> dict:
     return {
         "country_iso": String,
@@ -198,25 +165,6 @@ def _create_boundaries_table(engine: Engine) -> None:
             text(
                 f"CREATE INDEX IF NOT EXISTS idx_boundaries_geometry "
                 f"ON {RAW_SCHEMA}.boundaries USING GIST (geometry)"
-            )
-        )
-        conn.commit()
-
-
-def _create_versioned_table(engine: Engine, table_name: str) -> None:
-    """Create one versioned raw unit table with the canonical column set."""
-    columns = ",\n    ".join(f"{name} {typ}" for name, typ in UNIT_COLUMN_TYPES)
-    with engine.connect() as conn:
-        conn.execute(
-            text(
-                f"CREATE TABLE {RAW_SCHEMA}.{table_name} (\n    {columns},\n"
-                f"    geometry geometry(Point,4326)\n)"
-            )
-        )
-        conn.execute(
-            text(
-                f"CREATE INDEX idx_{table_name}_geometry "
-                f"ON {RAW_SCHEMA}.{table_name} USING GIST (geometry)"
             )
         )
         conn.commit()
@@ -284,24 +232,6 @@ def _log_load(
             },
         )
         conn.commit()
-
-
-def _drop_unlogged_table(engine: Engine, table_name: str | None) -> None:
-    """Drop a versioned table that was created but never logged.
-
-    A failed load must not leave a dead, unlogged version permanently in the
-    datalake (the next run would otherwise count it toward the version
-    counter). Successful, logged versions are never dropped.
-    """
-    if not table_name:
-        return
-    try:
-        with engine.connect() as conn:
-            conn.execute(text(f"DROP TABLE IF EXISTS {RAW_SCHEMA}.{table_name}"))
-            conn.commit()
-        log.warning("Dropped unlogged version table %s.%s after failed load", RAW_SCHEMA, table_name)
-    except Exception as e:
-        log.warning("Failed to drop unlogged version table %s.%s: %s", RAW_SCHEMA, table_name, e)
 
 
 def _cast_types(df: pandas.DataFrame) -> None:
@@ -410,9 +340,6 @@ def extract_source(
     import geopandas as gpd
 
     report = ExtractionReport()
-    table_created = False
-    log_row_written = False
-    created_table: str | None = None
     t0 = time.perf_counter()
     try:
         engine = engine or get_engine()
@@ -477,12 +404,9 @@ def extract_source(
                 _existing_raw_tables(engine), source, date.today()
             )
             log.info("Writing to %s.%s ...", RAW_SCHEMA, table_name)
-            _create_versioned_table(engine, table_name)
-            table_created = True
-            created_table = table_name
             df.to_postgis(
-                table_name, engine, schema=RAW_SCHEMA, if_exists="append",
-                index=False, dtype=_unit_dtype(),
+                table_name, engine, schema=RAW_SCHEMA, if_exists="fail",
+                index=False, dtype={"secondary_attributes": JSONB},
             )
             report.loaded_to = table_name
             report.rows_loaded = len(df)
@@ -490,7 +414,6 @@ def extract_source(
             log.info("%d rows written, time %.3fs", report.rows_loaded, t6 - t5)
 
             _log_load(engine, file_path.name, stat.st_size, stat.st_mtime, table_name)
-            log_row_written = True
 
             log.info("Verifying extraction...")
             report.errors = _verify_extraction(engine, table_name, report)
@@ -501,8 +424,6 @@ def extract_source(
         if not report.source:
             report.source = file_path.name
         report.errors.append(f"Extraction failed: {e}")
-        if table_created and not log_row_written and engine is not None:
-            _drop_unlogged_table(engine, created_table)
         log.exception("Extraction failed for %s", file_path.name)
 
     report.total_time = time.perf_counter() - t0
