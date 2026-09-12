@@ -7,7 +7,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Iterable
 
 import numpy
 import pandas
@@ -170,8 +169,13 @@ def _create_boundaries_table(engine: Engine) -> None:
         conn.commit()
 
 
-def _existing_raw_tables(engine: Engine) -> set[str]:
-    """Return the names of all tables currently in the raw schema."""
+def _next_version_table(engine: Engine, source: str, day: date) -> str:
+    """Compute the next versioned table name for a source on a given day.
+
+    Versions follow raw.<source>_<YYYYMMDD>_<n> with a per-source counter that
+    resets daily: the largest existing counter for the day is incremented,
+    starting at 1 when none exists.
+    """
     with engine.connect() as conn:
         rows = conn.execute(
             text(
@@ -180,19 +184,10 @@ def _existing_raw_tables(engine: Engine) -> set[str]:
             ),
             {"schema": RAW_SCHEMA},
         ).fetchall()
-        return {r[0] for r in rows}
 
-
-def _next_version_table(existing_tables: Iterable[str], source: str, day: date) -> str:
-    """Compute the next versioned table name for a source on a given day.
-
-    Versions follow raw.<source>_<YYYYMMDD>_<n> with a per-source counter that
-    resets daily: the largest existing counter for the day is incremented,
-    starting at 1 when none exists.
-    """
     prefix = f"{source}_{day:%Y%m%d}_"
     counters = []
-    for name in existing_tables:
+    for name in (row[0] for row in rows):
         if name.startswith(prefix) and name[len(prefix):].isdigit():
             counters.append(int(name[len(prefix):]))
     return f"{prefix}{max(counters, default=0) + 1}"
@@ -356,12 +351,13 @@ def extract_source(
 
         stat = file_path.stat()
         signature = (file_path.name, stat.st_size, stat.st_mtime)
+        is_logged = _is_logged(engine, signature)
 
-        if _is_logged(engine, signature) and not force:
+        if is_logged and not force:
             report.skipped = True
             log.info("Skipping %s: already loaded", file_path.name)
         else:
-            if force and _is_logged(engine, signature):
+            if force and is_logged:
                 log.info("Force reload requested for %s", file_path.name)
 
             t1 = time.perf_counter()
@@ -400,9 +396,7 @@ def extract_source(
             ]
             df = df[keep_cols]
 
-            table_name = _next_version_table(
-                _existing_raw_tables(engine), source, date.today()
-            )
+            table_name = _next_version_table(engine, source, date.today())
             log.info("Writing to %s.%s ...", RAW_SCHEMA, table_name)
             df.to_postgis(
                 table_name, engine, schema=RAW_SCHEMA, if_exists="fail",
