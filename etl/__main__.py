@@ -50,7 +50,7 @@ def extract(target: str, force: bool):
 @cli.command()
 @click.argument("target")
 def boundaries(target: str):
-    """Load boundary reference files listed in a manifest into raw.boundaries.
+    """Load boundary reference files listed in a manifest into serv.boundaries.
 
     TARGET is the manifest file path. Each file name on its own line is
     resolved against the manifest's directory; the first file replaces the

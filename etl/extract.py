@@ -7,7 +7,7 @@ from pathlib import Path
 
 import geopandas as gpd
 
-from etl.config import RAW_SCHEMA, get_engine
+from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, get_engine
 from etl.utils import (
     BOUNDARY_COLUMN_MAPPING,
     BOUNDARY_FILE_LEVELS,
@@ -57,6 +57,7 @@ def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
         log.info("Extracting %s from %s", source, file_path.name)
 
         _ensure_schema(engine)
+        _ensure_schema(engine, SERVICE_SCHEMA)
         _create_log_table(engine)
 
         stat = file_path.stat()
@@ -102,10 +103,7 @@ def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
                 report.attributes_empty, time.perf_counter() - t,
             )
 
-            keep_cols = [c for c in RAW_COLUMNS if c in df.columns] + [
-                "geometry",
-                "secondary_attributes",
-            ]
+            keep_cols = [c for c in RAW_COLUMNS if c in df.columns]
             df = df[keep_cols]
 
             table_name = _next_version_table(engine, source, date.today())
@@ -146,19 +144,19 @@ def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
 
 
 def extract_boundaries(manifest: Path) -> BoundariesReport:
-    """Load the boundary reference files listed in a manifest into raw.boundaries.
+    """Load the boundary reference files listed in a manifest into serv.boundaries.
 
     MANIFEST lists one germany_*.gpkg file per line, resolved against the
     manifest's directory; each file's level (0-3) is read from its name. Every
     file is read into a GeoDataFrame, stripped to the raw column set (iso is
     mapped to country_iso), stamped with its level and written via
     to_postgis: the first file replaces the table, the rest append. Area is
-    recomputed afterwards in km² via PostGIS.
+    computed in km² via PostGIS.
     """
     report = BoundariesReport()
     try:
         engine = get_engine()
-        _ensure_schema(engine)
+        _ensure_schema(engine, SERVICE_SCHEMA)
 
         filenames = _read_manifest(manifest)
 
@@ -186,7 +184,7 @@ def extract_boundaries(manifest: Path) -> BoundariesReport:
             out["area"] = 0.0
 
             out.to_postgis(
-                "boundaries", engine, schema=RAW_SCHEMA,
+                "boundaries", engine, schema=SERVICE_SCHEMA,
                 if_exists="replace" if first else "append",
                 index=False,
             )

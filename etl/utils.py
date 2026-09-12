@@ -11,7 +11,7 @@ import pandas
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.config import RAW_SCHEMA
+from etl.config import RAW_SCHEMA, SERVICE_SCHEMA
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +29,8 @@ RAW_COLUMNS = (
     "geo_accuracy",
     "reference_id",
     "reference_date",
+    "geometry",
+    "secondary_attributes",
 )
 
 COLUMN_MAPPING = {
@@ -106,10 +108,10 @@ class BoundariesReport:
         return "\n".join(lines)
 
 
-def _ensure_schema(engine: Engine) -> None:
-    """Create the raw schema in the database if it does not exist."""
+def _ensure_schema(engine: Engine, schema: str = RAW_SCHEMA) -> None:
+    """Create the given schema in the database if it does not exist."""
     with engine.connect() as conn:
-        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {RAW_SCHEMA}"))
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
         conn.commit()
 
 
@@ -119,7 +121,7 @@ def _create_log_table(engine: Engine) -> None:
         conn.execute(
             text(
                 f"""
-                CREATE TABLE IF NOT EXISTS {RAW_SCHEMA}.loaded_files (
+                CREATE TABLE IF NOT EXISTS {SERVICE_SCHEMA}.loaded_files (
                     filename    TEXT,
                     filesize    BIGINT,
                     modified_at TIMESTAMPTZ,
@@ -162,7 +164,7 @@ def _is_logged(engine: Engine, signature: tuple[str, int, float]) -> bool:
     with engine.connect() as conn:
         row = conn.execute(
             text(
-                f"SELECT 1 FROM {RAW_SCHEMA}.loaded_files "
+                f"SELECT 1 FROM {SERVICE_SCHEMA}.loaded_files "
                 "WHERE filename = :filename AND filesize = :filesize "
                 "AND modified_at = to_timestamp(:modified_at) LIMIT 1"
             ),
@@ -178,7 +180,7 @@ def _log_load(
     with engine.connect() as conn:
         conn.execute(
             text(
-                f"INSERT INTO {RAW_SCHEMA}.loaded_files "
+                f"INSERT INTO {SERVICE_SCHEMA}.loaded_files "
                 "(filename, filesize, modified_at, loaded_at, loaded_to) "
                 "VALUES (:filename, :filesize, to_timestamp(:modified_at), now(), :loaded_to)"
             ),
@@ -238,7 +240,7 @@ def _build_secondary_attributes(df: pandas.DataFrame) -> int:
     values are stringified via the JSON default hook. Returns the count of
     rows whose document is empty.
     """
-    attr_cols = [c for c in df.columns if c not in set(RAW_COLUMNS) and c not in ("geometry", "secondary_attributes")]
+    attr_cols = [c for c in df.columns if c not in RAW_COLUMNS]
     df["secondary_attributes"] = df[attr_cols].apply(
         lambda row: {k: v for k, v in row.items() if not pandas.isna(v)},
         axis=1,
@@ -278,7 +280,7 @@ def _compute_boundary_areas(engine: Engine) -> None:
     with engine.connect() as conn:
         conn.execute(
             text(
-                f"UPDATE {RAW_SCHEMA}.boundaries "
+                f"UPDATE {SERVICE_SCHEMA}.boundaries "
                 f"SET area = ST_Area(geometry::geography) / 1e6"
             )
         )
@@ -330,14 +332,14 @@ def _verify_boundaries(engine: Engine) -> list[str]:
         counts = dict(
             conn.execute(
                 text(
-                    f"SELECT level, COUNT(*) FROM {RAW_SCHEMA}.boundaries "
+                    f"SELECT level, COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
                     f"GROUP BY level ORDER BY level"
                 )
             ).fetchall()
         )
         names = conn.execute(
             text(
-                f"SELECT level, name FROM {RAW_SCHEMA}.boundaries "
+                f"SELECT level, name FROM {SERVICE_SCHEMA}.boundaries "
                 f"ORDER BY level LIMIT 1"
             )
         )
@@ -351,7 +353,7 @@ def _verify_boundaries(engine: Engine) -> list[str]:
 
         bad_area = conn.execute(
             text(
-                f"SELECT COUNT(*) FROM {RAW_SCHEMA}.boundaries "
+                f"SELECT COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
                 f"WHERE area IS NULL OR area <= 0"
             )
         ).scalar()
