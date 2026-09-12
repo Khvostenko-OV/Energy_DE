@@ -4,6 +4,7 @@ from pathlib import Path
 import click
 
 from etl.extract import extract_boundaries, extract_source
+from etl.transform import transform_source
 from etl.utils import _read_manifest
 
 
@@ -63,6 +64,27 @@ def boundaries(target: str):
     report = extract_boundaries(manifest)
 
     click.echo("\nBoundaries report:")
+    click.echo(report.summary())
+
+    if not report.passed:
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("source", type=click.Choice(["bio"]))
+def transform(source: str):
+    """Transform the latest raw version of SOURCE into its staging tables.
+
+    Builds the staging row (unit_id, canonical energy_source, geo_accuracy,
+    country_iso, geometry, secondary_attributes), spatially joins boundaries
+    to assign region/district/municipality, runs the quality gate, and
+    decomposes secondary_attributes into normalized properties. Bio is the
+    first source to have the full transform path; the remaining sources land
+    with the all-sources transform ticket.
+    """
+    report = transform_source(source)
+
+    click.echo(f"\nTransform report ({report.source}):")
     click.echo(report.summary())
 
     if not report.passed:
