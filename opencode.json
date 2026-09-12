@@ -8,6 +8,7 @@
       "wc *": "allow",
       "rg *": "allow",
       "grep *": "allow",
+      "for *": "allow",
       "cat *": "allow",
       "echo *": "allow",
       "find *": "allow",
