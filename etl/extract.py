@@ -48,6 +48,10 @@ BOUNDARY_FILE_LEVELS = {
     "munis": 3,
 }
 
+BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
+
+BOUNDARY_RAW_COLUMNS = ("country_iso", "name")
+
 
 @dataclass
 class ExtractionReport:
@@ -139,31 +143,6 @@ def _create_log_table(engine: Engine) -> None:
                     loaded_to   TEXT
                 )
                 """
-            )
-        )
-        conn.commit()
-
-
-def _create_boundaries_table(engine: Engine) -> None:
-    """Create the non-versioned boundaries reference table if it does not exist."""
-    with engine.connect() as conn:
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS {RAW_SCHEMA}.boundaries (
-                    country_iso TEXT,
-                    name        TEXT,
-                    level       INT,
-                    area        DOUBLE PRECISION,
-                    geometry    geometry(MultiPolygon,4326)
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                f"CREATE INDEX IF NOT EXISTS idx_boundaries_geometry "
-                f"ON {RAW_SCHEMA}.boundaries USING GIST (geometry)"
             )
         )
         conn.commit()
@@ -471,14 +450,15 @@ def _verify_extraction(engine: Engine, table_name: str, report: ExtractionReport
     return errors
 
 
-def extract_boundaries(data_dir: Path, engine: Engine | None = None) -> BoundariesReport:
-    """Load germany_*.gpkg boundary files into raw.boundaries if it is empty.
+def extract_boundaries(manifest: Path, engine: Engine | None = None) -> BoundariesReport:
+    """Load the boundary reference files listed in a manifest into raw.boundaries.
 
-    Levels are mapped from the file name; area is computed in km² via PostGIS.
-    Boundaries are reference data: never versioned and never tracked in
-    loaded_files. A complete table (all levels present) is skipped; a partial
-    one is topped up with whichever levels are missing, so an interrupted
-    earlier run heals itself on the next run.
+    MANIFEST lists one germany_*.gpkg file per line, resolved against the
+    manifest's directory; each file's level (0-3) is read from its name. Every
+    file is read into a GeoDataFrame, stripped to the raw column set (iso is
+    mapped to country_iso), stamped with its level and written via
+    to_postgis: the first file replaces the table, the rest append. Area is
+    recomputed afterwards in km² via PostGIS.
     """
     import geopandas as gpd
 
@@ -486,52 +466,33 @@ def extract_boundaries(data_dir: Path, engine: Engine | None = None) -> Boundari
     try:
         engine = engine or get_engine()
         _ensure_schema(engine)
-        _create_boundaries_table(engine)
 
-        with engine.connect() as conn:
-            present_levels = {
-                row[0]
-                for row in conn.execute(
-                    text(f"SELECT DISTINCT level FROM {RAW_SCHEMA}.boundaries")
-                ).fetchall()
-            }
+        filenames = [
+            line.strip()
+            for line in manifest.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
 
-        boundary_files = sorted(Path(data_dir).glob("germany_*.gpkg"))
-        pending: list[tuple[Path, int]] = []
-        for f in boundary_files:
-            level = boundary_level_from_filename(f.name)
+        for i, filename in enumerate(filenames):
+            level = boundary_level_from_filename(filename)
             if level is None:
-                log.warning("No boundary level mapping for %s; skipping", f.name)
-                continue
-            pending.append((f, level))
+                raise ValueError(f"Cannot map boundary filename {filename!r} to a level")
+            f = manifest.parent / filename
+            log.info("Loading %s as level %d", filename, level)
 
-        if all(level in present_levels for _, level in pending):
-            log.info(
-                "Boundaries already loaded (levels %s); skipping",
-                sorted(present_levels),
-            )
-            return report
-
-        for f, level in pending:
-            if level in present_levels:
-                log.info("Level %d already present; skipping %s", level, f.name)
-                continue
-            log.info("Loading %s as level %d", f.name, level)
             gdf = gpd.read_file(f)
             if "name" not in gdf.columns:
-                raise ValueError(f"{f.name} has no 'name' column")
-            out = gpd.GeoDataFrame(
-                {
-                    "country_iso": "DEU",
-                    "name": gdf["name"],
-                    "level": level,
-                    "area": 0.0,
-                },
-                geometry=gdf.geometry,
-                crs=gdf.crs,
-            )
+                raise ValueError(f"{filename} has no 'name' column")
+
+            out = gdf.rename(columns=BOUNDARY_COLUMN_MAPPING)
+            drop = [c for c in out.columns if c not in BOUNDARY_RAW_COLUMNS and c != "geometry"]
+            out = out.drop(columns=drop)
+            out["level"] = level
+            out["area"] = 0.0
+
             out.to_postgis(
-                "boundaries", engine, schema=RAW_SCHEMA, if_exists="append",
+                "boundaries", engine, schema=RAW_SCHEMA,
+                if_exists="replace" if i == 0 else "append",
                 index=False, dtype=_boundaries_dtype(),
             )
             report.rows_by_level[level] = len(out)

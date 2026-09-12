@@ -53,21 +53,21 @@ def extract(target: str, force: bool):
 
 
 @cli.command()
-@click.option(
-    "--data-dir",
-    type=click.Path(file_okay=False, path_type=Path),
-    default="data/geo",
-    show_default=True,
-    help="Directory containing germany_*.gpkg boundary files.",
-)
-def boundaries(data_dir: Path):
-    """Load boundary reference files into raw.boundaries if it is empty.
+@click.argument("target")
+def boundaries(target: str):
+    """Load boundary reference files listed in a manifest into raw.boundaries.
 
-    Files are mapped by name to levels 0-3 and area is computed in km² via
-    PostGIS. The table is never versioned and not tracked in loaded_files.
+    TARGET is the manifest file path. Each file name on its own line is
+    resolved against the manifest's directory; the first file replaces the
+    table and the rest append. Area is then computed in km² via PostGIS.
     """
     engine = get_engine()
-    report = extract_boundaries(data_dir, engine)
+
+    manifest = Path(target)
+    if not manifest.is_file():
+        raise click.BadParameter(f"Manifest not found: {target}")
+
+    report = extract_boundaries(manifest, engine)
 
     click.echo("\nBoundaries report:")
     click.echo(report.summary())
@@ -82,7 +82,7 @@ def run_all():
     ctx = click.get_current_context()
 
     click.echo("Loading boundaries...")
-    ctx.invoke(boundaries, data_dir=Path("data/geo"))
+    ctx.invoke(boundaries, target="data/geo/boundaries.txt")
 
     click.echo("\nRunning extract stage...")
     ctx.invoke(extract, target="data/geo/sources.txt", force=False)
