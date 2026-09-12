@@ -8,10 +8,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-import numpy
 import pandas
 from sqlalchemy import text
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
@@ -235,18 +233,12 @@ def _drop_duplicate_reference_ids(df: pandas.DataFrame) -> int:
     return before - len(df)
 
 
-def _json_default(value: object) -> object:
-    """Convert numpy scalars to native types so secondary attributes stay valid JSON."""
-    if isinstance(value, (numpy.integer, numpy.floating)):
-        return value.item()
-    return str(value)
-
-
 def _build_secondary_attributes(df: pandas.DataFrame) -> int:
-    """Fold secondary attributes into a jsonb-ready column and serialize it.
+    """Fold secondary attributes into a serialized JSON column stored as text.
 
     All columns outside RAW_COLUMNS (and the geometry) are collapsed into a
-    per-row JSON document, dropping null/empty values. Returns the count of
+    per-row JSON document, dropping null/empty values; numpy scalars and date
+    values are stringified via the JSON default hook. Returns the count of
     rows whose document is empty.
     """
     attr_cols = [c for c in df.columns if c not in set(RAW_COLUMNS) and c not in ("geometry", "secondary_attributes")]
@@ -256,7 +248,7 @@ def _build_secondary_attributes(df: pandas.DataFrame) -> int:
     )
     empty = int((df["secondary_attributes"].apply(len) == 0).sum())
     df["secondary_attributes"] = df["secondary_attributes"].apply(
-        lambda d: json.dumps(d, default=_json_default)
+        lambda d: json.dumps(d, default=str)
     )
     return empty
 
@@ -354,7 +346,7 @@ def extract_source(
             log.info("Writing to %s.%s ...", RAW_SCHEMA, table_name)
             df.to_postgis(
                 table_name, engine, schema=RAW_SCHEMA, if_exists="fail",
-                index=False, dtype={"secondary_attributes": JSONB},
+                index=False,
             )
             report.loaded_to = table_name
             report.rows_loaded = len(df)
