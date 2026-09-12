@@ -8,14 +8,13 @@ from pathlib import Path
 import geopandas as gpd
 from sqlalchemy.engine import Engine
 
-from etl.config import get_engine
+from etl.config import RAW_SCHEMA, get_engine
 from etl.utils import (
     BOUNDARY_COLUMN_MAPPING,
     BOUNDARY_FILE_LEVELS,
     BOUNDARY_RAW_COLUMNS,
     COLUMN_MAPPING,
     RAW_COLUMNS,
-    RAW_SCHEMA,
     BoundariesReport,
     ExtractionReport,
     _build_secondary_attributes,

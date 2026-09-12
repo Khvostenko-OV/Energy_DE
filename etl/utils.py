@@ -10,9 +10,9 @@ import pandas
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-log = logging.getLogger(__name__)
+from etl.config import RAW_SCHEMA
 
-RAW_SCHEMA = "raw"
+log = logging.getLogger(__name__)
 
 FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
 
