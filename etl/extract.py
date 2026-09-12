@@ -29,7 +29,7 @@ from etl.utils import (
     _next_version_table,
     _verify_boundaries,
     _verify_extraction,
-    source_from_filename,
+    _source_from_filename,
 )
 
 log = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def extract_source(
     try:
         engine = engine or get_engine()
 
-        source = source_from_filename(file_path.name)
+        source = _source_from_filename(file_path.name)
         if not source:
             raise ValueError(f"Cannot map filename {file_path.name!r} to an energy source")
         report.source = source

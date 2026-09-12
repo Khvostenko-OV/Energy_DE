@@ -249,7 +249,7 @@ def _build_secondary_attributes(df: pandas.DataFrame) -> int:
     return empty
 
 
-def source_from_filename(filename: str) -> str:
+def _source_from_filename(filename: str) -> str:
     """Map a source file name to its canonical source key via regex.
 
     The match is case-insensitive, so 'Bioenergy_V20260203.gpkg' maps to
