@@ -19,6 +19,7 @@
       "tail *": "allow",
       "source *": "allow",
       "python *": "allow",
+      "python3 *": "allow",
       ".venv/bin/python *": "allow",
       "git *": "allow",
       "git push*": "ask",
