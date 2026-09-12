@@ -262,6 +262,18 @@ def source_from_filename(filename: str) -> str:
     return match.group(1).lower()
 
 
+def _compute_boundary_areas(engine: Engine) -> None:
+    """Fill area (km²) for every boundary row via PostGIS geodesic area."""
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                f"UPDATE {RAW_SCHEMA}.boundaries "
+                f"SET area = ST_Area(geometry::geography) / 1e6"
+            )
+        )
+        conn.commit()
+
+
 def _verify_extraction(engine: Engine, table_name: str, report: ExtractionReport) -> list[str]:
     """Verify the loaded versioned table against the extraction report.
 

@@ -6,7 +6,6 @@ from datetime import date
 from pathlib import Path
 
 import geopandas as gpd
-from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
@@ -21,6 +20,7 @@ from etl.utils import (
     ExtractionReport,
     _build_secondary_attributes,
     _cast_types,
+    _compute_boundary_areas,
     _create_log_table,
     _drop_duplicate_reference_ids,
     _ensure_schema,
@@ -199,14 +199,7 @@ def extract_boundaries(manifest: Path, engine: Engine | None = None) -> Boundari
             report.rows_by_level[level] = len(out)
 
         if report.rows_by_level:
-            with engine.connect() as conn:
-                conn.execute(
-                    text(
-                        f"UPDATE {RAW_SCHEMA}.boundaries "
-                        f"SET area = ST_Area(geometry::geography) / 1e6"
-                    )
-                )
-                conn.commit()
+            _compute_boundary_areas(engine)
             report.loaded = True
             report.errors = _verify_boundaries(engine)
     except Exception as e:
