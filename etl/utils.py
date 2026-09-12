@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 import pandas
 from sqlalchemy import text
@@ -16,7 +17,7 @@ log = logging.getLogger(__name__)
 
 FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
 
-RAW_COLUMNS = [
+RAW_COLUMNS = (
     "energy_source",
     "installed_capacity",
     "commissioning_date",
@@ -28,7 +29,7 @@ RAW_COLUMNS = [
     "geo_accuracy",
     "reference_id",
     "reference_date",
-]
+)
 
 COLUMN_MAPPING = {
     "gas": {"gas_production_capacity": "installed_capacity"},
@@ -260,6 +261,16 @@ def _source_from_filename(filename: str) -> str:
     if not match:
         return ""
     return match.group(1).lower()
+
+
+def _read_manifest(manifest: Path) -> list[str]:
+    """Read a manifest file into a list of file names, one per line.
+
+    Blank lines and '#' comments are dropped; each line is stripped exactly
+    once.
+    """
+    names = [line.strip() for line in manifest.read_text().splitlines()]
+    return [name for name in names if name and not name.startswith("#")]
 
 
 def _compute_boundary_areas(engine: Engine) -> None:

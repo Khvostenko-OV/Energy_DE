@@ -3,8 +3,8 @@ from pathlib import Path
 
 import click
 
-from etl.config import get_engine
 from etl.extract import extract_boundaries, extract_source
+from etl.utils import _read_manifest
 
 
 @click.group()
@@ -25,7 +25,6 @@ def extract(target: str, force: bool):
     resolved against the manifest's directory. Files already logged in
     loaded_files are skipped unless --force is given.
     """
-    engine = get_engine()
     log = logging.getLogger(__name__)
 
     manifest = Path(target)
@@ -33,15 +32,11 @@ def extract(target: str, force: bool):
         raise click.BadParameter(f"Manifest not found: {target}")
 
     data_dir = manifest.parent
-    filenames = [
-        line.strip()
-        for line in manifest.read_text().splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
+    filenames = _read_manifest(manifest)
 
     log.info("Extracting %d source file(s) from %s", len(filenames), manifest)
     reports = [
-        extract_source(data_dir / f, engine, force=force) for f in filenames
+        extract_source(data_dir / f, force=force) for f in filenames
     ]
 
     for r in reports:
@@ -61,13 +56,11 @@ def boundaries(target: str):
     resolved against the manifest's directory; the first file replaces the
     table and the rest append. Area is then computed in km² via PostGIS.
     """
-    engine = get_engine()
-
     manifest = Path(target)
     if not manifest.is_file():
         raise click.BadParameter(f"Manifest not found: {target}")
 
-    report = extract_boundaries(manifest, engine)
+    report = extract_boundaries(manifest)
 
     click.echo("\nBoundaries report:")
     click.echo(report.summary())

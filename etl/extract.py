@@ -6,7 +6,6 @@ from datetime import date
 from pathlib import Path
 
 import geopandas as gpd
-from sqlalchemy.engine import Engine
 
 from etl.config import RAW_SCHEMA, get_engine
 from etl.utils import (
@@ -26,17 +25,16 @@ from etl.utils import (
     _is_logged,
     _log_load,
     _next_version_table,
+    _read_manifest,
+    _source_from_filename,
     _verify_boundaries,
     _verify_extraction,
-    _source_from_filename,
 )
 
 log = logging.getLogger(__name__)
 
 
-def extract_source(
-    file_path: Path, engine: Engine | None = None, force: bool = False
-) -> ExtractionReport:
+def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
     """Extract one unit source GPKG into a new versioned raw table.
 
     The energy source is derived from the file name. If the file's load
@@ -47,9 +45,9 @@ def extract_source(
     uniqueness against the stored table.
     """
     report = ExtractionReport()
-    t0 = time.perf_counter()
+    start = time.perf_counter()
     try:
-        engine = engine or get_engine()
+        engine = get_engine()
 
         source = _source_from_filename(file_path.name)
         if not source:
@@ -72,12 +70,11 @@ def extract_source(
             if force and is_logged:
                 log.info("Force reload requested for %s", file_path.name)
 
-            t1 = time.perf_counter()
             log.info("Reading %s...", file_path.name)
+            t = time.perf_counter()
             df = gpd.read_file(file_path)
             report.source_row_count = len(df)
-            t2 = time.perf_counter()
-            log.info("%d rows loaded, time %.3fs", len(df), t2 - t1)
+            log.info("%d rows loaded, time %.3fs", len(df), time.perf_counter() - t)
 
             for old, new in COLUMN_MAPPING.get(source, {}).items():
                 df = df.rename(columns={old: new})
@@ -85,22 +82,25 @@ def extract_source(
             df["energy_source"] = source
 
             log.info("Casting types...")
+            t = time.perf_counter()
             _cast_types(df)
-            t3 = time.perf_counter()
-            log.info("Type casting done, time %.3fs", t3 - t2)
+            log.info("Type casting done, time %.3fs", time.perf_counter() - t)
 
             log.info("Dropping duplicates...")
+            t = time.perf_counter()
             report.duplicates_dropped = _drop_duplicate_reference_ids(df)
-            t4 = time.perf_counter()
             log.info(
                 "%d duplicates removed, %d remaining, time %.3fs",
-                report.duplicates_dropped, len(df), t4 - t3,
+                report.duplicates_dropped, len(df), time.perf_counter() - t,
             )
 
             log.info("Building secondary attributes...")
+            t = time.perf_counter()
             report.attributes_empty = _build_secondary_attributes(df)
-            t5 = time.perf_counter()
-            log.info("%d empty attributes, time %.3fs", report.attributes_empty, t5 - t4)
+            log.info(
+                "%d empty attributes, time %.3fs",
+                report.attributes_empty, time.perf_counter() - t,
+            )
 
             keep_cols = [c for c in RAW_COLUMNS if c in df.columns] + [
                 "geometry",
@@ -110,21 +110,21 @@ def extract_source(
 
             table_name = _next_version_table(engine, source, date.today())
             log.info("Writing to %s.%s ...", RAW_SCHEMA, table_name)
+            t = time.perf_counter()
             df.to_postgis(
                 table_name, engine, schema=RAW_SCHEMA, if_exists="fail",
                 index=False,
             )
             report.loaded_to = table_name
             report.rows_loaded = len(df)
-            t6 = time.perf_counter()
-            log.info("%d rows written, time %.3fs", report.rows_loaded, t6 - t5)
+            log.info("%d rows written, time %.3fs", report.rows_loaded, time.perf_counter() - t)
 
             _log_load(engine, file_path.name, stat.st_size, stat.st_mtime, table_name)
 
             log.info("Verifying extraction...")
+            t = time.perf_counter()
             report.errors = _verify_extraction(engine, table_name, report)
-            t7 = time.perf_counter()
-            log.info("Verification done, time %.3fs", t7 - t6)
+            log.info("Verification done, time %.3fs", time.perf_counter() - t)
 
     except Exception as e:
         if not report.source:
@@ -132,7 +132,7 @@ def extract_source(
         report.errors.append(f"Extraction failed: {e}")
         log.exception("Extraction failed for %s", file_path.name)
 
-    report.total_time = time.perf_counter() - t0
+    report.total_time = time.perf_counter() - start
     if report.skipped:
         log.info("Skipped %s (already loaded)", file_path.name)
     elif report.errors:
@@ -145,7 +145,7 @@ def extract_source(
     return report
 
 
-def extract_boundaries(manifest: Path, engine: Engine | None = None) -> BoundariesReport:
+def extract_boundaries(manifest: Path) -> BoundariesReport:
     """Load the boundary reference files listed in a manifest into raw.boundaries.
 
     MANIFEST lists one germany_*.gpkg file per line, resolved against the
@@ -157,14 +157,10 @@ def extract_boundaries(manifest: Path, engine: Engine | None = None) -> Boundari
     """
     report = BoundariesReport()
     try:
-        engine = engine or get_engine()
+        engine = get_engine()
         _ensure_schema(engine)
 
-        filenames = [
-            line.strip()
-            for line in manifest.read_text().splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
+        filenames = _read_manifest(manifest)
 
         first = True
         for filename in filenames:
