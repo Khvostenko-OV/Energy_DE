@@ -10,8 +10,7 @@ from pathlib import Path
 
 import numpy
 import pandas
-from geoalchemy2 import Geometry
-from sqlalchemy import Float, Integer, String, text
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 
@@ -110,16 +109,6 @@ class BoundariesReport:
             for e in self.errors:
                 lines.append(f"  ERROR: {e}")
         return "\n".join(lines)
-
-
-def _boundaries_dtype() -> dict:
-    return {
-        "country_iso": String,
-        "name": String,
-        "level": Integer,
-        "area": Float,
-        "geometry": Geometry(geometry_type="MULTIPOLYGON", srid=4326),
-    }
 
 
 def _ensure_schema(engine: Engine) -> None:
@@ -283,20 +272,6 @@ def source_from_filename(filename: str) -> str:
     if not match:
         return ""
     return match.group(1).lower()
-
-
-def boundary_level_from_filename(filename: str) -> int | None:
-    """Map a boundary file name to its administrative level (0-3).
-
-    'germany_boundary.gpkg' -> 0 (country outline), 'germany_regions.gpkg'
-    -> 1 (regions + EEZ), 'germany_districts.gpkg' -> 2 (districts),
-    'germany_munis.gpkg' -> 3 (municipalities). Returns None for files that
-    are not boundary files.
-    """
-    stem = Path(filename).stem
-    if not stem.startswith("germany_"):
-        return None
-    return BOUNDARY_FILE_LEVELS.get(stem[len("germany_"):])
 
 
 def extract_source(
@@ -473,10 +448,16 @@ def extract_boundaries(manifest: Path, engine: Engine | None = None) -> Boundari
             if line.strip() and not line.strip().startswith("#")
         ]
 
-        for i, filename in enumerate(filenames):
-            level = boundary_level_from_filename(filename)
+        first = True
+        for filename in filenames:
+            stem = Path(filename).stem
+            level = (
+                BOUNDARY_FILE_LEVELS.get(stem[len("germany_"):])
+                if stem.startswith("germany_") else None
+            )
             if level is None:
-                raise ValueError(f"Cannot map boundary filename {filename!r} to a level")
+                log.warning("Skipping %s: cannot map to a boundary level", filename)
+                continue
             f = manifest.parent / filename
             log.info("Loading %s as level %d", filename, level)
 
@@ -492,21 +473,23 @@ def extract_boundaries(manifest: Path, engine: Engine | None = None) -> Boundari
 
             out.to_postgis(
                 "boundaries", engine, schema=RAW_SCHEMA,
-                if_exists="replace" if i == 0 else "append",
-                index=False, dtype=_boundaries_dtype(),
+                if_exists="replace" if first else "append",
+                index=False,
             )
+            first = False
             report.rows_by_level[level] = len(out)
 
-        with engine.connect() as conn:
-            conn.execute(
-                text(
-                    f"UPDATE {RAW_SCHEMA}.boundaries "
-                    f"SET area = ST_Area(geometry::geography) / 1e6"
+        if report.rows_by_level:
+            with engine.connect() as conn:
+                conn.execute(
+                    text(
+                        f"UPDATE {RAW_SCHEMA}.boundaries "
+                        f"SET area = ST_Area(geometry::geography) / 1e6"
+                    )
                 )
-            )
-            conn.commit()
-        report.loaded = bool(report.rows_by_level)
-        report.errors = _verify_boundaries(engine)
+                conn.commit()
+            report.loaded = True
+            report.errors = _verify_boundaries(engine)
     except Exception as e:
         report.errors.append(f"Boundary load failed: {e}")
         log.exception("Boundary load failed")
