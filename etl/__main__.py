@@ -76,7 +76,7 @@ def transform(source: str):
     """Transform the latest raw version of SOURCE into its staging tables.
 
     Builds the staging row (unit_id, canonical energy_source, geo_accuracy,
-    country_iso, geometry, secondary_attributes), spatially joins boundaries
+    country_iso, geometry), spatially joins boundaries
     to assign region/district/municipality, runs the quality gate, and
     decomposes secondary_attributes into normalized properties. Bio is the
     first source to have the full transform path; the remaining sources land

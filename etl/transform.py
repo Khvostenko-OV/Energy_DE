@@ -8,11 +8,18 @@ import time
 import geopandas as gpd
 import numpy
 import pandas
-from sqlalchemy import text
-from sqlalchemy.engine import Engine
 
-from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, STAGING_SCHEMA, get_engine
-from etl.utils import TransformReport, _ensure_schema, _latest_version_table
+from etl.config import (
+    BAD_QUALITY_PROPERTY,
+    RAW_SCHEMA,
+    SERVICE_SCHEMA,
+    STAGING_SCHEMA,
+    get_engine,
+)
+from etl.db_utils import _create_staging_tables, _ensure_schema
+from etl.reports import TransformReport
+from etl.utils import _latest_version_table
+from etl.verify import _verify_transform
 
 log = logging.getLogger(__name__)
 
@@ -22,8 +29,6 @@ QUALITY_CAPACITY = "installed_capacity <= 0 or null"
 QUALITY_DATES = "decommissioning_date <= commissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
 QUALITY_REGION = "region is null"
-
-BAD_QUALITY_PROPERTY = "bad_quality"
 
 BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
 
@@ -42,7 +47,6 @@ STAGING_COLUMNS = (
     "district",
     "municipality",
     "bad_quality",
-    "secondary_attributes",
 )
 
 
@@ -110,7 +114,6 @@ def transform_source(source: str) -> TransformReport:
             report.bad_quality, report.quality_reasons,
         )
 
-        report.attributes_empty = int(df["secondary_attributes"].isna().sum())
         props, links = _decompose_attributes(df, reasons)
         report.properties_count = len(props)
         report.links_count = len(links)
@@ -303,198 +306,3 @@ def _decompose_attributes(
         columns=["unit_id", "param_id"],
     )
     return props, links
-
-
-def _create_staging_tables(engine: Engine, source: str) -> None:
-    """Drop and recreate the source's three staging tables with constraints."""
-    with engine.begin() as conn:
-        conn.execute(
-            text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{source}_units_properties CASCADE")
-        )
-        conn.execute(text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{source}_properties CASCADE"))
-        conn.execute(text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{source} CASCADE"))
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE {STAGING_SCHEMA}.{source} (
-                    unit_id              TEXT PRIMARY KEY,
-                    energy_source        TEXT NOT NULL,
-                    installed_capacity   DOUBLE PRECISION,
-                    commissioning_date   DATE,
-                    decommissioning_date DATE,
-                    geometry             geometry(Point, 4326),
-                    geo_accuracy         BIGINT,
-                    reference_id         TEXT,
-                    reference_date       TIMESTAMP,
-                    country_iso          TEXT,
-                    region               TEXT,
-                    district             TEXT,
-                    municipality         TEXT,
-                    bad_quality          BOOLEAN NOT NULL,
-                    secondary_attributes TEXT
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE {STAGING_SCHEMA}.{source}_properties (
-                    param_id BIGINT PRIMARY KEY,
-                    name     TEXT NOT NULL,
-                    value    TEXT NOT NULL,
-                    UNIQUE (name, value)
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE {STAGING_SCHEMA}.{source}_units_properties (
-                    unit_id  TEXT NOT NULL REFERENCES {STAGING_SCHEMA}.{source}(unit_id),
-                    param_id BIGINT NOT NULL REFERENCES {STAGING_SCHEMA}.{source}_properties(param_id),
-                    PRIMARY KEY (unit_id, param_id)
-                )
-                """
-            )
-        )
-        conn.execute(
-            text(
-                f"CREATE INDEX {source}_geometry_gist "
-                f"ON {STAGING_SCHEMA}.{source} USING gist (geometry)"
-            )
-        )
-
-
-def _verify_transform(engine: Engine, source: str, report: TransformReport) -> list[str]:
-    """Verify the stored staging tables against the transform report.
-
-    Checks row counts, natural-key uniqueness, canonical labels, join
-    coverage, the bad-quality distribution and its property links, and the
-    decomposition counts. Any drift between what the transform computed and
-    what the database holds is reported as an error.
-    """
-    errors: list[str] = []
-
-    def scalar(sql: str) -> int:
-        with engine.connect() as conn:
-            return int(conn.execute(text(sql)).scalar())
-
-    stored_rows = scalar(f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source}")
-    if stored_rows != report.rows_written:
-        errors.append(
-            f"Staging row count mismatch: wrote {report.rows_written}, stored {stored_rows}"
-        )
-
-    dup_natural = scalar(
-        f"SELECT COUNT(*) FROM (SELECT energy_source, reference_id "
-        f"FROM {STAGING_SCHEMA}.{source} WHERE reference_id IS NOT NULL "
-        f"GROUP BY energy_source, reference_id HAVING COUNT(*) > 1) d"
-    )
-    if dup_natural:
-        errors.append(f"Duplicate natural keys (energy_source, reference_id): {dup_natural}")
-
-    with engine.connect() as conn:
-        sources = [
-            r[0]
-            for r in conn.execute(
-                text(
-                    f"SELECT DISTINCT energy_source FROM {STAGING_SCHEMA}.{source}"
-                    f" ORDER BY 1"
-                )
-            ).fetchall()
-        ]
-        iso = [
-            r[0]
-            for r in conn.execute(
-                text(
-                    f"SELECT DISTINCT country_iso FROM {STAGING_SCHEMA}.{source}"
-                    f" ORDER BY 1"
-                )
-            ).fetchall()
-        ]
-    if sources != [report.source]:
-        errors.append(f"Canonical energy_source is {sources}, expected {[report.source]}")
-    if iso != ["DEU"]:
-        errors.append(f"country_iso is {iso}, expected ['DEU']")
-
-    empty_attrs = scalar(
-        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} WHERE secondary_attributes IS NULL"
-    )
-    if empty_attrs != report.attributes_empty:
-        errors.append(
-            f"Empty-attribute count mismatch: computed {report.attributes_empty}, "
-            f"stored {empty_attrs}"
-        )
-
-    for col, unmapped in report.join_unmapped.items():
-        stored = scalar(
-            f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} WHERE {col} IS NULL"
-        )
-        if stored != unmapped:
-            errors.append(
-                f"Join coverage mismatch for {col}: computed {unmapped}, stored {stored}"
-            )
-        log.info(
-            "Coverage %s: %d/%d mapped",
-            col, report.rows_written - stored, report.rows_written,
-        )
-
-    bad_rows = scalar(
-        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} WHERE bad_quality"
-    )
-    if bad_rows != report.bad_quality:
-        errors.append(
-            f"Bad-quality count mismatch: computed {report.bad_quality}, stored {bad_rows}"
-        )
-
-    reason_rows = scalar(
-        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source}_units_properties up "
-        f"JOIN {STAGING_SCHEMA}.{source}_properties p ON p.param_id = up.param_id "
-        f"WHERE p.name = '{BAD_QUALITY_PROPERTY}'"
-    )
-    if reason_rows != report.bad_quality:
-        errors.append(
-            f"Bad-quality property links mismatch: expected {report.bad_quality}, "
-            f"got {reason_rows}"
-        )
-
-    stored_reasons: dict[str, int] = {}
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                f"SELECT p.value, COUNT(DISTINCT up.unit_id) "
-                f"FROM {STAGING_SCHEMA}.{source}_units_properties up "
-                f"JOIN {STAGING_SCHEMA}.{source}_properties p ON p.param_id = up.param_id "
-                f"WHERE p.name = '{BAD_QUALITY_PROPERTY}' GROUP BY p.value"
-            )
-        ).fetchall()
-    for value, count in rows:
-        stored_reasons[value] = int(count)
-    if stored_reasons != report.quality_reasons:
-        errors.append(
-            f"Bad-quality distribution mismatch: computed {report.quality_reasons}, "
-            f"stored {stored_reasons}"
-        )
-
-    props = scalar(f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source}_properties")
-    if props != report.properties_count:
-        errors.append(
-            f"Properties count mismatch: computed {report.properties_count}, stored {props}"
-        )
-
-    links = scalar(
-        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source}_units_properties"
-    )
-    if links != report.links_count:
-        errors.append(
-            f"Links count mismatch: computed {report.links_count}, stored {links}"
-        )
-
-    if not errors:
-        log.info(
-            "Staging verified for %s (%d rows, %d properties, %d links, %d bad)",
-            source, stored_rows, props, links, bad_rows,
-        )
-    return errors

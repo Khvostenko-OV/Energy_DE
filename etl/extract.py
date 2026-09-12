@@ -8,28 +8,25 @@ from pathlib import Path
 import geopandas as gpd
 
 from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, get_engine
+from etl.db_utils import _create_log_table, _ensure_schema
+from etl.reports import BoundariesReport, ExtractionReport
 from etl.utils import (
     BOUNDARY_COLUMN_MAPPING,
     BOUNDARY_FILE_LEVELS,
     BOUNDARY_RAW_COLUMNS,
     COLUMN_MAPPING,
     RAW_COLUMNS,
-    BoundariesReport,
-    ExtractionReport,
     _build_secondary_attributes,
     _cast_types,
     _compute_boundary_areas,
-    _create_log_table,
     _drop_duplicate_reference_ids,
-    _ensure_schema,
     _is_logged,
     _log_load,
     _next_version_table,
     _read_manifest,
     _source_from_filename,
-    _verify_boundaries,
-    _verify_extraction,
 )
+from etl.verify import _verify_boundaries, _verify_extraction
 
 log = logging.getLogger(__name__)
 

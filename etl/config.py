@@ -11,6 +11,8 @@ STAGING_SCHEMA = "stage"
 CORE_SCHEMA = "core"
 SERVICE_SCHEMA = "serv"
 
+BAD_QUALITY_PROPERTY = "bad_quality"
+
 
 def get_engine():
     url = os.environ["DATABASE_URL"]

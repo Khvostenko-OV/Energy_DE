@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
-from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -12,8 +10,6 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from etl.config import RAW_SCHEMA, SERVICE_SCHEMA
-
-log = logging.getLogger(__name__)
 
 FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
 
@@ -47,134 +43,6 @@ BOUNDARY_FILE_LEVELS = {
 BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
 BOUNDARY_RAW_COLUMNS = ("country_iso", "name", "geometry")
-
-
-@dataclass
-class ExtractionReport:
-    """Result of one unit source extract: counts, version and verification outcome."""
-
-    source: str = ""
-    source_row_count: int = 0
-    rows_loaded: int = 0
-    duplicates_dropped: int = 0
-    attributes_empty: int = 0
-    loaded_to: str | None = None
-    skipped: bool = False
-    errors: list[str] = field(default_factory=list)
-    total_time: float = 0.0
-
-    @property
-    def passed(self) -> bool:
-        """True if the extract completed without errors (a skip is also a pass)."""
-        return not self.errors
-
-    def summary(self) -> str:
-        lines = [
-            f"  Source file rows : {self.source_row_count}",
-            f"  Rows loaded      : {self.rows_loaded}",
-            f"  Duplicates dropped: {self.duplicates_dropped}",
-            f"  Empty attributes  : {self.attributes_empty}",
-            f"  Loaded to        : {self.loaded_to or '-'}",
-            f"  Status           : {'SKIPPED (already loaded)' if self.skipped else ('PASS' if self.passed else 'FAIL')}",
-            f"  Total time       : {self.total_time:.3f}s",
-        ]
-        if self.errors:
-            for e in self.errors:
-                lines.append(f"  ERROR: {e}")
-        return "\n".join(lines)
-
-
-@dataclass
-class BoundariesReport:
-    """Result of the boundary reference-data load."""
-
-    loaded: bool = False
-    rows_by_level: dict[int, int] = field(default_factory=dict)
-    errors: list[str] = field(default_factory=list)
-
-    @property
-    def passed(self) -> bool:
-        return not self.errors
-
-    def summary(self) -> str:
-        lines = [
-            f"  Loaded           : {'yes' if self.loaded else 'no (already present or error)'}",
-            "  Rows by level    : " + (", ".join(f"{k}={v}" for k, v in sorted(self.rows_by_level.items())) or "-"),
-            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
-        ]
-        if self.errors:
-            for e in self.errors:
-                lines.append(f"  ERROR: {e}")
-        return "\n".join(lines)
-
-
-@dataclass
-class TransformReport:
-    """Result of one source's transform into its staging tables."""
-
-    source: str = ""
-    raw_table: str | None = None
-    rows_read: int = 0
-    rows_written: int = 0
-    join_unmapped: dict[str, int] = field(default_factory=dict)
-    attributes_empty: int = 0
-    bad_quality: int = 0
-    quality_reasons: dict[str, int] = field(default_factory=dict)
-    properties_count: int = 0
-    links_count: int = 0
-    errors: list[str] = field(default_factory=list)
-    total_time: float = 0.0
-
-    @property
-    def passed(self) -> bool:
-        return not self.errors
-
-    def summary(self) -> str:
-        lines = [
-            f"  Raw table        : {self.raw_table or '-'}",
-            f"  Rows read        : {self.rows_read}",
-            f"  Rows written     : {self.rows_written}",
-            "  Join unmapped    : "
-            + (", ".join(f"{k}={v}" for k, v in self.join_unmapped.items()) or "-"),
-            f"  Empty attributes : {self.attributes_empty}",
-            f"  Bad quality      : {self.bad_quality}",
-            "  Quality reasons  : "
-            + (", ".join(f"{k}={v}" for k, v in self.quality_reasons.items()) or "-"),
-            f"  Properties       : {self.properties_count}",
-            f"  Links            : {self.links_count}",
-            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
-            f"  Total time       : {self.total_time:.3f}s",
-        ]
-        if self.errors:
-            for e in self.errors:
-                lines.append(f"  ERROR: {e}")
-        return "\n".join(lines)
-
-
-def _ensure_schema(engine: Engine, schema: str = RAW_SCHEMA) -> None:
-    """Create the given schema in the database if it does not exist."""
-    with engine.connect() as conn:
-        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
-        conn.commit()
-
-
-def _create_log_table(engine: Engine) -> None:
-    """Create the append-only loaded_files log if it does not exist."""
-    with engine.connect() as conn:
-        conn.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS {SERVICE_SCHEMA}.loaded_files (
-                    filename    TEXT,
-                    filesize    BIGINT,
-                    modified_at TIMESTAMPTZ,
-                    loaded_at   TIMESTAMPTZ,
-                    loaded_to   TEXT
-                )
-                """
-            )
-        )
-        conn.commit()
 
 
 def _version_tables(engine: Engine, source: str) -> list[tuple[str, int, str]]:
@@ -345,84 +213,3 @@ def _compute_boundary_areas(engine: Engine) -> None:
             )
         )
         conn.commit()
-
-
-def _verify_extraction(engine: Engine, table_name: str, report: ExtractionReport) -> list[str]:
-    """Verify the loaded versioned table against the extraction report.
-
-    Checks the loaded count is consistent with the pre-dedupe source rows and
-    matches the number of rows stored, and that no non-null reference_id
-    appears more than once in the stored table. Returns a list of error
-    strings, empty if verification passes.
-    """
-    errors: list[str] = []
-    expected = report.source_row_count - report.duplicates_dropped
-    if report.rows_loaded != expected:
-        errors.append(
-            f"Row count mismatch: loaded {report.rows_loaded}, expected {expected}"
-        )
-
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(f"SELECT COUNT(*) FROM {RAW_SCHEMA}.{table_name}")
-        ).scalar()
-        if row != report.rows_loaded:
-            errors.append(
-                f"Row count mismatch in {table_name}: expected {report.rows_loaded}, got {row}"
-            )
-
-        dups = conn.execute(
-            text(
-                f"SELECT COUNT(*) FROM ("
-                f"SELECT reference_id FROM {RAW_SCHEMA}.{table_name} "
-                f"WHERE reference_id IS NOT NULL "
-                f"GROUP BY reference_id HAVING COUNT(*) > 1) d"
-            )
-        ).scalar()
-        if dups > 0:
-            errors.append(f"Duplicate reference_ids found in {table_name}: {dups}")
-
-    return errors
-
-
-def _verify_boundaries(engine: Engine) -> list[str]:
-    """Verify the boundaries table carries levels 0-3, one level-0 row, and areas."""
-    errors: list[str] = []
-    with engine.connect() as conn:
-        counts = dict(
-            conn.execute(
-                text(
-                    f"SELECT level, COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
-                    f"GROUP BY level ORDER BY level"
-                )
-            ).fetchall()
-        )
-        names = conn.execute(
-            text(
-                f"SELECT level, name FROM {SERVICE_SCHEMA}.boundaries "
-                f"ORDER BY level LIMIT 1"
-            )
-        )
-
-        for level in range(4):
-            if level not in counts:
-                errors.append(f"Boundaries missing level {level}")
-
-        if counts.get(0, 0) != 1:
-            errors.append(f"Expected exactly 1 country-outline row at level 0, got {counts.get(0)}")
-
-        bad_area = conn.execute(
-            text(
-                f"SELECT COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
-                f"WHERE area IS NULL OR area <= 0"
-            )
-        ).scalar()
-        if bad_area:
-            errors.append(f"{bad_area} boundaries have null or non-positive area")
-
-        if not errors:
-            levels = ", ".join(f"{k}:{counts[k]}" for k in sorted(counts))
-            level_names = ", ".join(f"{row[1]}" for row in names.fetchall())
-            log.info("Boundaries verified (%s rows; sample names: %s)", levels, level_names)
-
-    return errors
