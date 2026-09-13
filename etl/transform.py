@@ -14,7 +14,6 @@ from etl.config import (
     RAW_SCHEMA,
     SERVICE_SCHEMA,
     STAGING_SCHEMA,
-    STORAGE_COLUMNS,
     SYNTHETIC_ID_PREFIX,
     get_engine,
 )
@@ -37,6 +36,8 @@ BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
 STAGING_COLUMNS = (
     "unit_id",
     "energy_source",
+    "storage_type",
+    "storage_capacity",
     "installed_capacity",
     "commissioning_date",
     "decommissioning_date",
@@ -50,19 +51,6 @@ STAGING_COLUMNS = (
     "municipality",
     "bad_quality",
 )
-
-
-def _staging_columns(source: str) -> list[str]:
-    """Full staging column list for a source.
-
-    Generators share STAGING_COLUMNS; the storage layer additionally carries
-    its storage shape (storage_type, storage_capacity), placed right after
-    energy_source to mirror the storage staging schema.
-    """
-    cols = list(STAGING_COLUMNS)
-    if source == "storage":
-        cols[2:2] = list(STORAGE_COLUMNS)
-    return cols
 
 
 def transform_source(source: str) -> TransformReport:
@@ -150,7 +138,7 @@ def transform_source(source: str) -> TransformReport:
         log.info("Writing staging tables...")
         t = time.perf_counter()
         _create_staging_tables(engine, source)
-        out = df[[c for c in _staging_columns(source) if c in df.columns]]
+        out = df[[c for c in STAGING_COLUMNS if c in df.columns]]
         out.to_postgis(
             source, engine, schema=STAGING_SCHEMA, if_exists="append", index=False
         )
