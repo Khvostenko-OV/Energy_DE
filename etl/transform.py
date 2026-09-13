@@ -17,7 +17,7 @@ from etl.config import (
     SYNTHETIC_ID_PREFIX,
     get_engine,
 )
-from etl.db_utils import _create_staging_tables, _ensure_schema
+from etl.db_utils import STORAGE_COLUMNS, _create_staging_tables, _ensure_schema
 from etl.reports import TransformReport
 from etl.utils import _latest_table_version
 from etl.verify import _verify_transform
@@ -37,8 +37,6 @@ BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
 STAGING_COLUMNS = (
     "unit_id",
     "energy_source",
-    "storage_type",
-    "storage_capacity",
     "installed_capacity",
     "commissioning_date",
     "decommissioning_date",
@@ -51,7 +49,7 @@ STAGING_COLUMNS = (
     "district",
     "municipality",
     "bad_quality",
-)
+) + STORAGE_COLUMNS
 
 
 def transform_source(source: str) -> TransformReport:
