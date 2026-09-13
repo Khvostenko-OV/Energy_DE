@@ -30,7 +30,7 @@ QUALITY_CAPACITY_NULL = "installed_capacity is null"
 QUALITY_CAPACITY_NONPOSITIVE = "installed_capacity <= 0"
 QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
-QUALITY_REGION = "region is null (outside the boundaries)"
+QUALITY_REGION = "unit outside the boundaries (region is null)"
 
 BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
 
