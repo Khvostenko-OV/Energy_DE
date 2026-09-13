@@ -25,10 +25,10 @@ log = logging.getLogger(__name__)
 
 COORD_TOLERANCE_DEG = 1e-9
 
-QUALITY_CAPACITY = "installed_capacity <= 0 or null"
-QUALITY_DATES = "decommissioning_date <= commissioning_date"
+QUALITY_CAPACITY = "wrong installed_capacity"
+QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
-QUALITY_REGION = "region is null"
+QUALITY_REGION = "region is null (outside the boundaries)"
 
 BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
 

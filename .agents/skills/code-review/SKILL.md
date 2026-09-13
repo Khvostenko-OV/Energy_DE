@@ -77,6 +77,15 @@ Present the two reports under `## Standards` and `## Spec` headings, verbatim or
 
 End with a one-line summary: total findings per axis, and the worst issue _within each axis_ (if any). Don't pick a single winner across axes: that's the reranking the separation exists to prevent.
 
+### 6. Save the report
+
+Persist the full report (both axes plus the summary line) to `docs/reviews/`, so reviews are browsable over time.
+
+- Filename: `code-review-<topic>-<YYYYMMDD>.md` — the topic is a short slug describing the reviewed work (e.g. `transform-bioenergy`), or the user can name one when requesting the review. Default to a slug of the user's requested scope if no topic was given.
+- Create `docs/reviews/` if it does not exist; overwrite any previous file with the same name.
+- Match the header style of existing reports already in `docs/reviews/` (date / fixed point / diff command / sources / reviewed artifacts line).
+- After presenting the report, print one line confirming the saved path.
+
 ## Why two axes
 
 A change can pass one axis and fail the other:

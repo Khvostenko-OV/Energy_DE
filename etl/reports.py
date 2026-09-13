@@ -3,17 +3,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+class ReportBase:
+    """Shared shape for stage reports: error list, pass flag, and error lines."""
+
+    errors: list[str]
+
+    @property
+    def passed(self) -> bool:
+        """True if the report completed without errors (a skip is also a pass)."""
+        return not self.errors
+
+    def _error_lines(self) -> list[str]:
+        return [f"  ERROR: {e}" for e in self.errors]
+
+
 @dataclass
-class BoundariesReport:
+class BoundariesReport(ReportBase):
     """Result of the boundary reference-data load."""
 
     loaded: bool = False
     rows_by_level: dict[int, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
-
-    @property
-    def passed(self) -> bool:
-        return not self.errors
 
     def summary(self) -> str:
         lines = [
@@ -21,14 +31,12 @@ class BoundariesReport:
             "  Rows by level    : " + (", ".join(f"{k}={v}" for k, v in sorted(self.rows_by_level.items())) or "-"),
             f"  Status           : {'PASS' if self.passed else 'FAIL'}",
         ]
-        if self.errors:
-            for e in self.errors:
-                lines.append(f"  ERROR: {e}")
+        lines.extend(self._error_lines())
         return "\n".join(lines)
 
 
 @dataclass
-class ExtractionReport:
+class ExtractionReport(ReportBase):
     """Result of one unit source extract: counts, version and verification outcome."""
 
     source: str = ""
@@ -41,11 +49,6 @@ class ExtractionReport:
     errors: list[str] = field(default_factory=list)
     total_time: float = 0.0
 
-    @property
-    def passed(self) -> bool:
-        """True if the extract completed without errors (a skip is also a pass)."""
-        return not self.errors
-
     def summary(self) -> str:
         lines = [
             f"  Source file rows : {self.source_row_count}",
@@ -56,14 +59,12 @@ class ExtractionReport:
             f"  Status           : {'SKIPPED (already loaded)' if self.skipped else ('PASS' if self.passed else 'FAIL')}",
             f"  Total time       : {self.total_time:.3f}s",
         ]
-        if self.errors:
-            for e in self.errors:
-                lines.append(f"  ERROR: {e}")
+        lines.extend(self._error_lines())
         return "\n".join(lines)
 
 
 @dataclass
-class TransformReport:
+class TransformReport(ReportBase):
     """Result of one source's transform into its staging tables."""
 
     source: str = ""
@@ -77,10 +78,6 @@ class TransformReport:
     links_count: int = 0
     errors: list[str] = field(default_factory=list)
     total_time: float = 0.0
-
-    @property
-    def passed(self) -> bool:
-        return not self.errors
 
     def summary(self) -> str:
         lines = [
@@ -97,7 +94,5 @@ class TransformReport:
             f"  Status           : {'PASS' if self.passed else 'FAIL'}",
             f"  Total time       : {self.total_time:.3f}s",
         ]
-        if self.errors:
-            for e in self.errors:
-                lines.append(f"  ERROR: {e}")
+        lines.extend(self._error_lines())
         return "\n".join(lines)
