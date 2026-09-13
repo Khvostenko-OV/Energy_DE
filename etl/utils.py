@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import date
 from pathlib import Path
@@ -13,39 +12,8 @@ from etl.config import RAW_SCHEMA, SERVICE_SCHEMA
 
 FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
 
-RAW_COLUMNS = (
-    "energy_source",
-    "installed_capacity",
-    "commissioning_date",
-    "decommissioning_date",
-    "storage_capacity",
-    "storage_type",
-    "x_coordinates",
-    "y_coordinates",
-    "geo_accuracy",
-    "reference_id",
-    "reference_date",
-    "geometry",
-    "secondary_attributes",
-)
 
-COLUMN_MAPPING = {
-    "gas": {"gas_production_capacity": "installed_capacity"},
-}
-
-BOUNDARY_FILE_LEVELS = {
-    "boundary": 0,
-    "regions": 1,
-    "districts": 2,
-    "munis": 3,
-}
-
-BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
-
-BOUNDARY_RAW_COLUMNS = ("country_iso", "name", "geometry")
-
-
-def _version_tables(engine: Engine, source: str) -> list[tuple[str, int, str]]:
+def _raw_table_versions(engine: Engine, source: str) -> list[tuple[str, int, str]]:
     """List raw.<source>_<YYYYMMDD>_<n> tables as (day, counter, name), sorted."""
     pattern = re.compile(rf"^{re.escape(source)}_(\d{{8}})_(\d+)$")
     tables: list[tuple[str, int, str]] = []
@@ -65,7 +33,7 @@ def _version_tables(engine: Engine, source: str) -> list[tuple[str, int, str]]:
     return tables
 
 
-def _next_version_table(engine: Engine, source: str, day: date) -> str:
+def _next_table_version(engine: Engine, source: str, day: date) -> str:
     """Compute the next versioned table name for a source on a given day.
 
     Versions follow raw.<source>_<YYYYMMDD>_<n> with a per-source counter that
@@ -74,15 +42,15 @@ def _next_version_table(engine: Engine, source: str, day: date) -> str:
     """
     counters = [
         n
-        for (d, n, _name) in _version_tables(engine, source)
+        for (d, n, _name) in _raw_table_versions(engine, source)
         if d == f"{day:%Y%m%d}"
     ]
     return f"{source}_{day:%Y%m%d}_{max(counters, default=0) + 1}"
 
 
-def _latest_version_table(engine: Engine, source: str) -> str | None:
+def _latest_table_version(engine: Engine, source: str) -> str | None:
     """Return the most recent raw.<source>_<YYYYMMDD>_<n> table name, or None."""
-    versions = _version_tables(engine, source)
+    versions = _raw_table_versions(engine, source)
     return versions[-1][2] if versions else None
 
 
@@ -122,31 +90,6 @@ def _log_load(
         conn.commit()
 
 
-def _cast_types(df: pandas.DataFrame) -> None:
-    """Cast columns to the raw shape in place.
-
-    Commissioning and decommissioning dates keep the day resolution of the
-    source data; reference_date keeps its full timestamp including the time
-    of day (the incremental-load freshness gate downstream).
-    """
-    for col in ("commissioning_date", "decommissioning_date"):
-        if col in df.columns:
-            df[col] = df[col].apply(
-                lambda x: x[:10] if isinstance(x, str) and len(x) >= 10 else x
-            )
-            df[col] = pandas.to_datetime(df[col], errors="coerce").dt.date
-
-    if "reference_date" in df.columns:
-        df["reference_date"] = pandas.to_datetime(df["reference_date"], errors="coerce")
-
-    df["installed_capacity"] = df["installed_capacity"].astype("Float64")
-    df["x_coordinates"] = df["x_coordinates"].astype("Float64")
-    df["y_coordinates"] = df["y_coordinates"].astype("Float64")
-    df["geo_accuracy"] = df["geo_accuracy"].astype("Int64")
-    if "storage_capacity" in df.columns:
-        df["storage_capacity"] = df["storage_capacity"].astype("Float64")
-
-
 def _drop_duplicate_reference_ids(df: pandas.DataFrame) -> int:
     """Drop rows whose non-null reference_id appears earlier in the file.
 
@@ -158,26 +101,6 @@ def _drop_duplicate_reference_ids(df: pandas.DataFrame) -> int:
     dup_mask = df["reference_id"].duplicated(keep="first") & df["reference_id"].notna()
     df.drop(df.index[dup_mask], inplace=True)
     return before - len(df)
-
-
-def _build_secondary_attributes(df: pandas.DataFrame) -> int:
-    """Fold secondary attributes into a serialized JSON column stored as text.
-
-    All columns outside RAW_COLUMNS (and the geometry) are collapsed into a
-    per-row JSON document, dropping null/empty values; numpy scalars and date
-    values are stringified via the JSON default hook. Returns the count of
-    rows whose document is empty.
-    """
-    attr_cols = [c for c in df.columns if c not in RAW_COLUMNS]
-    df["secondary_attributes"] = df[attr_cols].apply(
-        lambda row: {k: v for k, v in row.items() if not pandas.isna(v)},
-        axis=1,
-    )
-    empty = int((df["secondary_attributes"].apply(len) == 0).sum())
-    df["secondary_attributes"] = df["secondary_attributes"].apply(
-        lambda d: json.dumps(d, default=str)
-    )
-    return empty
 
 
 def _source_from_filename(filename: str) -> str:

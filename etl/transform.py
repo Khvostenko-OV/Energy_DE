@@ -18,7 +18,7 @@ from etl.config import (
 )
 from etl.db_utils import _create_staging_tables, _ensure_schema
 from etl.reports import TransformReport
-from etl.utils import _latest_version_table
+from etl.utils import _latest_table_version
 from etl.verify import _verify_transform
 
 log = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ def transform_source(source: str) -> TransformReport:
         engine = get_engine()
         _ensure_schema(engine, STAGING_SCHEMA)
 
-        raw_table = _latest_version_table(engine, source)
+        raw_table = _latest_table_version(engine, source)
         if raw_table is None:
             raise ValueError(f"No raw version table found for source {source!r}")
         report.raw_table = raw_table
@@ -97,29 +97,38 @@ def transform_source(source: str) -> TransformReport:
         log.info("Spatial join against boundary levels 1/2/3...")
         t = time.perf_counter()
         for level, col in BOUNDARY_LEVEL_COLUMNS.items():
-            name_by_unit = _join_boundary_level(df, boundaries, level)
-            df[col] = df["unit_id"].map(name_by_unit)
+            layer = boundaries[boundaries["level"] == level][["name", "geometry"]]
+            joined = (
+                df[["unit_id", "geometry"]]
+                .sjoin(layer, how="left", predicate="intersects")
+                .drop_duplicates(subset="unit_id", keep="first")
+            )
+            df[col] = df["unit_id"].map(joined.set_index("unit_id")["name"])
             report.join_unmapped[col] = int(df[col].isna().sum())
         log.info(
             "Join coverage %s, time %.3fs",
             report.join_unmapped, time.perf_counter() - t,
         )
 
+        log.info("Running quality gate...")
+        t = time.perf_counter()
         reasons = _quality_reasons(df)
         df["bad_quality"] = reasons.apply(bool)
         report.bad_quality = int(df["bad_quality"].sum())
         report.quality_reasons = _reason_histogram(reasons)
         log.info(
-            "Quality gate: %d bad rows (%s)",
-            report.bad_quality, report.quality_reasons,
+            "Quality gate: %d bad rows (%s), time %.3fs",
+            report.bad_quality, report.quality_reasons, time.perf_counter() - t,
         )
 
+        log.info("Decomposing attributes...")
+        t = time.perf_counter()
         props, links = _decompose_attributes(df, reasons)
         report.properties_count = len(props)
         report.links_count = len(links)
         log.info(
-            "Decomposed into %d properties / %d links",
-            report.properties_count, report.links_count,
+            "Decomposed into %d properties / %d links, time %.3fs",
+            report.properties_count, report.links_count, time.perf_counter() - t,
         )
 
         log.info("Writing staging tables...")
@@ -189,22 +198,6 @@ def _synthetic_unit_id(source: str, x, y, capacity, commissioning) -> str:
     """Stable synthetic identity from a unit's own attributes (ADR 0001)."""
     payload = "|".join(str(v) for v in (source, x, y, capacity, commissioning))
     return "syn_" + hashlib.sha256(payload.encode()).hexdigest()[:16]
-
-
-def _join_boundary_level(
-    df: pandas.DataFrame, boundaries: gpd.GeoDataFrame, level: int
-) -> pandas.Series:
-    """Map each unit_id to the name of the boundary polygon it intersects.
-
-    Level determines the joined attribute (1=region, 2=district,
-    3=municipality). A unit intersecting several polygons of the same level
-    keeps the first match; an unmapped unit maps to NaN.
-    """
-    layer = boundaries[boundaries["level"] == level][["name", "geometry"]]
-    joined = df[["unit_id", "geometry"]].sjoin(
-        layer, how="left", predicate="intersects"
-    ).drop_duplicates(subset="unit_id", keep="first")
-    return joined.set_index("unit_id")["name"]
 
 
 def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:
@@ -281,12 +274,12 @@ def _decompose_attributes(
     units_properties. A bad quality row additionally links a 'bad_quality'
     property holding the newline-joined failed-check descriptions.
     """
-    unique: set[tuple[str, str]] = set()
-    per_unit: list[tuple[str, list[tuple[str, str]]]] = []
+    unique: set[tuple[str, str]] = set()  # distinct (name, value) pairs across all units
+    per_unit: list[tuple[str, list[tuple[str, str]]]] = []  # (unit_id, its pairs) per row
     for unit_id, attrs_json, failed in zip(
         df["unit_id"], df["secondary_attributes"], reasons
     ):
-        pairs: list[tuple[str, str]] = []
+        pairs: list[tuple[str, str]] = []  # this unit's (name, value) pairs + bad_quality link
         if attrs_json and str(attrs_json).strip() not in ("", "{}"):
             for name, value in json.loads(attrs_json).items():
                 pairs.append((str(name), str(value)))
@@ -295,7 +288,7 @@ def _decompose_attributes(
         unique.update(pairs)
         per_unit.append((unit_id, pairs))
 
-    ordered = sorted(unique)
+    ordered = sorted(unique)  # sorted pairs -> deterministic param_id assignment
     param_id = {pair: i + 1 for i, pair in enumerate(ordered)}
     props = pandas.DataFrame(
         [(i, name, value) for (name, value), i in param_id.items()],

@@ -1,34 +1,60 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import date
 from pathlib import Path
 
 import geopandas as gpd
+import pandas
 
 from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, get_engine
 from etl.db_utils import _create_log_table, _ensure_schema
 from etl.reports import BoundariesReport, ExtractionReport
 from etl.utils import (
-    BOUNDARY_COLUMN_MAPPING,
-    BOUNDARY_FILE_LEVELS,
-    BOUNDARY_RAW_COLUMNS,
-    COLUMN_MAPPING,
-    RAW_COLUMNS,
-    _build_secondary_attributes,
-    _cast_types,
     _compute_boundary_areas,
     _drop_duplicate_reference_ids,
     _is_logged,
     _log_load,
-    _next_version_table,
+    _next_table_version,
     _read_manifest,
     _source_from_filename,
 )
 from etl.verify import _verify_boundaries, _verify_extraction
 
 log = logging.getLogger(__name__)
+
+RAW_COLUMNS = (
+    "energy_source",
+    "installed_capacity",
+    "commissioning_date",
+    "decommissioning_date",
+    "storage_capacity",
+    "storage_type",
+    "x_coordinates",
+    "y_coordinates",
+    "geo_accuracy",
+    "reference_id",
+    "reference_date",
+    "geometry",
+    "secondary_attributes",
+)
+
+RAW_COLUMN_MAPPING = {
+    "gas": {"gas_production_capacity": "installed_capacity"},
+}
+
+BOUNDARY_FILE_LEVELS = {
+    "boundary": 0,
+    "regions": 1,
+    "districts": 2,
+    "munis": 3,
+}
+
+BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
+
+BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
 
 def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
@@ -74,7 +100,7 @@ def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
             report.source_row_count = len(df)
             log.info("%d rows loaded, time %.3fs", len(df), time.perf_counter() - t)
 
-            for old, new in COLUMN_MAPPING.get(source, {}).items():
+            for old, new in RAW_COLUMN_MAPPING.get(source, {}).items():
                 df = df.rename(columns={old: new})
 
             df["energy_source"] = source
@@ -103,7 +129,7 @@ def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
             keep_cols = [c for c in RAW_COLUMNS if c in df.columns]
             df = df[keep_cols]
 
-            table_name = _next_version_table(engine, source, date.today())
+            table_name = _next_table_version(engine, source, date.today())
             log.info("Writing to %s.%s ...", RAW_SCHEMA, table_name)
             t = time.perf_counter()
             df.to_postgis(
@@ -138,6 +164,51 @@ def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:
     log.info("Total time: %.3fs", report.total_time)
 
     return report
+
+
+def _cast_types(df: pandas.DataFrame) -> None:
+    """Cast columns to the raw shape in place.
+
+    Commissioning and decommissioning dates keep the day resolution of the
+    source data; reference_date keeps its full timestamp including the time
+    of day (the incremental-load freshness gate downstream).
+    """
+    for col in ("commissioning_date", "decommissioning_date"):
+        if col in df.columns:
+            df[col] = df[col].apply(
+                lambda x: x[:10] if isinstance(x, str) and len(x) >= 10 else x
+            )
+            df[col] = pandas.to_datetime(df[col], errors="coerce").dt.date
+
+    if "reference_date" in df.columns:
+        df["reference_date"] = pandas.to_datetime(df["reference_date"], errors="coerce")
+
+    df["installed_capacity"] = df["installed_capacity"].astype("Float64")
+    df["x_coordinates"] = df["x_coordinates"].astype("Float64")
+    df["y_coordinates"] = df["y_coordinates"].astype("Float64")
+    df["geo_accuracy"] = df["geo_accuracy"].astype("Int64")
+    if "storage_capacity" in df.columns:
+        df["storage_capacity"] = df["storage_capacity"].astype("Float64")
+
+
+def _build_secondary_attributes(df: pandas.DataFrame) -> int:
+    """Fold secondary attributes into a serialized JSON column stored as text.
+
+    All columns outside RAW_COLUMNS (and the geometry) are collapsed into a
+    per-row JSON document, dropping null/empty values; numpy scalars and date
+    values are stringified via the JSON default hook. Returns the count of
+    rows whose document is empty.
+    """
+    attr_cols = [c for c in df.columns if c not in RAW_COLUMNS]
+    df["secondary_attributes"] = df[attr_cols].apply(
+        lambda row: {k: v for k, v in row.items() if not pandas.isna(v)},
+        axis=1,
+    )
+    empty = int((df["secondary_attributes"].apply(len) == 0).sum())
+    df["secondary_attributes"] = df["secondary_attributes"].apply(
+        lambda d: json.dumps(d, default=str)
+    )
+    return empty
 
 
 def extract_boundaries(manifest: Path) -> BoundariesReport:
@@ -175,7 +246,7 @@ def extract_boundaries(manifest: Path) -> BoundariesReport:
                 raise ValueError(f"{filename} has no 'name' column")
 
             out = gdf.rename(columns=BOUNDARY_COLUMN_MAPPING)
-            drop = [c for c in out.columns if c not in BOUNDARY_RAW_COLUMNS]
+            drop = [c for c in out.columns if c not in BOUNDARY_COLUMNS]
             out = out.drop(columns=drop)
             out["level"] = level
             out["area"] = 0.0
