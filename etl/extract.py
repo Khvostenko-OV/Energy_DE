@@ -9,7 +9,16 @@ from pathlib import Path
 import geopandas as gpd
 import pandas
 
-from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, get_engine
+from etl.config import get_engine
+from etl.db_schema import (
+    BOUNDARY_COLUMNS,
+    BOUNDARY_COLUMN_MAPPING,
+    BOUNDARY_FILE_LEVELS,
+    RAW_COLUMNS,
+    RAW_COLUMN_MAPPING,
+    RAW_SCHEMA,
+    SERVICE_SCHEMA,
+)
 from etl.db_utils import _create_log_table, _ensure_schema
 from etl.reports import BoundariesReport, ExtractionReport
 from etl.utils import (
@@ -24,37 +33,6 @@ from etl.utils import (
 from etl.verify import _verify_boundaries, _verify_extraction
 
 log = logging.getLogger(__name__)
-
-RAW_COLUMNS = (
-    "energy_source",
-    "installed_capacity",
-    "commissioning_date",
-    "decommissioning_date",
-    "storage_capacity",
-    "storage_type",
-    "x_coordinates",
-    "y_coordinates",
-    "geo_accuracy",
-    "reference_id",
-    "reference_date",
-    "geometry",
-    "secondary_attributes",
-)
-
-RAW_COLUMN_MAPPING = {
-    "gas": {"gas_production_capacity": "installed_capacity"},
-}
-
-BOUNDARY_FILE_LEVELS = {
-    "boundary": 0,
-    "regions": 1,
-    "districts": 2,
-    "munis": 3,
-}
-
-BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
-
-BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
 
 def extract_source(file_path: Path, force: bool = False) -> ExtractionReport:

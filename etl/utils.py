@@ -8,7 +8,8 @@ import pandas
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, SOURCE_NAMES
+from etl.config import SOURCE_NAMES
+from etl.db_schema import RAW_SCHEMA, SERVICE_SCHEMA
 
 FILENAME_PATTERN = r"(" + "|".join(SOURCE_NAMES) + ")"
 

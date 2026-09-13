@@ -5,13 +5,13 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.config import (
+from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
     RAW_SCHEMA,
     SERVICE_SCHEMA,
     STAGING_SCHEMA,
+    STORAGE_COLUMNS,
 )
-from etl.db_utils import STORAGE_COLUMNS
 from etl.reports import ExtractionReport, TransformReport
 
 log = logging.getLogger(__name__)

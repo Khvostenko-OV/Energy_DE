@@ -3,9 +3,7 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, STAGING_SCHEMA
-
-STORAGE_COLUMNS = ("storage_type", "storage_capacity")
+from etl.db_schema import RAW_SCHEMA, SERVICE_SCHEMA, STAGING_SCHEMA, STORAGE_COLUMNS
 
 
 def _ensure_schema(engine: Engine, schema: str = RAW_SCHEMA) -> None:

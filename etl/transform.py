@@ -9,15 +9,16 @@ import geopandas as gpd
 import numpy
 import pandas
 
-from etl.config import (
+from etl.config import SYNTHETIC_ID_PREFIX, get_engine
+from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
+    BOUNDARY_LEVEL_COLUMNS,
     RAW_SCHEMA,
     SERVICE_SCHEMA,
+    STAGING_COLUMNS,
     STAGING_SCHEMA,
-    SYNTHETIC_ID_PREFIX,
-    get_engine,
 )
-from etl.db_utils import STORAGE_COLUMNS, _create_staging_tables, _ensure_schema
+from etl.db_utils import _create_staging_tables, _ensure_schema
 from etl.reports import TransformReport
 from etl.utils import _latest_table_version
 from etl.verify import _verify_transform
@@ -31,27 +32,6 @@ QUALITY_CAPACITY_NONPOSITIVE = "installed_capacity <= 0"
 QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
 QUALITY_REGION = "unit outside the boundaries (region is null)"
-
-BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
-
-STAGING_COLUMNS = (
-    "unit_id",
-    "energy_source",
-    "installed_capacity",
-    "commissioning_date",
-    "decommissioning_date",
-    "geometry",
-    "geo_accuracy",
-    "x_coordinates",
-    "y_coordinates",
-    "reference_id",
-    "reference_date",
-    "country_iso",
-    "region",
-    "district",
-    "municipality",
-    "bad_quality",
-) + STORAGE_COLUMNS
 
 
 def transform_source(source: str) -> TransformReport:
