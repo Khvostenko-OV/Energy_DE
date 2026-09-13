@@ -26,7 +26,8 @@ log = logging.getLogger(__name__)
 
 COORD_TOLERANCE_DEG = 1e-9
 
-QUALITY_CAPACITY = "wrong installed_capacity"
+QUALITY_CAPACITY_NULL = "installed_capacity is null"
+QUALITY_CAPACITY_NONPOSITIVE = "installed_capacity <= 0"
 QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
 QUALITY_REGION = "region is null (outside the boundaries)"
@@ -207,13 +208,13 @@ def _synthetic_unit_id(source: str, x, y, capacity, commissioning) -> str:
 def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:
     """Return one list of failed-check descriptions per row.
 
-    Checks follow the spec order: capacity, dates, coordinates, region. A row
-    nested in several polygons, nulls, and geometry/coordinate disagreements
-    all resolve to boolean masks here; the order of the joined list is stable.
+    Checks follow the spec order: capacity, dates, coordinates, region. Capacity
+    is its own gate with a null and a non-positive check. A row nested in several
+    polygons, nulls, and geometry/coordinate disagreements all resolve to boolean
+    masks here; the order of the joined list is stable.
     """
-    cap_bad = (
-        df["installed_capacity"].isna() | (df["installed_capacity"] <= 0)
-    ).to_numpy(dtype=bool)
+    cap_null = df["installed_capacity"].isna().to_numpy(dtype=bool)
+    cap_nonpositive = (df["installed_capacity"] <= 0).to_numpy(dtype=bool)
     dates_bad = (
         df["decommissioning_date"].notna()
         & df["commissioning_date"].notna()
@@ -223,12 +224,14 @@ def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:
     region_bad = df["region"].isna().to_numpy(dtype=bool)
 
     rows: list[list[str]] = []
-    for cap, dates, coords, region in zip(
-        cap_bad, dates_bad, coords_bad, region_bad
+    for c_null, c_nonpos, dates, coords, region in zip(
+        cap_null, cap_nonpositive, dates_bad, coords_bad, region_bad
     ):
         failed = []
-        if cap:
-            failed.append(QUALITY_CAPACITY)
+        if c_null:
+            failed.append(QUALITY_CAPACITY_NULL)
+        if c_nonpos:
+            failed.append(QUALITY_CAPACITY_NONPOSITIVE)
         if dates:
             failed.append(QUALITY_DATES)
         if coords:
