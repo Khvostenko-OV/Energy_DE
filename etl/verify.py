@@ -7,6 +7,7 @@ from sqlalchemy.engine import Engine
 
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
+    DECOMPOSED_PROPERTIES,
     RAW_SCHEMA,
     SERVICE_SCHEMA,
     STAGING_SCHEMA,
@@ -243,6 +244,28 @@ def _verify_transform(engine: Engine, source: str, report: TransformReport) -> l
     if links != report.links_count:
         errors.append(
             f"Links count mismatch: computed {report.links_count}, stored {links}"
+        )
+
+    quoted_names = ", ".join(f"'{k}'" for k in DECOMPOSED_PROPERTIES)
+    leaked = scalar(
+        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} "
+        f"WHERE secondary_attributes IS NOT NULL "
+        f"AND secondary_attributes::jsonb ?| ARRAY[{quoted_names}]"
+    )
+    if leaked:
+        errors.append(
+            f"{leaked} staging rows still carry whitelisted keys in secondary_attributes"
+        )
+
+    nonwhitelist = scalar(
+        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source}_properties "
+        f"WHERE name <> '{BAD_QUALITY_PROPERTY}' "
+        f"AND name NOT IN ({quoted_names})"
+    )
+    if nonwhitelist:
+        errors.append(
+            f"{nonwhitelist} non-whitelisted names found in "
+            f"{STAGING_SCHEMA}.{source}_properties"
         )
 
     if not errors:

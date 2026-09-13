@@ -45,12 +45,31 @@ STAGING_COLUMNS = (
     "geometry",
     "reference_id",
     "reference_date",
+    "secondary_attributes",
     "country_iso",
     "region",
     "district",
     "municipality",
     BAD_QUALITY_PROPERTY,
 ) + STORAGE_COLUMNS
+
+
+DECOMPOSED_PROPERTIES = (
+    "biomass_type",
+    "fuel_type",
+    "technology",
+    "reference_source",
+    "solar_type",
+    "note",
+    "location",
+    "alignment",
+    "inclination",
+    "hydro_type",
+    "inflow_type",
+    "manufacturer",
+    "rotor_diameter",
+    "hub_height",
+)
 
 
 BOUNDARY_FILE_LEVELS = {

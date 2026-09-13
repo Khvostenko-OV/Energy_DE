@@ -60,7 +60,7 @@ A generated staging unit_id for units lacking a reference ID (39 solar rows), de
 The single level-coded `raw.boundaries` table of administrative and maritime polygons (0 country outline, 1 regions + EEZ, 2 districts, 3 municipalities) used to assign each unit its region, district, and municipality by spatial join.
 
 **Region**:
-A Bundesland (federal state) or, for offshore units, the sea/EEZ area they fall in.
+A Bundesland (federal state) or, for offshore units, the sea/EEZ area they fall in. A unit that joins to no boundary row keeps a null region, is flagged `collision`, and is reported under the "outside" bucket in the marts.
 _Avoid_: State, Land
 
 **District**:
@@ -84,10 +84,10 @@ The `(filename, filesize, modified_at)` triplet recorded in `loaded_files`. A fi
 The extract layer: versioned per-source tables with secondary attributes folded into a `secondary_attributes` jsonb column, plus the `loaded_files` log and the level-coded `boundaries` table.
 
 **Staging**:
-The transform layer: raw rows enriched with region, district, and municipality via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with secondary attributes decomposed into normalized properties.
+The transform layer: raw rows enriched with region, district, and municipality via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`).
 
 **Core**:
-The consolidated layer: `generators` and `storages`, each unit appearing exactly once, holding a serial surrogate key and collision flags. Core rows are updated in place and never deleted.
+The consolidated layer: `generators` and `storages`, each unit appearing exactly once, holding a serial surrogate key, the reduced `secondary_attributes` jsonb, and collision flags. Core rows are updated in place and never deleted.
 
 **Marts**:
 The aggregation layer: three Postgres materialized views (installation counts, generation capacity, storage capacity) at region grain, computed from active units only.
@@ -97,17 +97,17 @@ Normalized (name, value) attribute pairs of a unit, linked many-to-many through 
 _Avoid_: Parameters
 
 **Secondary attributes**:
-The raw/staging jsonb column holding a unit's source attributes that have no fixed column. Decomposed into `properties` in staging.
+The raw/staging/core jsonb column holding a unit's source attributes that have no fixed column. Only the 14 whitelisted keys — `biomass_type`, `fuel_type`, `technology`, `reference_source`, `solar_type`, `note`, `location`, `alignment`, `inclination`, `hydro_type`, `inflow_type`, `manufacturer`, `rotor_diameter`, `hub_height` — are decomposed into `properties` in staging; the remaining keys (e.g. `biogas_unit`, `chp_unit`, `area_id`, `turbine_type`) stay in the json through staging and core. Decomposed keys are removed from the json, never duplicated.
 _Avoid_: Properties (column name — now a table, not a column)
 
 ### Quality
 
 **Bad quality**:
-A staging flag on a record failing a transform-level check (installed_capacity ≤ 0 or null; decommissioning_date before commissioning_date; coordinates conflicting with geometry; region null). The failing record is excluded from core, and a `bad_quality` property link carries the newline-joined descriptions.
+A staging flag on a record failing a transform-level check (installed_capacity ≤ 0 or null; decommissioning_date before commissioning_date; coordinates conflicting with geometry). The failing record is excluded from core, and a `bad_quality` property link carries the newline-joined descriptions. Region-null is deliberately not a staging check — it is a load-stage collision.
 _Avoid_: Error, anomaly
 
 **Collision**:
-A core flag on a unit flagged by a load-level check: two `geo_accuracy = 1` units less than 10 m apart, an onshore-labelled unit inside the sea, or a storage with `storage_capacity ≤ 0` or null. Collision rows remain in core, annotated by property links (`collision`, and `close_to` naming the neighbouring unit).
+A core flag on a unit flagged by a load-level check: two `geo_accuracy = 1` units less than 10 m apart, a unit the spatial join left outside every boundary (region null), an onshore-labelled unit inside the sea, or a storage with `storage_capacity ≤ 0` or null. Collision rows remain in core, annotated by property links (`collision`, and `close_to` naming the neighbouring unit).
 _Avoid_: Issue, error, anomaly
 
 **Close-to**:

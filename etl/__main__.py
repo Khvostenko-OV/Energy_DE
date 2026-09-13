@@ -79,9 +79,11 @@ def transform(source: str):
     Builds the staging row (unit_id — natural from reference_id or synthetic
     where absent, canonical energy_source, geo_accuracy, country_iso,
     geometry), spatially joins boundaries to assign region/district/
-    municipality, runs the quality gate, and decomposes secondary_attributes
-    into normalized properties. Storage staging additionally carries its
-    storage shape (storage_type, storage_capacity).
+    municipality, runs the quality gate, and decomposes the whitelisted
+    secondary attributes into normalized properties (the rest staying in the
+    reduced secondary_attributes json). A region-null row is not bad quality
+    (spec v2.2). Storage staging additionally carries its storage shape
+    (storage_type, storage_capacity).
     """
     report = transform_source(source)
 

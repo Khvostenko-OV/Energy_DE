@@ -13,6 +13,7 @@ from etl.config import get_engine
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
     BOUNDARY_LEVEL_COLUMNS,
+    DECOMPOSED_PROPERTIES,
     RAW_SCHEMA,
     SERVICE_SCHEMA,
     STAGING_COLUMNS,
@@ -33,7 +34,6 @@ QUALITY_CAPACITY_NULL = "installed_capacity is null"
 QUALITY_CAPACITY_NONPOSITIVE = "installed_capacity <= 0"
 QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
-QUALITY_REGION = "unit outside the boundaries (region is null)"
 
 
 def transform_source(source: str) -> TransformReport:
@@ -43,8 +43,11 @@ def transform_source(source: str) -> TransformReport:
     its staging identity (natural key from reference_id, synthetic hash where
     absent), enriches with region/district/municipality via a spatial join
     against the boundary reference layers, applies the quality gate, and
-    decomposes secondary_attributes into normalized property tables. A bad
-    quality row stays in staging but is never a candidate for core.
+    decomposes the whitelisted secondary attributes into normalized property
+    tables (the rest staying in the reduced `secondary_attributes` json).
+    A bad quality row stays in staging but is never a candidate for core; a
+    region-null row is not bad quality (spec v2.2 leaves that to the load
+    stage's collision checks).
     """
     report = TransformReport(source=source)
     start = time.perf_counter()
@@ -111,6 +114,7 @@ def transform_source(source: str) -> TransformReport:
         log.info("Decomposing attributes...")
         t = time.perf_counter()
         props, links = _decompose_attributes(df, reasons)
+        df["secondary_attributes"] = _reduce_secondary_attributes(df["secondary_attributes"])
         report.properties_count = len(props)
         report.links_count = len(links)
         log.info(
@@ -190,10 +194,12 @@ def _synthetic_unit_id(source: str, x, y, capacity, commissioning) -> str:
 def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:
     """Return one list of failed-check descriptions per row.
 
-    Checks follow the spec order: capacity, dates, coordinates, region. Capacity
-    is its own gate with a null and a non-positive check. A row nested in several
-    polygons, nulls, and geometry/coordinate disagreements all resolve to boolean
-    masks here; the order of the joined list is stable.
+    Checks follow the spec order: capacity, dates, coordinates. A region-null
+    row is deliberately not flagged here — "region is null" is a load-stage
+    collision (spec v2.2), not a staging bad-quality reason. Capacity is its
+    own gate with a null and a non-positive check. A row nested in several
+    polygons, nulls, and geometry/coordinate disagreements all resolve to
+    boolean masks here; the order of the joined list is stable.
     """
     cap_null = df["installed_capacity"].isna().to_numpy(dtype=bool)
     cap_nonpositive = (df["installed_capacity"] <= 0).to_numpy(dtype=bool)
@@ -203,11 +209,10 @@ def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:
         & (df["decommissioning_date"] <= df["commissioning_date"])
     ).to_numpy(dtype=bool)
     coords_bad = _coordinates_mismatch(df)
-    region_bad = df["region"].isna().to_numpy(dtype=bool)
 
     rows: list[list[str]] = []
-    for c_null, c_nonpos, dates, coords, region in zip(
-        cap_null, cap_nonpositive, dates_bad, coords_bad, region_bad
+    for c_null, c_nonpos, dates, coords in zip(
+        cap_null, cap_nonpositive, dates_bad, coords_bad
     ):
         failed = []
         if c_null:
@@ -218,8 +223,6 @@ def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:
             failed.append(QUALITY_DATES)
         if coords:
             failed.append(QUALITY_COORDS)
-        if region:
-            failed.append(QUALITY_REGION)
         rows.append(failed)
     return pandas.Series(rows, index=df.index, dtype=object)
 
@@ -230,8 +233,7 @@ def _coordinates_mismatch(df: pandas.DataFrame) -> numpy.ndarray:
     Flags rows whose (x_coordinates, y_coordinates) point differs from the
     geometry beyond the coordinate tolerance. Null coordinates or geometry
     produce NaN differences, which compare as False, so this check only fires
-    on a provable disagreement (a missing geometry is caught by the region
-    gate instead). Bio is fully aligned in the source data.
+    on a provable disagreement. Bio is fully aligned in the source data.
     """
     x = pandas.to_numeric(df["x_coordinates"], errors="coerce").to_numpy(dtype=float)
     y = pandas.to_numeric(df["y_coordinates"], errors="coerce").to_numpy(dtype=float)
@@ -253,15 +255,32 @@ def _reason_histogram(reasons: pandas.Series) -> dict[str, int]:
     return hist
 
 
+def _safe_attributes(json_str: object) -> dict[str, object]:
+    """Parse a secondary-attributes json document into a plain dict.
+
+    Nulls, empty documents, and unparseable leftovers all resolve to an empty
+    dict so downstream code never trips over a missing or malformed value.
+    """
+    if not json_str or str(json_str).strip() in ("", "{}"):
+        return {}
+    try:
+        parsed = json.loads(str(json_str))
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _decompose_attributes(
     df: pandas.DataFrame, reasons: pandas.Series
 ) -> tuple[pandas.DataFrame, pandas.DataFrame]:
-    """Split secondary_attributes into normalized properties and link rows.
+    """Split the whitelisted secondary attributes into normalized properties.
 
-    Distinct (name, value) pairs become properties rows with a deterministic
-    param_id in (name, value) order; each unit links to its pairs through
-    units_properties. A bad quality row additionally links a 'bad_quality'
-    property holding the newline-joined failed-check descriptions.
+    Distinct (name, value) pairs whose name is in DECOMPOSED_PROPERTIES become
+    properties rows with a deterministic param_id in (name, value) order; each
+    unit links to its pairs through units_properties. Keys outside the
+    whitelist are left for the staging `secondary_attributes` json. A bad
+    quality row additionally links a 'bad_quality' property holding the
+    newline-joined failed-check descriptions.
     """
     unique: set[tuple[str, str]] = set()  # distinct (name, value) pairs across all units
     per_unit: list[tuple[str, list[tuple[str, str]]]] = []  # (unit_id, its pairs) per row
@@ -269,8 +288,8 @@ def _decompose_attributes(
         df["unit_id"], df["secondary_attributes"], reasons
     ):
         pairs: list[tuple[str, str]] = []  # this unit's (name, value) pairs + bad_quality link
-        if attrs_json and str(attrs_json).strip() not in ("", "{}"):
-            for name, value in json.loads(attrs_json).items():
+        for name, value in _safe_attributes(attrs_json).items():
+            if name in DECOMPOSED_PROPERTIES:
                 pairs.append((str(name), str(value)))
         if failed:
             pairs.append((BAD_QUALITY_PROPERTY, "\n".join(failed)))
@@ -288,3 +307,22 @@ def _decompose_attributes(
         columns=["unit_id", "param_id"],
     )
     return props, links
+
+
+def _reduce_secondary_attributes(values: pandas.Series) -> pandas.Series:
+    """Strip the whitelisted keys from each row's attribute json.
+
+    Returns a json-serialized dict holding only the keys outside
+    DECOMPOSED_PROPERTIES; those attributes live in the normalized property
+    tables and must not be duplicated in the json (spec v2.2).
+    """
+
+    def drop_whitelisted(json_str: object) -> str:
+        reduced = {
+            k: v
+            for k, v in _safe_attributes(json_str).items()
+            if k not in DECOMPOSED_PROPERTIES
+        }
+        return json.dumps(reduced)
+
+    return values.map(drop_whitelisted)

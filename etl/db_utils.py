@@ -62,6 +62,7 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
                     y_coordinates        DOUBLE PRECISION,
                     reference_id         TEXT,
                     reference_date       TIMESTAMP,
+                    secondary_attributes TEXT,
                     country_iso          TEXT,
                     region               TEXT,
                     district             TEXT,
