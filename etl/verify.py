@@ -10,9 +10,9 @@ from etl.config import (
     RAW_SCHEMA,
     SERVICE_SCHEMA,
     STAGING_SCHEMA,
-    STORAGE_COLUMNS,
     SYNTHETIC_ID_PREFIX,
 )
+from etl.db_utils import STORAGE_COLUMNS
 from etl.reports import ExtractionReport, TransformReport
 
 log = logging.getLogger(__name__)
