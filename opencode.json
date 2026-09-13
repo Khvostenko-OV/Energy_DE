@@ -21,6 +21,7 @@
       "python *": "allow",
       "python3 *": "allow",
       ".venv/bin/python *": "allow",
+      ".venv/bin/python3 *": "allow",
       "git *": "allow",
       "git push*": "ask",
       "git pull*": "ask",

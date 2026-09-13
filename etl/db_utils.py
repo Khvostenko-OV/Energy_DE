@@ -54,7 +54,8 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
                 CREATE TABLE {STAGING_SCHEMA}.{source} (
                     unit_id              TEXT PRIMARY KEY,
                     energy_source        TEXT NOT NULL,
-                    {storage_shape}installed_capacity   DOUBLE PRECISION,
+                    {storage_shape}
+                    installed_capacity   DOUBLE PRECISION,
                     commissioning_date   DATE,
                     decommissioning_date DATE,
                     geometry             geometry(Point, 4326),
@@ -91,11 +92,5 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
                     PRIMARY KEY (unit_id, param_id)
                 )
                 """
-            )
-        )
-        conn.execute(
-            text(
-                f"CREATE INDEX {source}_geometry_gist "
-                f"ON {STAGING_SCHEMA}.{source} USING gist (geometry)"
             )
         )
