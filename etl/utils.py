@@ -8,9 +8,9 @@ import pandas
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.config import RAW_SCHEMA, SERVICE_SCHEMA
+from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, SOURCE_NAMES
 
-FILENAME_PATTERN = r"(bio|gas|hydro|solar|wind|storage)"
+FILENAME_PATTERN = r"(" + "|".join(SOURCE_NAMES) + ")"
 
 
 def _raw_table_versions(engine: Engine, source: str) -> list[tuple[str, int, str]]:

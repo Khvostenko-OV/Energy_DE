@@ -3,6 +3,7 @@ from pathlib import Path
 
 import click
 
+from etl.config import SOURCE_NAMES
 from etl.extract import extract_boundaries, extract_source
 from etl.transform import transform_source
 from etl.utils import _read_manifest
@@ -71,7 +72,7 @@ def boundaries(target: str):
 
 
 @cli.command()
-@click.argument("source", type=click.Choice(["bio", "gas", "hydro", "solar", "wind", "storage"]))
+@click.argument("source", type=click.Choice(SOURCE_NAMES))
 def transform(source: str):
     """Transform the latest raw version of SOURCE into its staging tables.
 
@@ -103,7 +104,7 @@ def run_all():
     ctx.invoke(extract, target="data/geo/sources.txt", force=False)
 
     click.echo("\nRunning transform stage for all sources...")
-    for source in ["bio", "gas", "hydro", "solar", "wind", "storage"]:
+    for source in SOURCE_NAMES:
         ctx.invoke(transform, source=source)
 
     click.echo("\nAll stages complete.")

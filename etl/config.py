@@ -11,6 +11,8 @@ STAGING_SCHEMA = "stage"
 CORE_SCHEMA = "core"
 SERVICE_SCHEMA = "serv"
 
+SOURCE_NAMES = ("bio", "gas", "hydro", "solar", "wind", "storage")
+
 BAD_QUALITY_PROPERTY = "bad_quality"
 SYNTHETIC_ID_PREFIX = "syn_"
 
