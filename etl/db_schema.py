@@ -19,26 +19,15 @@ RAW_COLUMNS = (
     "x_coordinates",
     "y_coordinates",
     "geo_accuracy",
+    "geometry",
     "reference_id",
     "reference_date",
-    "geometry",
     "secondary_attributes",
 )
 
 RAW_COLUMN_MAPPING = {
     "gas": {"gas_production_capacity": "installed_capacity"},
 }
-
-BOUNDARY_FILE_LEVELS = {
-    "boundary": 0,
-    "regions": 1,
-    "districts": 2,
-    "munis": 3,
-}
-
-BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
-
-BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
 BAD_QUALITY_PROPERTY = "bad_quality"
 
@@ -50,10 +39,10 @@ STAGING_COLUMNS = (
     "installed_capacity",
     "commissioning_date",
     "decommissioning_date",
-    "geometry",
-    "geo_accuracy",
     "x_coordinates",
     "y_coordinates",
+    "geo_accuracy",
+    "geometry",
     "reference_id",
     "reference_date",
     "country_iso",
@@ -62,5 +51,17 @@ STAGING_COLUMNS = (
     "municipality",
     BAD_QUALITY_PROPERTY,
 ) + STORAGE_COLUMNS
+
+
+BOUNDARY_FILE_LEVELS = {
+    "boundary": 0,
+    "regions": 1,
+    "districts": 2,
+    "munis": 3,
+}
+
+BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
+
+BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
 BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}

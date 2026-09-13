@@ -36,7 +36,7 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 - Read files to geopandas dataframes.
 - Type casting
 - Drop duplicates
-- Convert secondary properties to dictionary, place it to column 'properties'
+- Convert secondary properties to dictionary, place it to column 'secondary_attributes'
 - Save to PostGIS datalake. Table names should contain source type, date of load, number of load
 #### Load administrative and maritime boundaries
 - Load .gpkg files with boundaries into table **boundaries**
@@ -44,12 +44,26 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 - Input: list of tables to be transformed
 - Add primary keys
 - Enrich tables with columns 'region', 'district', 'municipality' (spatial join with Boundaries)
-- Decompose properties dictionaries to normalized tables (many-to-many)
+- Decompose some properties to normalized table **properties** (other properties stay in 'secondary_attribures').
+Properties to decompose:
+  - biomass_type
+  - fuel_type
+  - technology
+  - reference_source
+  - solar_type
+  - note
+  - location
+  - alignment
+  - inclination
+  - hydro_type
+  - inflow_type
+  - manufacturer
+  - rotor_diameter
+  - hub_height
 - Quality check. Flag bad records, add property 'bad_record' in which append failed tests description:
   1. installed_capacity <=0 or null
   2. decommissioning_date <= commissioning_date
   3. x_coordinates, y_coordinates and geometry do not match
-  4. region is null
 - Save tables to PostGIS
 ### 3. Load
 #### First load
@@ -61,8 +75,9 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 - Create indexes
 - Quality check. Flag collisions, add property 'collision' with collisions description, 
 add property 'close_to' with reference to close unit
-  1. Close location. Distance between units < 10m (only if geo_accuracy=1)
-  2. Onshore unit in the sea
+  1. close location. Distance between units < 10m (only if geo_accuracy=1)
+  2. region is null
+  2. onshore unit in the sea
   3. storage_capacity <=0 or null (for storages)
 
 #### Incremental load 
@@ -133,7 +148,7 @@ add property 'close_to' with reference to close unit
 | y_coordinates         | float     | Latitude WGS-84                                    |
 | geo_accuracy          | int       | 1/2                                                |
 | reference_id          | str       | Reference id of the record in the original source  |
-| reference_date        | date      | Timestamp of the record in the original source     |
+| reference_date        | timestamp | Timestamp of the record in the original source     |
 | geometry              | point     | WGS-84                                             |
 | secondary_attributes  | text      | Dictionary of secondary attributes                 |
 
@@ -158,8 +173,9 @@ add property 'close_to' with reference to close unit
 | decommissioning_date | date      | Decommissioning date of the system                |
 | geometry             | point     | WGS-84                                            |
 | geo_accuracy         | int       | 1/2                                               |
-| reference_date       | date      | Timestamp of the record in the original source    |
+| reference_date       | timestamp | Timestamp of the record in the original source    |
 | reference_id         | str       | Reference id of the record in the original source |
+| secondary_attributes | text      | Dictionary of secondary attributes                |
 | country_iso          | str       | DEU                                               |
 | region               | str       | Bundesland / Sea                                  |
 | district             | str       | Landkreis                                         |
@@ -178,7 +194,8 @@ add property 'close_to' with reference to close unit
 | geometry             | point     | WGS-84                                             |
 | geo_accuracy         | int       | 1/2                                                |
 | reference_id         | str       | Reference id of the record in the original source  |
-| reference_date       | date      | Timestamp of the record in the original source     |
+| reference_date       | timestamp | Timestamp of the record in the original source     |
+| secondary_attributes | text      | Dictionary of secondary attributes                 |
 | country_iso          | str       | DEU                                                |
 | region               | str       | Bundesland / Sea                                   |
 | district             | str       | Landkreis                                          |
@@ -211,13 +228,14 @@ add property 'close_to' with reference to close unit
 | decommissioning_date | date      | Decommissioning date of the system                |
 | geometry             | point     | WGS-84                                            |
 | geo_accuracy         | int       | 1/2                                               |
-| reference_date       | date      | Timestamp of the record in the original source    |
+| reference_date       | timestamp | Timestamp of the record in the original source    |
 | reference_id         | str       | Reference id of the record in the original source |
+| secondary_attributes | text      | Dictionary of secondary attributes                |
 | country_iso          | str       | DEU                                               |
 | region               | str       | Bundesland / Sea                                  |
 | district             | str       | Landkreis                                         |
 | municipality         | str       | Gemeinde                                          |
-| collision            | bool      | Flag collisions                                    |
+| collision            | bool      | Flag collisions                                   |
 
 #### storages
 | Column               | Data type | Description                                        |
@@ -231,7 +249,8 @@ add property 'close_to' with reference to close unit
 | geometry             | point     | WGS-84                                             |
 | geo_accuracy         | int       | 1/2                                                |
 | reference_id         | str       | Reference id of the record in the original source  |
-| reference_date       | date      | Timestamp of the record in the original source     |
+| reference_date       | timestamp | Timestamp of the record in the original source     |
+| secondary_attributes | text      | Dictionary of secondary attributes                 |
 | country_iso          | str       | DEU                                                |
 | region               | str       | Bundesland / Sea                                   |
 | district             | str       | Landkreis                                          |
