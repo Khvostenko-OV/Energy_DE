@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, STAGING_SCHEMA
+from etl.config import RAW_SCHEMA, SERVICE_SCHEMA, STAGING_SCHEMA, STORAGE_COLUMNS
 
 
 def _ensure_schema(engine: Engine, schema: str = RAW_SCHEMA) -> None:
@@ -34,6 +34,12 @@ def _create_log_table(engine: Engine) -> None:
 
 def _create_staging_tables(engine: Engine, source: str) -> None:
     """Drop and recreate the source's three staging tables with constraints."""
+    storage_shape = ""
+    if source == "storage":
+        storage_shape = (
+            f"{STORAGE_COLUMNS[0]}         TEXT,\n"
+            f"{STORAGE_COLUMNS[1]}  DOUBLE PRECISION,\n"
+        )
     with engine.begin() as conn:
         conn.execute(
             text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{source}_units_properties CASCADE")
@@ -46,7 +52,7 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
                 CREATE TABLE {STAGING_SCHEMA}.{source} (
                     unit_id              TEXT PRIMARY KEY,
                     energy_source        TEXT NOT NULL,
-                    installed_capacity   DOUBLE PRECISION,
+                    {storage_shape}installed_capacity   DOUBLE PRECISION,
                     commissioning_date   DATE,
                     decommissioning_date DATE,
                     geometry             geometry(Point, 4326),

@@ -71,16 +71,16 @@ def boundaries(target: str):
 
 
 @cli.command()
-@click.argument("source", type=click.Choice(["bio"]))
+@click.argument("source", type=click.Choice(["bio", "gas", "hydro", "solar", "wind", "storage"]))
 def transform(source: str):
     """Transform the latest raw version of SOURCE into its staging tables.
 
-    Builds the staging row (unit_id, canonical energy_source, geo_accuracy,
-    country_iso, geometry), spatially joins boundaries
-    to assign region/district/municipality, runs the quality gate, and
-    decomposes secondary_attributes into normalized properties. Bio is the
-    first source to have the full transform path; the remaining sources land
-    with the all-sources transform ticket.
+    Builds the staging row (unit_id — natural from reference_id or synthetic
+    where absent, canonical energy_source, geo_accuracy, country_iso,
+    geometry), spatially joins boundaries to assign region/district/
+    municipality, runs the quality gate, and decomposes secondary_attributes
+    into normalized properties. Storage staging additionally carries its
+    storage shape (storage_type, storage_capacity).
     """
     report = transform_source(source)
 
@@ -101,6 +101,10 @@ def run_all():
 
     click.echo("\nRunning extract stage...")
     ctx.invoke(extract, target="data/geo/sources.txt", force=False)
+
+    click.echo("\nRunning transform stage for all sources...")
+    for source in ["bio", "gas", "hydro", "solar", "wind", "storage"]:
+        ctx.invoke(transform, source=source)
 
     click.echo("\nAll stages complete.")
 

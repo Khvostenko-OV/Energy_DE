@@ -71,6 +71,7 @@ class TransformReport(ReportBase):
     raw_table: str | None = None
     rows_read: int = 0
     rows_written: int = 0
+    synthetic_ids: int = 0
     join_unmapped: dict[str, int] = field(default_factory=dict)
     bad_quality: int = 0
     quality_reasons: dict[str, int] = field(default_factory=dict)
@@ -84,6 +85,7 @@ class TransformReport(ReportBase):
             f"  Raw table        : {self.raw_table or '-'}",
             f"  Rows read        : {self.rows_read}",
             f"  Rows written     : {self.rows_written}",
+            f"  Synthetic ids    : {self.synthetic_ids}",
             "  Join unmapped    : "
             + (", ".join(f"{k}={v}" for k, v in self.join_unmapped.items()) or "-"),
             f"  Bad quality      : {self.bad_quality}",

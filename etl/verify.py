@@ -5,10 +5,24 @@ import logging
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.config import BAD_QUALITY_PROPERTY, RAW_SCHEMA, SERVICE_SCHEMA, STAGING_SCHEMA
+from etl.config import (
+    BAD_QUALITY_PROPERTY,
+    RAW_SCHEMA,
+    SERVICE_SCHEMA,
+    STAGING_SCHEMA,
+    STORAGE_COLUMNS,
+    SYNTHETIC_ID_PREFIX,
+)
 from etl.reports import ExtractionReport, TransformReport
 
 log = logging.getLogger(__name__)
+
+# Sources carrying rows without a reference_id, tagged with a synthetic
+# staging unit_id (ADR 0001): the Fraunhofer-sourced solar rows.
+SYNTHETIC_ID_EXPECTED = {"solar": 39}
+
+# LIKE pattern matching a literal SYNTHETIC_ID_PREFIX ('syn_') prefix.
+SYNTHETIC_ID_LIKE = SYNTHETIC_ID_PREFIX.replace("_", r"\_") + "%"
 
 
 def _verify_boundaries(engine: Engine) -> list[str]:
@@ -120,6 +134,30 @@ def _verify_transform(engine: Engine, source: str, report: TransformReport) -> l
     if dup_natural:
         errors.append(f"Duplicate natural keys (energy_source, reference_id): {dup_natural}")
 
+    syn_rows = scalar(
+        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} "
+        f"WHERE unit_id LIKE '{SYNTHETIC_ID_LIKE}'"
+    )
+    if syn_rows != report.synthetic_ids:
+        errors.append(
+            f"Synthetic identity count mismatch: computed {report.synthetic_ids}, "
+            f"stored {syn_rows}"
+        )
+    dup_syn = scalar(
+        f"SELECT COUNT(*) FROM (SELECT unit_id FROM {STAGING_SCHEMA}.{source} "
+        f"WHERE unit_id LIKE '{SYNTHETIC_ID_LIKE}' "
+        f"GROUP BY unit_id HAVING COUNT(*) > 1) d"
+    )
+    if dup_syn:
+        errors.append(f"Duplicate synthetic identity: {dup_syn}")
+
+    expected_syn = SYNTHETIC_ID_EXPECTED.get(source, 0)
+    if report.synthetic_ids != expected_syn:
+        errors.append(
+            f"Synthetic identity count for {source}: expected {expected_syn}, "
+            f"got {report.synthetic_ids}"
+        )
+
     with engine.connect() as conn:
         sources = [
             r[0]
@@ -143,6 +181,37 @@ def _verify_transform(engine: Engine, source: str, report: TransformReport) -> l
         errors.append(f"Canonical energy_source is {sources}, expected {[report.source]}")
     if iso != ["DEU"]:
         errors.append(f"country_iso is {iso}, expected ['DEU']")
+
+    if source == "storage":
+        missing_shape = [
+            col
+            for col in STORAGE_COLUMNS
+            if not scalar(
+                f"SELECT COUNT(*) FROM information_schema.columns "
+                f"WHERE table_schema = '{STAGING_SCHEMA}' AND table_name = '{source}' "
+                f"AND column_name = '{col}'"
+            )
+        ]
+        if missing_shape:
+            errors.append(
+                f"Staging table {source} missing storage shape columns: {missing_shape}"
+            )
+        untyped = scalar(
+            f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} WHERE storage_type IS NULL"
+        )
+        if untyped:
+            errors.append(
+                f"{untyped} storage rows missing storage_type"
+            )
+        with_capacity = scalar(
+            f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} "
+            f"WHERE storage_capacity IS NOT NULL"
+        )
+        log.info(
+            "Storage shape: %s, storage_type non-null on all %d rows, "
+            "storage_capacity present on %d rows",
+            missing_shape or "ok", stored_rows, with_capacity,
+        )
 
     for col, unmapped in report.join_unmapped.items():
         stored = scalar(

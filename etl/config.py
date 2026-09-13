@@ -12,6 +12,9 @@ CORE_SCHEMA = "core"
 SERVICE_SCHEMA = "serv"
 
 BAD_QUALITY_PROPERTY = "bad_quality"
+SYNTHETIC_ID_PREFIX = "syn_"
+
+STORAGE_COLUMNS = ("storage_type", "storage_capacity")
 
 
 def get_engine():
