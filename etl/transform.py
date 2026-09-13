@@ -9,7 +9,7 @@ import geopandas as gpd
 import numpy
 import pandas
 
-from etl.config import SYNTHETIC_ID_PREFIX, get_engine
+from etl.config import get_engine
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
     BOUNDARY_LEVEL_COLUMNS,
@@ -26,6 +26,8 @@ from etl.verify import _verify_transform
 log = logging.getLogger(__name__)
 
 COORD_TOLERANCE_DEG = 1e-9
+
+SYNTHETIC_ID_PREFIX = "syn_"
 
 QUALITY_CAPACITY_NULL = "installed_capacity is null"
 QUALITY_CAPACITY_NONPOSITIVE = "installed_capacity <= 0"
@@ -74,7 +76,7 @@ def transform_source(source: str) -> TransformReport:
         )
 
         df["unit_id"] = _unit_ids(df, source)
-        report.synthetic_ids = int(df["unit_id"].str.startswith("syn_").sum())
+        report.synthetic_ids = int(df["unit_id"].str.startswith(SYNTHETIC_ID_PREFIX).sum())
         df["energy_source"] = source
         df["country_iso"] = "DEU"
         df["geo_accuracy"] = df["geo_accuracy"].astype("Int64")

@@ -40,6 +40,8 @@ BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
 
 BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
+BAD_QUALITY_PROPERTY = "bad_quality"
+
 STORAGE_COLUMNS = ("storage_type", "storage_capacity")
 
 STAGING_COLUMNS = (
@@ -58,9 +60,7 @@ STAGING_COLUMNS = (
     "region",
     "district",
     "municipality",
-    "bad_quality",
+    BAD_QUALITY_PROPERTY,
 ) + STORAGE_COLUMNS
 
 BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
-
-BAD_QUALITY_PROPERTY = "bad_quality"
