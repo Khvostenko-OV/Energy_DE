@@ -1,12 +1,14 @@
 # Code review — Transform all sources incl. offshore + synthetic identity (issue #5)
 
 - **Date:** 2026-09-13
-- **Fixed point:** `HEAD` (`ae67c33`) — reviewed the uncommitted working-tree diff
-- **Diff:** `git diff HEAD` — 6 files, 94 insertions / 11 deletions (`etl/transform.py`, `etl/verify.py`, `etl/db_utils.py`, `etl/config.py`, `etl/reports.py`, `etl/__main__.py`)
-- **Reviewed artifacts:** the transform stage scaled from bio-only to all six sources: storage-aware staging DDL, per-source staging columns, synthetic-identity verification, storage-shape verification, CLI choices + `run_all` transforms
-- **Spec source:** GitHub issue #5 + TechnicalSpecification.md + CONTEXT.md + ADR 0001/0005 + prior review `code-review-transform-bioenergy-20260913.md`
-- **Standards sources:** AGENTS.md + CONTEXT.md + ADRs + Fowler smell baseline (Refactoring ch.3)
-- **Decisions locked with the user:** lowercase canonical `energy_source` keys (issue #4 convention); strict sjoin for offshore wind (1 unit at a ~4 m coastal polygon gap is region-null → bad, so "zero unmapped" is knowingly not literal); no pytest suite (verify via DB).
+- **Fixed point:** `ae67c33` — post-commit re-review of the committed diff
+- **Diff:** `git diff ae67c33...HEAD` — 8 files, 161 insertions / 23 deletions (incl. the prior review doc; 6 `etl/*.py` files carry the code)
+- **Commits:** `ea1f85b` feat (all sources), `35e8b57` storage shape into STAGING_COLUMNS, `b5455bc` STORAGE_COLUMNS → db_utils, `f0b94fb` SOURCE_NAMES drive CLI + filename regex, `87b982b` capacity gate split
+- **Reviewed artifacts:** storage-aware staging DDL + shared STAGING_COLUMNS, synthetic-identity verification (count/uniqueness/expectation), storage-shape verification, quality-gate split into null / non-positive capacity checks, all-driven-by-SOURCE_NAMES CLI + `run_all`
+- **Spec source:** GitHub issue #5 (fetched via `gh issue view 5`), issue #4 (parent/blocker + its "bad_quality never → core" rule), TechnicalSpecification.md, CONTEXT.md, ADR 0001/0005
+- **Standards sources:** AGENTS.md + CONTEXT.md + ADRs + TechnicalSpecification.md + prior review `code-review-transform-all-sources-20260913.md` + Fowler smell baseline (Refactoring ch.3)
+- **Context:** implementation was verified against live PostGIS (six staging tables, 39 solar synthetic ids, 1,688 offshore wind in sea/EEZ regions, storage shape carried, per-source verify PASS). Code-below check only.
+- **Decisions locked with the user:** lowercase canonical `energy_source` keys; strict sjoin for offshore wind (1 coastal-gap unit region-null → bad); no pytest.
 
 Two-axis review: **Standards** (conformance + smells) and **Spec** (faithful implementation), deliberately kept separate.
 
@@ -14,31 +16,29 @@ Two-axis review: **Standards** (conformance + smells) and **Spec** (faithful imp
 
 ## Standards
 
-- **(fixed) Synthetic-ID uniqueness gap from the prior review is closed.** `_verify_transform` now checks the stored synthetic count against the computed count, enforces synthetic `unit_id` uniqueness, and gates the per-source expectation (39 solar). The only dormant gap — synthetic rows excluded from natural-key uniqueness — is now explicitly verified.
-- **Hard — `syn_` prefix duplicated across files.** `etl/transform.py:_synthetic_unit_id` embeds the raw `"syn_"` literal while `etl/verify.py` derives its LIKE pattern from a local `SYNTHETIC_ID_PREFIX`. Renaming the prefix in one place would silently break the other. *Remediated:* `SYNTHETIC_ID_PREFIX` now lives in `etl/config.py` next to `BAD_QUALITY_PROPERTY`, imported by both transform and verify.
-- **Duplicated Code (reports.py) — unaddressed, pre-existing.** The shared `errors`/`passed`/`summary` shape across the three report classes was flagged last review; this diff only adds a field to the same structure. Left as out-of-scope refactor.
-- **Data Clumps (config.py) — reinforced.** `STORAGE_COLUMNS` joins `BAD_QUALITY_PROPERTY` in the schema/infrastructure module. Both are domain constants in an infra home; the prior review's suggestion (domain module) stands but is a judgement call.
-- **Shotgun Surgery (quality annotations) — pre-existing.** Reason strings still live only in `transform.py` while `verify.py` string-matches property names/values. The new synthetic-identity pair is no longer duplicated after remediation.
-
-**Baseline smells (judgement calls):**
-- **Primitive Obsession (`db_utils.py`):** the storage shape is an f-string fragment interpolated into `CREATE TABLE`; "storage ⇒ two extra columns" is a domain concept hiding behind string weaving. A small DDL builder or schema mapping would read better but is arguably over-engineering for a 2-column delta.
-- **Repeated Switches:** `if source == "storage"` recurs in `db_utils.py`, `transform.py`, and `verify.py`. Each site does a genuinely different thing (DDL, column list, verification), so a shared mapping offered little and was not introduced.
-- **Speculative Generality (`verify.py:SYNTHETIC_ID_EXPECTED={"solar": 39}`):** a hard-coded per-source count that could drift on data refresh. Kept deliberately: the AC literally requires 39 synthetic identities, and "fail loudly on drift" is the repo's stated verification philosophy.
+- **Hard — leftover `syn_` literal despite the claimed single-source remediation.** The prior review recorded the standard: "`SYNTHETIC_ID_PREFIX` now lives in `etl/config.py`… imported by both transform and verify." Both sub-agents independently caught that `etl/transform.py:97` still counts synthetic identities with the raw literal `df["unit_id"].str.startswith("syn_")`, and `etl/transform.py:182` re-documents the prefix in prose. Renaming the config constant silently skews the synthetic-count report line plus the verify gate that cross-checks it — exactly the drift the remediation claimed to close. `verify.py` derives its LIKE pattern from the constant; the transform count does not. The two only stay consistent by coincidence (though the cross-check makes the breakage fail loudly). *Fix: `df["unit_id"].str.startswith(SYNTHETIC_ID_PREFIX)`.*
+- **Primitive Obsession / Data Clumps — storage shape (`db_utils.py:37-44`).** The two-column shape is an f-string fragment addressed by tuple index (`STORAGE_COLUMNS[0]` → `TEXT`, `[1]` → `DOUBLE PRECISION`); the column names travel in the tuple while their types live only in the DDL string. Swapping the tuple order silently attaches the types to the wrong columns. A `{column: type}` mapping would bind names to types. Judgement call — a 2-column delta keeps this low-severity.
+- **Duplicated Code — storage column names recur as literals (`verify.py:200,208`).** `STORAGE_COLUMNS` covers the schema-existence check but is bypassed for the data-level checks (`storage_type IS NULL`, `storage_capacity IS NOT NULL`); the whitespace-aligned DDL also re-encodes both names. The "storage shape" concept lives across `db_utils.py`, `verify.py`, and `STAGING_COLUMNS` in `transform.py` with no single home. Judgement call.
+- **Repeated Switches — `source == "storage"` (`db_utils.py:39`, `verify.py:185`).** Two sites, genuinely different concerns (DDL vs verification); consistent with the prior review's pass. Judgement call, no action.
+- **Data Clumps (config/db_utils) — reinforced, not new.** `STORAGE_COLUMNS` in infra modules joins `BAD_QUALITY_PROPERTY`; the domain-module suggestion from the prior review still stands. Judgement call.
+- **Speculative Generality — `SYNTHETIC_ID_EXPECTED={"solar": 39}` (`verify.py:22`).** Hard-coded per-source count that can drift on data refresh; defensible because the AC literally demands 39 and the repo's philosophy is "fail loudly on drift". Judgement call, keep.
+- **Not flagged:** the capacity gate split (`installed_capacity is null` / `installed_capacity <= 0`) matches CONTEXT.md's Bad quality definition exactly; `SOURCE_NAMES` driving the CLI choice and the filename regex is a genuine single-source; `SYNTHETIC_ID_LIKE` deriving from the constant is correct; verify never string-matches reason strings, so the reason renames don't reopen prior Shotgun Surgery.
 
 ## Spec
 
-Reviewed against issue #5 (scaling transform to all six sources), TechnicalSpecification.md, CONTEXT.md, ADR 0001/0005.
+Reviewed against issue #5 + issue #4 (blocker, "bad_quality rows must never be loaded into core") + TechnicalSpecification.md + CONTEXT.md + ADR 0001/0005.
 
-- **(a) Missing/partial requirements — none material.** All six staging tables built with the bio mechanics; solar 39 synthetic identities present (`syn_` prefix, none dropped, 27 good / 12 bad-capacity); offshore wind = 1,688 sea-region rows (North Sea 1,380 + Baltic Sea 308) with the 1 coastal-gap unit region-null → bad; storage shape carried; geo_accuracy=2 (3,023 rows) unflagged; per-source verification all PASS.
-- **(b) Scope creep — `energy_source` kept on the storage staging table.** The spec's storage staging listing (TechnicalSpecification.md:169-186) omits `energy_source`. It is retained deliberately: the raw storage table already carries it, CONTEXT.md's controlled vocabulary includes "Storage" as a canonical value, marts pivot on it, and dropping it would lose data vs raw. Recorded as an accepted delta, consistent end to end.
-- **(c) Column-order divergence — fixed.** Storage DDL placed `energy_source` before the storage columns while `_staging_columns` yielded the reverse; name-based `to_postgis` worked but the layouts disagreed. `_staging_columns` now inserts the storage columns at index 2 (`unit_id, energy_source, storage_type, storage_capacity, …`), matching the DDL.
-- **(d) Storage-shape verification strengthened** beyond column existence: `storage_type` must be non-null on every row, and the `storage_capacity` presence count is logged (1,250/1,348, matching the source). The AC is thus checked at the data level, not just the schema level.
+- **(a) AC "zero unmapped units" is not literally met.** The strict `intersects` sjoin leaves offshore unit SEE982025668680 region-null (≈4 m coastal polygon gap), so verify reports it unmapped and the quality gate marks it `bad_quality`. Because #4 requires bad_quality rows to stay out of core, an in-EEZ turbine is silently dropped from the final dataset. This is the documented, user-accepted strict-sjoin interpretation — but the AC wording ("zero unmapped units within Germany's EEZ plus the onshore set") is technically unsatisfied for a unit inside the EEZ.
+- **(b) Scope creep — `energy_source` retained on the storage staging table.** The spec's storage staging listing (TechnicalSpecification.md:169-186) omits the column; the implementation keeps it (DDL + STAGING_COLUMNS). Recorded as an accepted delta (raw carries it, marts pivot on it), but it widens the storage shape beyond the spec.
+- **(b) Capacity gate split drifts the reason vocabulary.** Issue #4 phrased the check as the single "installed_capacity ≤0 or null" failure; splitting into two reason strings changes the stored `bad_quality` property-link values and the bad-quality distribution baseline. Deliberate (better diagnostics), but not asked for.
+- **(c) Synthetic-prefix single-source is half-done** — same root cause as the standards hard finding (`transform.py:97` literal vs config constant). Self-protecting: a rename would surface as a verify count mismatch and fail loudly. Still, the documented remediation is incomplete.
+- **(c) `storage_capacity` type vs spec — log a discrepancy, don't change.** TechnicalSpecification.md:174 lists `storage_capacity` as `str`; the DDL declares `DOUBLE PRECISION`. The spec is self-inconsistent (the raw layer's column is numeric), the implementation follows the data; per AGENTS.md, the data wins. Worth a logged discrepancy.
 
-**AC cross-check:** six staging tables ✓ uniform mechanics ✓; canonical labels enforced (lowercase source key convention from issue #4, user-confirmed) ✓; 39 solar synthetic identities, prefix-recognized, unflagged-in-v2 ✓; offshore wind joins level-1 sea regions (1,688) with 1 gap unit flagged ✓; storage shape carried + geo_accuracy=2 unflagged ✓; per-source verification (natural-key uniqueness incl. synthetics, join coverage, decomposition counts, bad-quality distribution) all PASS ✓.
+**AC cross-check:** three of four ACs fully implemented; storage shape and geo_accuracy=2 unflagging correct; outstanding risks are the non-literal "zero unmapped" (data-loss consequence) and the unrequested storage `energy_source` column — both knowingly accepted and documented.
 
 ---
 
 ## Summary
 
-- **Standards — 5 findings** (1 hard — duplicated `syn_` prefix, remediated; 4 judgement calls / pre-existing); worst remaining: config.py continues to hold domain constants.
-- **Spec — 4 findings** (1 accepted delta, 2 remediated, 1 strengthened); worst: none outstanding — `energy_source` on storage is a deliberate, recorded delta.
+- **Standards — 6 findings** (1 hard — the leftover `syn_` literal at `transform.py:97` contradicting the claimed single-source remediation; 5 judgement calls/smells, most carried-forward). Worst: that hard literal.
+- **Spec — 4 findings** (2 accepted deltas, 1 self-protecting partial, 1 log-worthy type discrepancy). Worst: the non-literal "zero unmapped" AC whose data-loss consequence is accepted but unsatisfied.
