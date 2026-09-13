@@ -42,6 +42,8 @@ STAGING_COLUMNS = (
     "decommissioning_date",
     "geometry",
     "geo_accuracy",
+    "x_coordinates",
+    "y_coordinates",
     "reference_id",
     "reference_date",
     "country_iso",

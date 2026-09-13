@@ -60,6 +60,8 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
                     decommissioning_date DATE,
                     geometry             geometry(Point, 4326),
                     geo_accuracy         BIGINT,
+                    x_coordinates        DOUBLE PRECISION,
+                    y_coordinates        DOUBLE PRECISION,
                     reference_id         TEXT,
                     reference_date       TIMESTAMP,
                     country_iso          TEXT,
