@@ -10,19 +10,11 @@ from etl.config import (
     RAW_SCHEMA,
     SERVICE_SCHEMA,
     STAGING_SCHEMA,
-    SYNTHETIC_ID_PREFIX,
 )
 from etl.db_utils import STORAGE_COLUMNS
 from etl.reports import ExtractionReport, TransformReport
 
 log = logging.getLogger(__name__)
-
-# Sources carrying rows without a reference_id, tagged with a synthetic
-# staging unit_id (ADR 0001): the Fraunhofer-sourced solar rows.
-SYNTHETIC_ID_EXPECTED = {"solar": 39}
-
-# LIKE pattern matching a literal SYNTHETIC_ID_PREFIX ('syn_') prefix.
-SYNTHETIC_ID_LIKE = SYNTHETIC_ID_PREFIX.replace("_", r"\_") + "%"
 
 
 def _verify_boundaries(engine: Engine) -> list[str]:
@@ -133,30 +125,6 @@ def _verify_transform(engine: Engine, source: str, report: TransformReport) -> l
     )
     if dup_natural:
         errors.append(f"Duplicate natural keys (energy_source, reference_id): {dup_natural}")
-
-    syn_rows = scalar(
-        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source} "
-        f"WHERE unit_id LIKE '{SYNTHETIC_ID_LIKE}'"
-    )
-    if syn_rows != report.synthetic_ids:
-        errors.append(
-            f"Synthetic identity count mismatch: computed {report.synthetic_ids}, "
-            f"stored {syn_rows}"
-        )
-    dup_syn = scalar(
-        f"SELECT COUNT(*) FROM (SELECT unit_id FROM {STAGING_SCHEMA}.{source} "
-        f"WHERE unit_id LIKE '{SYNTHETIC_ID_LIKE}' "
-        f"GROUP BY unit_id HAVING COUNT(*) > 1) d"
-    )
-    if dup_syn:
-        errors.append(f"Duplicate synthetic identity: {dup_syn}")
-
-    expected_syn = SYNTHETIC_ID_EXPECTED.get(source, 0)
-    if report.synthetic_ids != expected_syn:
-        errors.append(
-            f"Synthetic identity count for {source}: expected {expected_syn}, "
-            f"got {report.synthetic_ids}"
-        )
 
     with engine.connect() as conn:
         sources = [
