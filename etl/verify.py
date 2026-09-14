@@ -7,7 +7,6 @@ from sqlalchemy.engine import Engine
 
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
-    CLOSE_TO_PROPERTY,
     COLLISION_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
@@ -375,7 +374,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
         )
 
     whitelist_names = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
-    annotation_names = f"'{COLLISION_PROPERTY}', '{CLOSE_TO_PROPERTY}'"
+    annotation_names = f"'{COLLISION_PROPERTY}'"
 
     # Every whitelist (name, value) used by a good staging row must exist in
     # core.properties (deduplicated across sources; bad_quality pairs are

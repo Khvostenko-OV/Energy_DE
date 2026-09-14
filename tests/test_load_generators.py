@@ -381,17 +381,52 @@ class TestCollisions:
         )
         assert collision_links == collision_rows
 
-    def test_close_to_links_for_close_pairs(self, _loaded_core):
+    def test_close_to_neighbours_in_secondary_attributes(self, _loaded_core):
+        # close_to neighbours live in secondary_attributes, not property links.
         close_to_links = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
             f"JOIN {CORE_SCHEMA}.units_properties gp ON gp.unit_id = g.unit_id "
             f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
             f"WHERE p.name = 'close_to'"
         )
-        # Every close_to link means a pair of geo_accuracy=1 units within 10m
-        if close_to_links > 0:
-            # Each close_to link should have a corresponding close_to on the other unit
-            assert close_to_links % 2 == 0
+        assert close_to_links == 0
+
+        # Collision values carry the phrase, never a unit id.
+        unit_id_reasons = _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"WHERE name = 'collision' AND value LIKE '%close_to %'"
+        )
+        assert unit_id_reasons == 0
+
+        close_units = _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators "
+            f"WHERE secondary_attributes IS NOT NULL "
+            f"AND secondary_attributes::jsonb ? 'close_to'"
+        )
+        close_phrase = _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.units_properties gp "
+            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"WHERE p.name = 'collision' AND p.value LIKE '%close location%'"
+        )
+        assert close_phrase == close_units
+
+        # Every close_to mention is reciprocated by the neighbour unit.
+        asymmetric = _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators a, "
+            f"jsonb_array_elements("
+            f"a.secondary_attributes::jsonb -> 'close_to') nb "
+            f"WHERE a.secondary_attributes IS NOT NULL "
+            f"AND a.secondary_attributes::jsonb ? 'close_to' "
+            f"AND NOT EXISTS ("
+            f"SELECT 1 FROM {CORE_SCHEMA}.generators b "
+            f"WHERE b.unit_id = (nb #>> '{{}}')::int "
+            f"AND b.secondary_attributes IS NOT NULL "
+            f"AND b.secondary_attributes::jsonb ? 'close_to' "
+            f"AND (b.secondary_attributes::jsonb -> 'close_to') "
+            f"@> to_jsonb(a.unit_id)"
+            f")"
+        )
+        assert asymmetric == 0
 
 
 # ------------------------------------------------------------------ #

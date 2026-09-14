@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from collections import defaultdict
@@ -13,6 +14,7 @@ from sqlalchemy.engine import Engine
 from etl.config import get_engine
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
+    CLOSE_LOCATION_REASON,
     CLOSE_TO_PROPERTY,
     COLLISION_CLOSE_DISTANCE_M,
     COLLISION_PROPERTY,
@@ -116,9 +118,13 @@ def load_generators() -> LoadReport:
             log.info("Running collision checks...")
             t = time.perf_counter()
             _reset_collision_annotation(engine, affected_ids=affected)
-            collision_df = _detect_collisions(engine, affected_ids=affected)
+            collision_df, close_units = _detect_collisions(
+                engine, affected_ids=affected
+            )
             report.collisions = len(collision_df)
-            report.collision_links = _write_collision_links(engine, collision_df)
+            report.collision_links = _write_collision_links(
+                engine, collision_df, close_units
+            )
             log.info(
                 "%d collision rows, %d links, time %.3fs",
                 report.collisions,
@@ -454,8 +460,14 @@ def _update_core_row(conn, row: pandas.Series) -> None:
 
 def _detect_collisions(
     engine: Engine, affected_ids: list[int] | None = None
-) -> pandas.DataFrame:
-    """Detect collision conditions and return a DataFrame of unit_ids with reasons.
+) -> tuple[pandas.DataFrame, dict[int, list[int]]]:
+    """Detect collision conditions; return (flag df, close-pair map).
+
+    The collision DataFrame has one row per colliding unit with a
+    newline-joined ``reasons`` value.  The close-pair map records for each
+    flagged unit the ids of its geo_accuracy=1 neighbours within
+    COLLISION_CLOSE_DISTANCE_M (``{unit_id: [neighbour_ids]}``) — these live
+    in core.generators.secondary_attributes, not as property links.
 
     When *affected_ids* is ``None`` (first load) every core row is checked.
     When it is provided only rows in that list, plus any pairs they form with
@@ -463,30 +475,37 @@ def _detect_collisions(
     unchanged from a previous run.
     """
     collision_units: dict[int, list[str]] = {}
+    close_units: dict[int, list[int]] = {}
 
-    _detect_close_location(engine, collision_units, affected_ids)
+    _detect_close_location(engine, collision_units, close_units, affected_ids)
     _detect_region_null(engine, collision_units, affected_ids)
     _detect_onshore_in_sea(engine, collision_units, affected_ids)
 
     if not collision_units:
-        return pandas.DataFrame(columns=["unit_id", "reasons"])
+        return (
+            pandas.DataFrame(columns=["unit_id", "reasons"]),
+            close_units,
+        )
 
     rows = [
-        (uid, "\n".join(reasons)) for uid, reasons in collision_units.items()
+        (uid, "\n".join(dict.fromkeys(reasons)))
+        for uid, reasons in collision_units.items()
     ]
-    return pandas.DataFrame(rows, columns=["unit_id", "reasons"])
+    return pandas.DataFrame(rows, columns=["unit_id", "reasons"]), close_units
 
 
 def _detect_close_location(
     engine: Engine,
     collision_units: dict[int, list[str]],
+    close_units: dict[int, list[int]],
     affected_ids: list[int] | None = None,
 ) -> None:
     """Find pairs of geo_accuracy=1 units within 10m of each other.
 
-    When *affected_ids* is given the join is restricted to rows where at
-    least one side is affected — pairs between two unchanged rows are
-    already known from the previous run.
+    Each side of a pair is flagged with the CLOSE_LOCATION_REASON and listed
+    as the other's close neighbour in *close_units*.  When *affected_ids* is
+    given the join is restricted to rows where at least one side is affected —
+    pairs between two unchanged rows are already known from the previous run.
     """
     affected_filter = ""
     params: dict[str, object] = {}
@@ -513,12 +532,10 @@ def _detect_close_location(
         ).fetchall()
 
     for uid_a, uid_b in pairs:
-        collision_units.setdefault(uid_a, []).append(
-            f"close_to {uid_b}"
-        )
-        collision_units.setdefault(uid_b, []).append(
-            f"close_to {uid_a}"
-        )
+        collision_units.setdefault(uid_a, []).append(CLOSE_LOCATION_REASON)
+        collision_units.setdefault(uid_b, []).append(CLOSE_LOCATION_REASON)
+        close_units.setdefault(uid_a, []).append(uid_b)
+        close_units.setdefault(uid_b, []).append(uid_a)
 
 
 def _detect_region_null(
@@ -585,36 +602,35 @@ def _detect_onshore_in_sea(
 
 
 def _write_collision_links(
-    engine: Engine, collision_df: pandas.DataFrame
+    engine: Engine,
+    collision_df: pandas.DataFrame,
+    close_units: dict[int, list[int]],
 ) -> int:
-    """Write collision and close_to property links for all flagged units.
+    """Write collision property links and close_to neighbour attributes.
 
     Called by the loader *after* the collision annotation was reset, so it
-    only writes links for the units in *collision_df*: a 'collision' link
-    carrying the joined reasons and one 'close_to' link per neighbouring
-    unit involved in a close-location pair.  A unit with no detection keeps
-    collision=false and no annotation links.  Returns the total number of
-    property links written.
+    only writes links for the units in *collision_df*: one 'collision' link
+    per flagged unit carrying the joined reasons (a close-location pair
+    contributes the CLOSE_LOCATION_REASON phrase, without unit ids) and the
+    close-pair neighbours are stored on core.generators.secondary_attributes
+    as a ``close_to`` JSON list instead of property links.  A unit with no
+    detection keeps collision=false and no annotation.  Returns the total
+    number of property links written.
     """
     if collision_df.empty:
         return 0
 
     flagged = [int(u) for u in collision_df["unit_id"]]
+    reasons_by_unit: dict[int, list[str]] = defaultdict(list)
+    for _, row in collision_df.iterrows():
+        reasons_by_unit[int(row["unit_id"])] = row["reasons"].split("\n")
 
-    # desired property keys and which units want each one
     prop_keys: set[tuple[str, str]] = set()
     wanted: dict[tuple[str, str], list[int]] = defaultdict(list)
-    for _, row in collision_df.iterrows():
-        uid = int(row["unit_id"])
-        reasons = row["reasons"].split("\n")
-        collision_key = (COLLISION_PROPERTY, "\n".join(reasons))
+    for uid in flagged:
+        collision_key = (COLLISION_PROPERTY, "\n".join(reasons_by_unit[uid]))
         prop_keys.add(collision_key)
         wanted[collision_key].append(uid)
-        for reason in reasons:
-            if reason.startswith("close_to "):
-                close_key = (CLOSE_TO_PROPERTY, reason[len("close_to "):])
-                prop_keys.add(close_key)
-                wanted[close_key].append(uid)
 
     with engine.begin() as conn:
         conn.execute(
@@ -637,8 +653,38 @@ def _write_collision_links(
             pairs,
             page_size=2000,
         )
+        _write_close_locations(conn, close_units)
 
     return len(pairs)
+
+
+def _write_close_locations(
+    conn, close_units: dict[int, list[int]]
+) -> None:
+    """Persist close-pair neighbours into secondary_attributes.close_to.
+
+    For every unit in *close_units* the ``close_to`` key of its
+    core.generators.secondary_attributes JSON is set to the sorted list of
+    neighbour unit ids (replacing any previous value for that key).
+    """
+    if not close_units:
+        return
+
+    records = [
+        (uid, json.dumps(sorted(int(n) for n in neighbours)))
+        for uid, neighbours in close_units.items()
+    ]
+    execute_values(
+        conn.connection.cursor(),
+        f"UPDATE {CORE_SCHEMA}.generators g "
+        f"SET secondary_attributes = jsonb_set("
+        f"COALESCE(g.secondary_attributes::jsonb, '{{}}'::jsonb), "
+        f"'{{close_to}}'::text[], v.neighbours::jsonb, true)::text "
+        f"FROM (VALUES %s) AS v(unit_id, neighbours) "
+        f"WHERE g.unit_id = v.unit_id",
+        records,
+        page_size=2000,
+    )
 
 
 def _ensure_properties(
@@ -678,15 +724,35 @@ def _ensure_properties(
 def _reset_collision_annotation(
     engine: Engine, affected_ids: list[int] | None = None
 ) -> None:
-    """Clear collision flags and generator collision/close_to links.
+    """Clear collision flags, links, and secondary_attributes close_to data.
 
-    When *affected_ids* is ``None`` (first load) every flag and link is
-    wiped.  When it is provided only annotations for affected rows and
-    close_to links from neighbours pointing *to* affected rows are removed —
-    the rest are still valid from the previous run.
+    When *affected_ids* is ``None`` (first load) every flag and annotation is
+    wiped.  When it is provided only the affected rows' own flags and
+    annotations are cleared plus the affected ids are scrubbed out of other
+    rows' ``close_to`` lists — the rest are still valid from the previous
+    run.  Either way deprecated ``close_to`` *property* rows are purged
+    (neighbours moved to secondary_attributes.key and are no longer links).
     """
-    if affected_ids is None:
-        with engine.begin() as conn:
+    with engine.begin() as conn:
+        # Deprecated: close_to used to be a property link; purge everywhere.
+        conn.execute(
+            text(
+                f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                f"USING {CORE_SCHEMA}.properties p "
+                f"WHERE up.prop_id = p.prop_id "
+                f"AND p.name = :close_to"
+            ),
+            {"close_to": CLOSE_TO_PROPERTY},
+        )
+        conn.execute(
+            text(
+                f"DELETE FROM {CORE_SCHEMA}.properties "
+                f"WHERE name = :close_to"
+            ),
+            {"close_to": CLOSE_TO_PROPERTY},
+        )
+
+        if affected_ids is None:
             conn.execute(
                 text(
                     f"UPDATE {CORE_SCHEMA}.generators SET collision = false"
@@ -694,23 +760,27 @@ def _reset_collision_annotation(
             )
             conn.execute(
                 text(
-                    f"DELETE FROM {CORE_SCHEMA}.units_properties gp "
-                    f"USING {CORE_SCHEMA}.properties p "
-                    f"WHERE gp.prop_id = p.prop_id "
-                    f"AND p.name IN (:collision, :close_to)"
-                ),
-                {
-                    "collision": COLLISION_PROPERTY,
-                    "close_to": CLOSE_TO_PROPERTY,
-                },
+                    f"UPDATE {CORE_SCHEMA}.generators "
+                    f"SET secondary_attributes = "
+                    f"(secondary_attributes::jsonb - 'close_to')::text "
+                    f"WHERE secondary_attributes IS NOT NULL "
+                    f"AND secondary_attributes::jsonb ? 'close_to'"
+                )
             )
-        return
+            conn.execute(
+                text(
+                    f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                    f"USING {CORE_SCHEMA}.properties p "
+                    f"WHERE up.prop_id = p.prop_id "
+                    f"AND p.name = :collision"
+                ),
+                {"collision": COLLISION_PROPERTY},
+            )
+            return
 
-    if not affected_ids:
-        return
+        if not affected_ids:
+            return
 
-    close_to_values = [f"close_to {uid}" for uid in affected_ids]
-    with engine.begin() as conn:
         # Clear collision flags for affected rows.
         conn.execute(
             text(
@@ -719,31 +789,51 @@ def _reset_collision_annotation(
             ),
             {"ids": affected_ids},
         )
-        # Delete affected rows' own collision/close_to links.
+        # Delete affected rows' own collision links.
         conn.execute(
             text(
                 f"DELETE FROM {CORE_SCHEMA}.units_properties up "
                 f"USING {CORE_SCHEMA}.properties p "
                 f"WHERE up.prop_id = p.prop_id "
                 f"AND up.unit_id = ANY(:ids) "
-                f"AND p.name IN (:collision, :close_to)"
+                f"AND p.name = :collision"
             ),
-            {
-                "ids": affected_ids,
-                "collision": COLLISION_PROPERTY,
-                "close_to": CLOSE_TO_PROPERTY,
-            },
+            {"ids": affected_ids, "collision": COLLISION_PROPERTY},
         )
-        # Delete close_to links from any row that point TO affected rows.
+        # Drop affected rows' own close_to secondary attributes before the
+        # siblings added in _detect_close_location get recomputed.
         conn.execute(
             text(
-                f"DELETE FROM {CORE_SCHEMA}.units_properties up "
-                f"USING {CORE_SCHEMA}.properties p "
-                f"WHERE up.prop_id = p.prop_id "
-                f"AND p.name = :close_to "
-                f"AND p.value = ANY(:values)"
+                f"UPDATE {CORE_SCHEMA}.generators "
+                f"SET secondary_attributes = "
+                f"(secondary_attributes::jsonb - 'close_to')::text "
+                f"WHERE unit_id = ANY(:ids) "
+                f"AND secondary_attributes IS NOT NULL "
+                f"AND secondary_attributes::jsonb ? 'close_to'"
             ),
-            {"close_to": CLOSE_TO_PROPERTY, "values": close_to_values},
+            {"ids": affected_ids},
+        )
+        # Scrub affected ids out of every other row's close_to lists.
+        conn.execute(
+            text(
+                f"UPDATE {CORE_SCHEMA}.generators g "
+                f"SET secondary_attributes = CASE "
+                f"WHEN v.new_value = '[]'::jsonb "
+                f"THEN (g.secondary_attributes::jsonb - 'close_to')::text "
+                f"ELSE jsonb_set(g.secondary_attributes::jsonb, "
+                f"'{{close_to}}', v.new_value, true)::text END "
+                f"FROM (SELECT unit_id, "
+                f"COALESCE((SELECT jsonb_agg(elem) "
+                f"FROM jsonb_array_elements("
+                f"secondary_attributes::jsonb -> 'close_to') AS elem "
+                f"WHERE NOT (elem #>> '{{}}')::int = ANY(:ids)), "
+                f"'[]'::jsonb) AS new_value "
+                f"FROM {CORE_SCHEMA}.generators "
+                f"WHERE secondary_attributes IS NOT NULL "
+                f"AND secondary_attributes::jsonb ? 'close_to') v "
+                f"WHERE g.unit_id = v.unit_id"
+            ),
+            {"ids": affected_ids},
         )
 
 
