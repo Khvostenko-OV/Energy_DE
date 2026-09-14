@@ -97,7 +97,7 @@ The consolidated layer: `generators` and `storages`, each unit appearing exactly
 The aggregation layer: three Postgres materialized views (installation counts, generation capacity, storage capacity) at region grain, computed from active units only.
 
 **Properties**:
-Normalized (name, value) attribute pairs of a unit, linked many-to-many through `units_properties`. Also the home of quality annotations (`bad_quality`, `collision`, `close_to`).
+Normalized (name, value) attribute pairs of a unit, linked many-to-many through per-kind link tables — `generator_properties` for generators, `storage_properties` for storages (ADR 0006). Also the home of quality annotations (`bad_quality`, `collision`, `close_to`).
 _Avoid_: Parameters
 
 **Secondary attributes**:

@@ -350,7 +350,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     leaked_bad = int(
         scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
-            f"JOIN {CORE_SCHEMA}.units_properties gp ON gp.unit_id = g.unit_id "
+            f"JOIN {CORE_SCHEMA}.generator_properties gp ON gp.unit_id = g.unit_id "
             f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
             f"WHERE p.name = '{BAD_QUALITY_PROPERTY}' "
             f"LIMIT 1"
@@ -362,7 +362,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     flagged = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators WHERE collision"))
     linked = int(
         scalar(
-            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.units_properties gp "
+            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.generator_properties gp "
             f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
             f"WHERE p.name = '{COLLISION_PROPERTY}'"
         )
@@ -420,7 +420,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     expected_links = int(scalar(f"SELECT {staging_link_sums}"))
     core_links = int(
         scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.units_properties up "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties up "
             f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = up.prop_id "
             f"WHERE p.name IN ({whitelist_names})"
         )
@@ -433,7 +433,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     # No link may reference a missing core unit_id.
     orphans = int(
         scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.units_properties up "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties up "
             f"LEFT JOIN {CORE_SCHEMA}.generators g ON g.unit_id = up.unit_id "
             f"WHERE g.unit_id IS NULL"
         )

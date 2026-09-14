@@ -648,7 +648,7 @@ def _write_collision_links(
         ]
         execute_values(
             conn.connection.cursor(),
-            f"INSERT INTO {CORE_SCHEMA}.units_properties "
+            f"INSERT INTO {CORE_SCHEMA}.generator_properties "
             f"(unit_id, prop_id) VALUES %s ON CONFLICT DO NOTHING",
             pairs,
             page_size=2000,
@@ -737,7 +737,7 @@ def _reset_collision_annotation(
         # Deprecated: close_to used to be a property link; purge everywhere.
         conn.execute(
             text(
-                f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                f"DELETE FROM {CORE_SCHEMA}.generator_properties up "
                 f"USING {CORE_SCHEMA}.properties p "
                 f"WHERE up.prop_id = p.prop_id "
                 f"AND p.name = :close_to"
@@ -769,7 +769,7 @@ def _reset_collision_annotation(
             )
             conn.execute(
                 text(
-                    f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                    f"DELETE FROM {CORE_SCHEMA}.generator_properties up "
                     f"USING {CORE_SCHEMA}.properties p "
                     f"WHERE up.prop_id = p.prop_id "
                     f"AND p.name = :collision"
@@ -792,7 +792,7 @@ def _reset_collision_annotation(
         # Delete affected rows' own collision links.
         conn.execute(
             text(
-                f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                f"DELETE FROM {CORE_SCHEMA}.generator_properties up "
                 f"USING {CORE_SCHEMA}.properties p "
                 f"WHERE up.prop_id = p.prop_id "
                 f"AND up.unit_id = ANY(:ids) "
@@ -882,7 +882,7 @@ def _transfer_properties(
 
     Collects every (name, value) pair a staging row links (bad_quality pairs
     skipped — they stay staging-only, ADR 0005), maps the staging unit_id onto
-    its core serial unit_id, and reconciles core.properties / core.units_properties
+    its core serial unit_id, and reconciles core.properties / core.generator_properties
     for the affected units:
 
     * *affected_ids* ``None`` (first load) rewrites every mapped unit.
@@ -927,7 +927,7 @@ def _transfer_properties(
             whitelist = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
             conn.execute(
                 text(
-                    f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                    f"DELETE FROM {CORE_SCHEMA}.generator_properties up "
                     f"USING {CORE_SCHEMA}.properties p "
                     f"WHERE up.prop_id = p.prop_id "
                     f"AND up.unit_id = ANY(:ids) "
@@ -944,7 +944,7 @@ def _transfer_properties(
         ]
         execute_values(
             conn.connection.cursor(),
-            f"INSERT INTO {CORE_SCHEMA}.units_properties "
+            f"INSERT INTO {CORE_SCHEMA}.generator_properties "
             f"(unit_id, prop_id) VALUES %s ON CONFLICT DO NOTHING",
             pairs,
             page_size=2000,

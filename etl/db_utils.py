@@ -119,14 +119,16 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
 def _create_core_generators(engine: Engine) -> None:
     """Drop and recreate core.generators with the v2.3 shape.
 
-    Also (re)creates the shared core dimension tables: `properties` holds the
-    normalized (name, value) pairs and `units_properties` links them to core
-    serial unit_ids.  The link table carries no FK on unit_id because it is
-    shared by generators and storages (ADR 0005, spec core "double set");
-    #8 owns link integrity.
+    Also (re)creates the core dimension tables: `properties` holds the
+    normalized (name, value) pairs and `generator_properties` links them to
+    core.generator serial unit_ids.  The link table is per unit-kind — storages
+    get their own `storage_properties` FK'd to core.storages (ADR 0006) — so
+    `generator_properties.unit_id` carries a real FK instead of the FK-less
+    shared `units_properties` that could not tell a generator id from a
+    storage id.
     """
     with engine.begin() as conn:
-        conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.units_properties CASCADE"))
+        conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.generator_properties CASCADE"))
         conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.properties CASCADE"))
         conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.generators CASCADE"))
         conn.execute(
@@ -188,8 +190,8 @@ def _create_core_generators(engine: Engine) -> None:
         conn.execute(
             text(
                 f"""
-                CREATE TABLE {CORE_SCHEMA}.units_properties (
-                    unit_id  INT NOT NULL,
+                CREATE TABLE {CORE_SCHEMA}.generator_properties (
+                    unit_id  INT NOT NULL REFERENCES {CORE_SCHEMA}.generators(unit_id),
                     prop_id BIGINT NOT NULL REFERENCES {CORE_SCHEMA}.properties(prop_id),
                     PRIMARY KEY (unit_id, prop_id)
                 )

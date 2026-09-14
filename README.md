@@ -35,8 +35,8 @@ All files are 2026-02-03 versions. The files are authoritative.
 Four PostGIS stages, run per-stage or as one pass via the planned CLI (`python -m etl <stage>`):
 
 1. **Extract** — read unit sources into versioned `raw.<source>_<date>_<n>` tables guarded by the `loaded_files` log and `-f` force flag; boundaries into `raw.boundaries`; secondary attributes folded into a `secondary_attributes` jsonb column
-2. **Transform** — natural staging identity, spatial joins against boundaries, quality gating (`bad_quality` + property links), attributes decomposed to `properties` / `units_properties`
-3. **Load** — consolidated `generators` and `storages` in `core` (serial keys, record-identity in-place updates, collision flags annotated as property links)
+2. **Transform** — natural staging identity, spatial joins against boundaries, quality gating (`bad_quality` + property links), attributes decomposed to `properties` / `{source}_units_properties`
+3. **Load** — consolidated `generators` and `storages` in `core` (serial keys, record-identity in-place updates, collision flags annotated as property links), properties linked per unit-kind via `generator_properties` / `storage_properties`
 4. **Marts** — three Postgres materialized views (installation counts, generation capacity, storage capacity) over active units
 
 Each stage verifies its own output (row counts, key uniqueness, join coverage, idempotency) and
