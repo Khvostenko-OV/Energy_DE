@@ -172,6 +172,8 @@ add property 'close_to' with reference to close unit
 | commissioning_date   | date      | Commissioning date of the system                  |
 | decommissioning_date | date      | Decommissioning date of the system                |
 | geometry             | point     | WGS-84                                            |
+| x_coordinates        | float     | Longitude WGS-84                                  |
+| y_coordinates        | float     | Latitude WGS-84                                   |
 | geo_accuracy         | int       | 1/2                                               |
 | reference_date       | timestamp | Timestamp of the record in the original source    |
 | reference_id         | str       | Reference id of the record in the original source |
@@ -192,6 +194,8 @@ add property 'close_to' with reference to close unit
 | commissioning_date   | date      | Commissioning date of the system                   |
 | decommissioning_date | date      | Decommissioning date of the system                 |
 | geometry             | point     | WGS-84                                             |
+| x_coordinates        | float     | Longitude WGS-84                                   |
+| y_coordinates        | float     | Latitude WGS-84                                    |
 | geo_accuracy         | int       | 1/2                                                |
 | reference_id         | str       | Reference id of the record in the original source  |
 | reference_date       | timestamp | Timestamp of the record in the original source     |
@@ -226,7 +230,8 @@ add property 'close_to' with reference to close unit
 | installed_capacity   | float     | Kilowatt (kW)                                     |
 | commissioning_date   | date      | Commissioning date of the system                  |
 | decommissioning_date | date      | Decommissioning date of the system                |
-| geometry             | point     | WGS-84                                            |
+| longitude            | float     | Longitude WGS-84                                  |
+| latitude             | float     | Latitude WGS-84                                   |
 | geo_accuracy         | int       | 1/2                                               |
 | reference_date       | timestamp | Timestamp of the record in the original source    |
 | reference_id         | str       | Reference id of the record in the original source |
@@ -246,7 +251,8 @@ add property 'close_to' with reference to close unit
 | installed_capacity   | float     | Kilowatt (kW)                                      |
 | commissioning_date   | date      | Commissioning date of the system                   |
 | decommissioning_date | date      | Decommissioning date of the system                 |
-| geometry             | point     | WGS-84                                             |
+| longitude            | float     | Longitude WGS-84                                   |
+| latitude             | float     | Latitude WGS-84                                    |
 | geo_accuracy         | int       | 1/2                                                |
 | reference_id         | str       | Reference id of the record in the original source  |
 | reference_date       | timestamp | Timestamp of the record in the original source     |
