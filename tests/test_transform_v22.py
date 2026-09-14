@@ -1,9 +1,10 @@
 """Integration tests for the spec v2.2 transform contract (issue #11).
 
 Run against the live dev PostGIS (`DATABASE_URL`), since the staging stage
-reads from raw versioned tables and writes via PostGIS. Each test re-runs
-`transform_source` for the source(s) it asserts on — staging tables are
-dropped and recreated by the transform, as on a normal dev pass.
+reads from raw versioned tables and writes via PostGIS.  All sources are
+transformed once per module by a shared fixture (the transform is idempotent
+— it drops and re-creates the staging tables) and the tests assert against
+that shared staging state.
 """
 
 import os
@@ -66,9 +67,15 @@ def scalar(sql: str) -> int:
         return int(conn.execute(text(sql)).scalar())
 
 
-def test_staging_tables_have_secondary_attributes_column():
+@pytest.fixture(scope="module", autouse=True)
+def _transformed_all():
+    """Transform every source once per module."""
     for source in SOURCE_NAMES:
         run_transform(source)
+
+
+def test_staging_tables_have_secondary_attributes_column():
+    for source in SOURCE_NAMES:
         with ENGINE.connect() as conn:
             cols = {
                 row[0]
@@ -85,7 +92,6 @@ def test_staging_tables_have_secondary_attributes_column():
 
 @pytest.mark.parametrize("source", SOURCE_NAMES)
 def test_staging_secondary_attributes_keep_only_nonwhitelist_keys(source):
-    run_transform(source)
     with ENGINE.connect() as conn:
         actual = {
             row[0]
@@ -102,7 +108,6 @@ def test_staging_secondary_attributes_keep_only_nonwhitelist_keys(source):
 
 @pytest.mark.parametrize("source", SOURCE_NAMES)
 def test_properties_tables_contain_only_whitelisted_keys(source):
-    run_transform(source)
     with ENGINE.connect() as conn:
         names = {
             row[0]
@@ -117,7 +122,6 @@ def test_properties_tables_contain_only_whitelisted_keys(source):
 
 def test_region_null_units_no_longer_bad_quality():
     for source in SOURCE_NAMES:
-        run_transform(source)
         region_nulls = scalar(
             f"SELECT COUNT(*) FROM stage.{source} WHERE region IS NULL"
         )

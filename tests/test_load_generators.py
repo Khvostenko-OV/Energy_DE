@@ -1,7 +1,9 @@
 """Integration tests for the core.generators load (issue #6).
 
-Run against the live dev PostGIS (`DATABASE_URL`).  Each test re-creates
-core tables from staging so the suite is self-contained.
+Run against the live dev PostGIS (`DATABASE_URL`).  core tables are loaded
+once per module via a shared fixture — read-only tests query that shared
+state; the idempotency and incremental-update tests manage their own core
+lifecycle because they need fresh loads.
 """
 
 import os
@@ -31,7 +33,7 @@ def _ensure_staging():
 
 
 def _drop_core():
-    """Drop core tables so each test starts clean."""
+    """Drop core tables so each test/module starts clean."""
     with ENGINE.begin() as conn:
         for tbl in (
             "units_properties",
@@ -41,11 +43,13 @@ def _drop_core():
             conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.{tbl} CASCADE"))
 
 
-@pytest.fixture(autouse=True)
-def _clean_core():
-    """Every test drops and re-creates core tables."""
+@pytest.fixture(scope="module")
+def _loaded_core():
+    """Load all generator sources into core.generators once per module."""
     _drop_core()
-    yield
+    report = load_generators()
+    assert report.passed, report.errors
+    yield report
     _drop_core()
 
 
@@ -61,16 +65,14 @@ def _staging_ready():
 
 
 class TestTableShape:
-    def test_generators_exists(self):
-        load_generators()
+    def test_generators_exists(self, _loaded_core):
         n = _scalar(
             "SELECT COUNT(*) FROM information_schema.tables "
             f"WHERE table_schema = '{CORE_SCHEMA}' AND table_name = 'generators'"
         )
         assert n == 1
 
-    def test_generators_columns(self):
-        load_generators()
+    def test_generators_columns(self, _loaded_core):
         with ENGINE.connect() as conn:
             cols = {
                 row[0]
@@ -102,8 +104,7 @@ class TestTableShape:
         }
         assert expected.issubset(cols), f"Missing columns: {expected - cols}"
 
-    def test_generators_unit_id_is_serial(self):
-        load_generators()
+    def test_generators_unit_id_is_serial(self, _loaded_core):
         with ENGINE.connect() as conn:
             row = conn.execute(
                 text(
@@ -115,8 +116,7 @@ class TestTableShape:
         assert row is not None
         assert row[0] == "integer"
 
-    def test_generators_collision_default_false(self):
-        load_generators()
+    def test_generators_collision_default_false(self, _loaded_core):
         with ENGINE.connect() as conn:
             row = conn.execute(
                 text(
@@ -128,8 +128,7 @@ class TestTableShape:
         assert row is not None
         assert row[0] == "false"
 
-    def test_generators_geometry_point_4326(self):
-        load_generators()
+    def test_generators_geometry_point_4326(self, _loaded_core):
         with ENGINE.connect() as conn:
             row = conn.execute(
                 text(
@@ -141,8 +140,7 @@ class TestTableShape:
         assert row[0] == 4326
         assert row[1] == "POINT"
 
-    def test_generators_has_longitude_latitude(self):
-        load_generators()
+    def test_generators_has_longitude_latitude(self, _loaded_core):
         with ENGINE.connect() as conn:
             for col in ("longitude", "latitude"):
                 row = conn.execute(
@@ -161,9 +159,8 @@ class TestTableShape:
 
 
 class TestFirstLoad:
-    def test_first_load_row_count(self):
+    def test_first_load_row_count(self, _loaded_core):
         """Only bad_quality=false staging rows land in core."""
-        report = load_generators()
         good_staging = _scalar(
             "SELECT " + " + ".join(
                 f"(SELECT COUNT(*) FROM {STAGING_SCHEMA}.{s} WHERE NOT bad_quality)"
@@ -172,10 +169,9 @@ class TestFirstLoad:
         )
         core_count = _scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators")
         assert core_count == good_staging
-        assert report.rows_inserted == good_staging
+        assert _loaded_core.rows_inserted == good_staging
 
-    def test_no_duplicate_reference_id_pairs(self):
-        load_generators()
+    def test_no_duplicate_reference_id_pairs(self, _loaded_core):
         dups = _scalar(
             f"SELECT COUNT(*) FROM ("
             f"SELECT energy_source, reference_id FROM {CORE_SCHEMA}.generators "
@@ -184,8 +180,7 @@ class TestFirstLoad:
         )
         assert dups == 0
 
-    def test_energy_sources_covered(self):
-        load_generators()
+    def test_energy_sources_covered(self, _loaded_core):
         with ENGINE.connect() as conn:
             sources = sorted(
                 row[0]
@@ -206,6 +201,7 @@ class TestFirstLoad:
 
 class TestIdempotency:
     def test_load_twice_same_counts(self):
+        _drop_core()
         r1 = load_generators()
         count_after_first = _scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators")
         assert count_after_first == r1.rows_inserted
@@ -339,8 +335,7 @@ class TestIncrementalUpdate:
 
 
 class TestCollisions:
-    def test_region_null_flagged(self):
-        load_generators()
+    def test_region_null_flagged(self, _loaded_core):
         region_null_collisions = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators "
             f"WHERE region IS NULL AND collision"
@@ -351,8 +346,7 @@ class TestCollisions:
         )
         assert region_null_collisions == staging_region_null
 
-    def test_onshore_in_sea_flagged(self):
-        load_generators()
+    def test_onshore_in_sea_flagged(self, _loaded_core):
         # bio/gas/hydro/solar in sea regions should be flagged collision
         sea_regions = "'North Sea', 'Baltic Sea', 'Kattegat'"
         onshore_sea = _scalar(
@@ -369,8 +363,7 @@ class TestCollisions:
         )
         assert onshore_sea == expected
 
-    def test_collision_property_links_exist(self):
-        load_generators()
+    def test_collision_property_links_exist(self, _loaded_core):
         collision_links = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
             f"JOIN {CORE_SCHEMA}.units_properties gp ON gp.unit_id = g.unit_id "
@@ -382,8 +375,7 @@ class TestCollisions:
         )
         assert collision_links == collision_rows
 
-    def test_close_to_links_for_close_pairs(self):
-        load_generators()
+    def test_close_to_links_for_close_pairs(self, _loaded_core):
         close_to_links = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
             f"JOIN {CORE_SCHEMA}.units_properties gp ON gp.unit_id = g.unit_id "
@@ -402,8 +394,7 @@ class TestCollisions:
 
 
 class TestVerification:
-    def test_generator_count_reconciles(self):
-        report = load_generators()
+    def test_generator_count_reconciles(self, _loaded_core):
         good_staging = sum(
             _scalar(f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{s} WHERE NOT bad_quality")
             for s in GENERATOR_SOURCES
@@ -411,8 +402,7 @@ class TestVerification:
         core_count = _scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators")
         assert core_count == good_staging
 
-    def test_capacity_reconciles(self):
-        load_generators()
+    def test_capacity_reconciles(self, _loaded_core):
         staging_cap = _scalar(
             "SELECT " + " + ".join(
                 f"COALESCE((SELECT SUM(installed_capacity) FROM {STAGING_SCHEMA}.{s} WHERE NOT bad_quality), 0)"

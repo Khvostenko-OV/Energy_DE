@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections import defaultdict
 
 import pandas
+from psycopg2.extras import execute_values
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -196,20 +198,32 @@ def _synthetic_hash(source: str, x, y, capacity, commissioning) -> str:
 
 
 # ------------------------------------------------------------------ #
-#  Record identity from staging                                        #
-# ------------------------------------------------------------------ #
-
-
-def _staging_identity(reference_id, energy_source, x, y, capacity, commissioning):
-    """Return the match key for a staging row: reference_id or synthetic hash."""
-    if pandas.notna(reference_id) and reference_id is not None and str(reference_id) != "nan":
-        return str(reference_id)
-    return _synthetic_hash(energy_source, x, y, capacity, commissioning)
-
-
-# ------------------------------------------------------------------ #
 #  Partition staging into insert / update / skip                       #
 # ------------------------------------------------------------------ #
+
+
+def _staging_identities(df: pandas.DataFrame) -> pandas.Series:
+    """Record identity for every staging row: reference_id or synthetic hash."""
+    ref_id = df["reference_id"]
+    has_ref = ref_id.notna() & (ref_id.astype(str) != "nan")
+    identity = pandas.Series(index=df.index, dtype="object")
+    if has_ref.any():
+        identity[has_ref] = ref_id[has_ref].astype(str)
+
+    synthetic = ~has_ref
+    if synthetic.any():
+        payload = (
+            df["energy_source"].map(str)
+            + "|" + df["x_coordinates"].map(str)
+            + "|" + df["y_coordinates"].map(str)
+            + "|" + df["installed_capacity"].map(str)
+            + "|" + df["commissioning_date"].map(str)
+        )
+        identity[synthetic] = payload[synthetic].map(
+            lambda p: SYNTHETIC_ID_PREFIX
+            + hashlib.sha256(p.encode()).hexdigest()[:16]
+        )
+    return identity
 
 
 def _partition_staging(
@@ -225,21 +239,10 @@ def _partition_staging(
     if staging_df.empty:
         return staging_df.copy(), staging_df.copy(), staging_df.copy()
 
-    identity_series = [
-        _staging_identity(
-            row["reference_id"],
-            row["energy_source"],
-            row["x_coordinates"],
-            row["y_coordinates"],
-            row["installed_capacity"],
-            row["commissioning_date"],
-        )
-        for _, row in staging_df.iterrows()
-    ]
     staging_df = staging_df.copy()
-    staging_df["_identity"] = identity_series
+    staging_df["_identity"] = _staging_identities(staging_df)
 
-    core_ref_dates: dict[int, pandas.Timestamp | None] = {}
+    core_ref_dates: dict[int, object] = {}
     with engine.connect() as conn:
         rows = conn.execute(
             text(f"SELECT unit_id, reference_date FROM {CORE_SCHEMA}.generators")
@@ -247,36 +250,34 @@ def _partition_staging(
     for unit_id, ref_date in rows:
         core_ref_dates[unit_id] = ref_date
 
-    is_insert = []
-    is_update = []
-    is_skip = []
-    for _, row in staging_df.iterrows():
-        identity = row["_identity"]
-        core_unit_id = core_lookup.get(identity)
-        if core_unit_id is None:
-            is_insert.append(True)
-            is_update.append(False)
-            is_skip.append(False)
-        else:
-            staging_date = row.get("reference_date")
-            core_date = core_ref_dates.get(core_unit_id)
-            if _is_fresher(staging_date, core_date):
-                is_insert.append(False)
-                is_update.append(True)
-                is_skip.append(False)
-            else:
-                is_insert.append(False)
-                is_update.append(False)
-                is_skip.append(True)
+    matched = staging_df["_identity"].map(core_lookup)
+    is_insert = matched.isna()
+    is_update = pandas.Series(False, index=staging_df.index)
+    is_skip = pandas.Series(False, index=staging_df.index)
+
+    non_insert_idx = staging_df.index[~is_insert].to_numpy()
+    if len(non_insert_idx):
+        matched_uids = matched[~is_insert].astype("int64")
+        core_dates = pandas.to_datetime(
+            matched_uids.map(core_ref_dates), errors="coerce"
+        )
+        staging_dates = pandas.to_datetime(
+            staging_df.loc[non_insert_idx, "reference_date"], errors="coerce"
+        )
+        staging_missing = staging_dates.isna()
+        update_mask = (~staging_missing) & (
+            core_dates.isna() | (staging_dates > core_dates)
+        )
+        is_update[non_insert_idx] = update_mask.to_numpy()
+        is_skip[non_insert_idx] = (~update_mask).to_numpy()
 
     update_df = staging_df[is_update].copy()
     if not update_df.empty:
-        update_df["_core_unit_id"] = [
-            core_lookup.get(identity)
-            for identity in update_df["_identity"]
-        ]
-    insert_df = staging_df[is_insert]
-    skip_df = staging_df[is_skip]
+        update_df["_core_unit_id"] = (
+            update_df["_identity"].map(core_lookup).astype("int64")
+        )
+    insert_df = staging_df[is_insert].copy()
+    skip_df = staging_df[is_skip].copy()
     return insert_df, update_df, skip_df
 
 
@@ -294,13 +295,32 @@ def _is_fresher(staging_date, core_date) -> bool:
 # ------------------------------------------------------------------ #
 
 
+# Staging column → core.generators column mapping for the write path.
+_INSERT_COLUMN_MAP = {
+    "energy_source": "energy_source",
+    "installed_capacity": "installed_capacity",
+    "commissioning_date": "commissioning_date",
+    "decommissioning_date": "decommissioning_date",
+    "geometry": "geometry",
+    "x_coordinates": "longitude",
+    "y_coordinates": "latitude",
+    "geo_accuracy": "geo_accuracy",
+    "reference_id": "reference_id",
+    "reference_date": "reference_date",
+    "secondary_attributes": "secondary_attributes",
+    "country_iso": "country_iso",
+    "region": "region",
+    "district": "district",
+    "municipality": "municipality",
+}
+
+
 def _apply_upsert(
     engine: Engine, insert_df: pandas.DataFrame, update_df: pandas.DataFrame
 ) -> None:
     """Insert new rows and update existing rows in core.generators."""
     with engine.begin() as conn:
-        for _, row in insert_df.iterrows():
-            _insert_core_row(conn, row)
+        _insert_core_rows(conn, insert_df)
         for _, row in update_df.iterrows():
             _update_core_row(conn, row)
 
@@ -319,40 +339,26 @@ def _sql_value(v):
 
 def _core_row_values(row: pandas.Series) -> dict:
     """Map a staging row's values to core.generators columns."""
-    x = row.get("x_coordinates")
-    y = row.get("y_coordinates")
     return {
-        "energy_source": _sql_value(row.get("energy_source")),
-        "installed_capacity": _sql_value(row.get("installed_capacity")),
-        "commissioning_date": _sql_value(row.get("commissioning_date")),
-        "decommissioning_date": _sql_value(row.get("decommissioning_date")),
-        "geometry": _sql_value(row.get("geometry")),
-        "longitude": _sql_value(x),
-        "latitude": _sql_value(y),
-        "geo_accuracy": _sql_value(row.get("geo_accuracy")),
-        "reference_id": _sql_value(row.get("reference_id")),
-        "reference_date": _sql_value(row.get("reference_date")),
-        "secondary_attributes": _sql_value(row.get("secondary_attributes")),
-        "country_iso": _sql_value(row.get("country_iso")),
-        "region": _sql_value(row.get("region")),
-        "district": _sql_value(row.get("district")),
-        "municipality": _sql_value(row.get("municipality")),
+        core_col: _sql_value(row.get(stg_col))
+        for stg_col, core_col in _INSERT_COLUMN_MAP.items()
     }
 
 
-def _insert_core_row(conn, row: pandas.Series) -> int:
-    """Insert a single staging row into core.generators, return unit_id."""
-    vals = _core_row_values(row)
-    cols = ", ".join(vals.keys())
-    placeholders = ", ".join(f":{k}" for k in vals)
-    result = conn.execute(
-        text(
-            f"INSERT INTO {CORE_SCHEMA}.generators ({cols}) "
-            f"VALUES ({placeholders}) RETURNING unit_id"
-        ),
-        vals,
+def _insert_core_rows(conn, df: pandas.DataFrame) -> None:
+    """Bulk-insert staging rows into core.generators via execute_values."""
+    if df.empty:
+        return
+    sub = df[list(_INSERT_COLUMN_MAP)].rename(columns=_INSERT_COLUMN_MAP)
+    sub = sub.astype("object").where(pandas.notna(sub), None)
+    cols = ", ".join(sub.columns)
+    records = [tuple(r[k] for k in sub.columns) for r in sub.to_dict("records")]
+    execute_values(
+        conn.connection.cursor(),
+        f"INSERT INTO {CORE_SCHEMA}.generators ({cols}) VALUES %s",
+        records,
+        page_size=1000,
     )
-    return result.scalar()
 
 
 def _update_core_row(conn, row: pandas.Series) -> None:
@@ -482,8 +488,21 @@ def _write_collision_links(
         return 0
 
     flagged = [int(u) for u in collision_df["unit_id"]]
-    total_links = 0
-    prop_map: dict[tuple[str, str], int] = {}  # (name, value) → prop_id
+
+    # desired property keys and which units want each one
+    prop_keys: set[tuple[str, str]] = set()
+    wanted: dict[tuple[str, str], list[int]] = defaultdict(list)
+    for _, row in collision_df.iterrows():
+        uid = int(row["unit_id"])
+        reasons = row["reasons"].split("\n")
+        collision_key = (COLLISION_PROPERTY, "\n".join(reasons))
+        prop_keys.add(collision_key)
+        wanted[collision_key].append(uid)
+        for reason in reasons:
+            if reason.startswith("close_to "):
+                close_key = (CLOSE_TO_PROPERTY, reason[len("close_to "):])
+                prop_keys.add(close_key)
+                wanted[close_key].append(uid)
 
     with engine.begin() as conn:
         conn.execute(
@@ -493,27 +512,55 @@ def _write_collision_links(
             ),
             {"ids": flagged},
         )
-        for _, row in collision_df.iterrows():
-            uid = int(row["unit_id"])
-            reasons = row["reasons"].split("\n")
+        prop_map = _ensure_properties(conn, prop_keys)
+        pairs = [
+            (uid, prop_map[key])
+            for key, uids in wanted.items()
+            for uid in uids
+        ]
+        execute_values(
+            conn.connection.cursor(),
+            f"INSERT INTO {CORE_SCHEMA}.units_properties "
+            f"(unit_id, prop_id) VALUES %s ON CONFLICT DO NOTHING",
+            pairs,
+            page_size=2000,
+        )
 
-            # Write the 'collision' property link with all reasons joined.
-            collision_value = "\n".join(reasons)
-            prop_id = _ensure_property(conn, COLLISION_PROPERTY, collision_value, prop_map)
-            _ensure_link(conn, uid, prop_id)
-            total_links += 1
+    return len(pairs)
 
-            # Write individual 'close_to' links.
-            for reason in reasons:
-                if reason.startswith("close_to "):
-                    target_id = reason[len("close_to "):]
-                    close_prop_id = _ensure_property(
-                        conn, CLOSE_TO_PROPERTY, target_id, prop_map
-                    )
-                    _ensure_link(conn, uid, close_prop_id)
-                    total_links += 1
 
-    return total_links
+def _ensure_properties(
+    conn, keys: set[tuple[str, str]]
+) -> dict[tuple[str, str], int]:
+    """Ensure every (name, value) property key exists; return key → prop_id."""
+    names = sorted({name for name, _ in keys})
+    names_sql = ", ".join(f"'{n}'" for n in names)
+    select_sql = (
+        f"SELECT name, value, prop_id FROM {CORE_SCHEMA}.properties "
+        f"WHERE name IN ({names_sql})"
+    )
+    prop_map = {
+        (name, value): prop_id
+        for name, value, prop_id in conn.execute(text(select_sql)).fetchall()
+    }
+    missing = [key for key in keys if key not in prop_map]
+    if missing:
+        execute_values(
+            conn.connection.cursor(),
+            f"INSERT INTO {CORE_SCHEMA}.properties (name, value) "
+            f"VALUES %s ON CONFLICT DO NOTHING",
+            missing,
+            page_size=1000,
+        )
+        prop_map.update(
+            {
+                (name, value): prop_id
+                for name, value, prop_id in conn.execute(
+                    text(select_sql)
+                ).fetchall()
+            }
+        )
+    return prop_map
 
 
 def _reset_collision_annotation(engine: Engine) -> None:
@@ -538,36 +585,3 @@ def _reset_collision_annotation(engine: Engine) -> None:
             ),
             {"collision": COLLISION_PROPERTY, "close_to": CLOSE_TO_PROPERTY},
         )
-
-
-def _ensure_property(
-    conn, name: str, value: str, prop_map: dict[tuple[str, str], int]
-) -> int:
-    """Get or create a property row, return its prop_id."""
-    key = (name, value)
-    if key in prop_map:
-        return prop_map[key]
-    result = conn.execute(
-        text(
-            f"INSERT INTO {CORE_SCHEMA}.properties (name, value) "
-            f"VALUES (:name, :value) "
-            f"ON CONFLICT (name, value) DO UPDATE SET name = EXCLUDED.name "
-            f"RETURNING prop_id"
-        ),
-        {"name": name, "value": value},
-    )
-    prop_id = result.scalar()
-    prop_map[key] = prop_id
-    return prop_id
-
-
-def _ensure_link(conn, unit_id: int, prop_id: int) -> None:
-    """Insert a unit ↔ property link, ignoring if it already exists."""
-    conn.execute(
-        text(
-            f"INSERT INTO {CORE_SCHEMA}.units_properties (unit_id, prop_id) "
-            f"VALUES (:unit_id, :prop_id) "
-            f"ON CONFLICT DO NOTHING"
-        ),
-        {"unit_id": unit_id, "prop_id": prop_id},
-    )
