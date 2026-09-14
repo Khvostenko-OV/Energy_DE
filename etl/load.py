@@ -5,6 +5,8 @@ import json
 import logging
 import time
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Callable
 
 import pandas
 from psycopg2.extras import execute_values
@@ -23,52 +25,149 @@ from etl.db_schema import (
     SEA_REGIONS,
     STAGING_GENERATOR_SOURCES,
     STAGING_SCHEMA,
+    STORAGE_CAPACITY_COLLISION_REASON,
     SYNTHETIC_ID_PREFIX,
 )
-from etl.db_utils import _create_core_generators, _ensure_schema, _table_exists
+from etl.db_utils import (
+    _create_core_generators,
+    _create_core_storages,
+    _ensure_schema,
+    _table_exists,
+)
 from etl.reports import LoadReport
-from etl.verify import _verify_load_generators
+from etl.verify import _verify_load_generators, _verify_load_storages
 
 log = logging.getLogger(__name__)
 
 ONSHORE_SOURCES = ("bio", "gas", "hydro", "solar")
 
 
-def load_generators() -> LoadReport:
-    """Load staging rows into core.generators with collision annotation.
+@dataclass(frozen=True)
+class _CoreKind:
+    """Load context for one core unit-kind (generators or storages).
 
-    Reads the good (bad_quality=false) rows from all five generator staging
-    tables and consolidates them into core.generators with a serial surrogate
-    key.  The first load creates the table and INSERTs every good row; later
-    loads are incremental: a staging row whose record identity matches an
-    existing core row is UPDATEd in place only when its reference_date is
-    fresher, a staler row is skipped, and an unmatched row is INSERTed.  Core
-    unit_ids are never regenerated.
+    Everything the generic load path needs to differ between the two core
+    tables lives here — the table names, the staging sources, the column
+    mapping, the onshore-in-sea source set, and the extra storage-capacity
+    collision check — so `_load` and its helpers stay shared (issue #6/#7).
+    """
+
+    core_table: str
+    staging_sources: tuple[str, ...]
+    properties_table: str
+    units_properties_table: str
+    column_map: dict[str, str]
+    onshore_sources: tuple[str, ...]
+    check_storage_capacity: bool
+    verifier: Callable[[Engine, LoadReport], list[str]]
+    create_table: Callable[[Engine], None]
+
+
+GENERATOR_KIND = _CoreKind(
+    core_table="generators",
+    staging_sources=STAGING_GENERATOR_SOURCES,
+    properties_table="generator_properties",
+    units_properties_table="generator_units_properties",
+    column_map={
+        "energy_source": "energy_source",
+        "installed_capacity": "installed_capacity",
+        "commissioning_date": "commissioning_date",
+        "decommissioning_date": "decommissioning_date",
+        "geometry": "geometry",
+        "x_coordinates": "longitude",
+        "y_coordinates": "latitude",
+        "geo_accuracy": "geo_accuracy",
+        "reference_id": "reference_id",
+        "reference_date": "reference_date",
+        "secondary_attributes": "secondary_attributes",
+        "country_iso": "country_iso",
+        "region": "region",
+        "district": "district",
+        "municipality": "municipality",
+    },
+    onshore_sources=ONSHORE_SOURCES,
+    check_storage_capacity=False,
+    verifier=_verify_load_generators,
+    create_table=_create_core_generators,
+)
+
+STORAGE_KIND = _CoreKind(
+    core_table="storages",
+    staging_sources=("storage",),
+    properties_table="storage_properties",
+    units_properties_table="storage_units_properties",
+    column_map={
+        "energy_source": "energy_source",
+        "storage_type": "storage_type",
+        "storage_capacity": "storage_capacity",
+        "installed_capacity": "installed_capacity",
+        "commissioning_date": "commissioning_date",
+        "decommissioning_date": "decommissioning_date",
+        "geometry": "geometry",
+        "x_coordinates": "longitude",
+        "y_coordinates": "latitude",
+        "geo_accuracy": "geo_accuracy",
+        "reference_id": "reference_id",
+        "reference_date": "reference_date",
+        "secondary_attributes": "secondary_attributes",
+        "country_iso": "country_iso",
+        "region": "region",
+        "district": "district",
+        "municipality": "municipality",
+    },
+    onshore_sources=("storage",),
+    check_storage_capacity=True,
+    verifier=_verify_load_storages,
+    create_table=_create_core_storages,
+)
+
+
+def load_generators() -> LoadReport:
+    """Load staging rows into core.generators with collision annotation."""
+    return _load(kind=GENERATOR_KIND)
+
+
+def load_storages() -> LoadReport:
+    """Load staged storage rows into core.storages with collision annotation."""
+    return _load(kind=STORAGE_KIND)
+
+
+def _load(kind: _CoreKind) -> LoadReport:
+    """Consolidate a kind's good staging rows into its core table.
+
+    Reads the good (bad_quality=false) rows from the kind's staging tables
+    and consolidates them into the core table with a serial surrogate key.
+    The first load creates the table and INSERTs every good row; later loads
+    are incremental: a staging row whose record identity matches an existing
+    core row is UPDATEd in place only when its reference_date is fresher, a
+    staler row is skipped, and an unmatched row is INSERTed. Core unit_ids
+    are never regenerated.
 
     After the upsert, collision checks run against the core geometry and are
-    then refreshed (flags reset, generator collision links cleared, re-written
-    from scratch so they never orphan):
+    then refreshed (flags reset, collision links cleared, re-written from
+    scratch so they never orphan):
     - close-location pairs (geo_accuracy=1, <10m apart)
     - region-null units
     - onshore sources in the sea
+    - storage_capacity <= 0 or null (storages only)
     Collision rows are annotated with property links and remain in core.
     """
-    report = LoadReport(target="generators")
+    report = LoadReport(target=kind.core_table)
     start = time.perf_counter()
     try:
         engine = get_engine()
         _ensure_schema(engine, CORE_SCHEMA)
 
-        first_load = not _table_exists(engine, "generators")
+        first_load = not _table_exists(engine, kind.core_table)
         if first_load:
-            log.info("Creating core.generators (first load)...")
-            _create_core_generators(engine)
+            log.info("Creating core.%s (first load)...", kind.core_table)
+            kind.create_table(engine)
 
-        log.info("Reading staging rows for all generator sources...")
+        log.info("Reading staging rows for %s...", report.target)
         t = time.perf_counter()
-        staging_df = _read_staging(engine)
+        staging_df = _read_staging(engine, kind)
         report.rows_read = len(staging_df)
-        report.bad_rows_dropped = _bad_quality_count(engine)
+        report.bad_rows_dropped = _bad_quality_count(engine, kind)
         log.info(
             "%d good staging rows, %d bad dropped, time %.3fs",
             report.rows_read,
@@ -78,16 +177,16 @@ def load_generators() -> LoadReport:
 
         log.info("Building core identity lookup...")
         t = time.perf_counter()
-        core_lookup, existing_count = _build_core_lookup(engine)
+        core_lookup, existing_count = _build_core_lookup(engine, kind)
         log.info(
             "%d existing core rows, time %.3fs", existing_count, time.perf_counter() - t
         )
 
         log.info("Partitioning staging into insert/update/skip...")
         t = time.perf_counter()
-        max_existing_id = _max_unit_id(engine)
-        insert_df, update_df, skip_df = _partition_staging(engine, staging_df, core_lookup)
-        _apply_upsert(engine, insert_df, update_df)
+        max_existing_id = _max_unit_id(engine, kind)
+        insert_df, update_df, skip_df = _partition_staging(engine, staging_df, core_lookup, kind)
+        _apply_upsert(engine, insert_df, update_df, kind)
         report.rows_inserted = len(insert_df)
         report.rows_updated = len(update_df)
         report.rows_skipped = len(skip_df)
@@ -108,7 +207,7 @@ def load_generators() -> LoadReport:
             affected = []
         else:
             inserted = (
-                _inserted_unit_ids(engine, max_existing_id)
+                _inserted_unit_ids(engine, max_existing_id, kind)
                 if not insert_df.empty
                 else []
             )
@@ -121,13 +220,13 @@ def load_generators() -> LoadReport:
         if has_changes:
             log.info("Running collision checks...")
             t = time.perf_counter()
-            _reset_collision_annotation(engine, affected_ids=affected)
+            _reset_collision_annotation(engine, affected_ids=affected, kind=kind)
             collision_df, close_units = _detect_collisions(
-                engine, affected_ids=affected
+                engine, affected_ids=affected, kind=kind
             )
             report.collisions = len(collision_df)
             report.collision_links = _write_collision_links(
-                engine, collision_df, close_units
+                engine, collision_df, close_units, kind=kind
             )
             log.info(
                 "%d collision rows, %d links, time %.3fs",
@@ -144,9 +243,9 @@ def load_generators() -> LoadReport:
         log.info("Transferring normalized properties...")
         t = time.perf_counter()
         if first_load or affected:
-            staging_to_core = _staging_to_core_unit_map(engine)
+            staging_to_core = _staging_to_core_unit_map(engine, kind)
             report.properties_count, report.links_count = _transfer_properties(
-                engine, staging_to_core, affected_ids=affected
+                engine, staging_to_core, affected_ids=affected, kind=kind
             )
         else:
             log.info("No changes — skipping property transfer")
@@ -159,14 +258,14 @@ def load_generators() -> LoadReport:
 
         log.info("Verifying load...")
         t = time.perf_counter()
-        report.errors = _verify_load_generators(engine, report)
+        report.errors = kind.verifier(engine, report)
         log.info("Verification done, time %.3fs", time.perf_counter() - t)
 
         # Idempotency check: run upsert again, counts should not change.
         log.info("Idempotency check...")
         t = time.perf_counter()
-        core_lookup2, _ = _build_core_lookup(engine)
-        insert2, update2, skip2 = _partition_staging(engine, staging_df, core_lookup2)
+        core_lookup2, _ = _build_core_lookup(engine, kind)
+        insert2, update2, skip2 = _partition_staging(engine, staging_df, core_lookup2, kind)
         report.idempotent = len(insert2) == 0 and len(update2) == 0
         if not report.idempotent:
             report.errors.append(
@@ -177,7 +276,7 @@ def load_generators() -> LoadReport:
 
     except Exception as e:
         report.errors.append(f"Load failed: {e}")
-        log.exception("Load failed for generators")
+        log.exception("Load failed for %s", report.target)
 
     report.total_time = time.perf_counter() - start
     if report.errors:
@@ -185,7 +284,8 @@ def load_generators() -> LoadReport:
             log.error("Load failed: %s", err)
     else:
         log.info(
-            "Load passed for generators (%d rows inserted, %d updated)",
+            "Load passed for %s (%d rows inserted, %d updated)",
+            report.target,
             report.rows_inserted,
             report.rows_updated,
         )
@@ -193,27 +293,26 @@ def load_generators() -> LoadReport:
     return report
 
 
-
-
 # ------------------------------------------------------------------ #
 #  Staging read                                                        #
 # ------------------------------------------------------------------ #
 
 
-def _read_staging(engine: Engine) -> pandas.DataFrame:
-    """Read all good (bad_quality=false) rows from all generator staging tables."""
-    union_parts = []
-    for source in STAGING_GENERATOR_SOURCES:
-        union_parts.append(f'SELECT * FROM {STAGING_SCHEMA}.{source} WHERE NOT bad_quality')
+def _read_staging(engine: Engine, kind: _CoreKind) -> pandas.DataFrame:
+    """Read all good (bad_quality=false) rows from the kind's staging tables."""
+    union_parts = [
+        f"SELECT * FROM {STAGING_SCHEMA}.{source} WHERE NOT bad_quality"
+        for source in kind.staging_sources
+    ]
     sql = " UNION ALL ".join(union_parts)
     return pandas.read_sql(text(sql), engine)
 
 
-def _bad_quality_count(engine: Engine) -> int:
-    """Count all bad_quality rows across the generator staging tables."""
+def _bad_quality_count(engine: Engine, kind: _CoreKind) -> int:
+    """Count all bad_quality rows across the kind's staging tables."""
     sums = " + ".join(
         f"(SELECT COUNT(*) FROM {STAGING_SCHEMA}.{s} WHERE bad_quality)"
-        for s in STAGING_GENERATOR_SOURCES
+        for s in kind.staging_sources
     )
     with engine.connect() as conn:
         return int(conn.execute(text(f"SELECT {sums}")).scalar())
@@ -225,7 +324,7 @@ def _bad_quality_count(engine: Engine) -> int:
 
 
 def _build_core_lookup(
-    engine: Engine,
+    engine: Engine, kind: _CoreKind
 ) -> tuple[dict[str, int], int]:
     """Build a lookup dict mapping record identity → core unit_id.
 
@@ -240,7 +339,7 @@ def _build_core_lookup(
             text(
                 f"SELECT unit_id, reference_id, energy_source, "
                 f"longitude, latitude, installed_capacity, commissioning_date "
-                f"FROM {CORE_SCHEMA}.generators"
+                f"FROM {CORE_SCHEMA}.{kind.core_table}"
             )
         ).fetchall()
     for row in rows:
@@ -292,7 +391,10 @@ def _staging_identities(df: pandas.DataFrame) -> pandas.Series:
 
 
 def _partition_staging(
-    engine: Engine, staging_df: pandas.DataFrame, core_lookup: dict[str, int]
+    engine: Engine,
+    staging_df: pandas.DataFrame,
+    core_lookup: dict[str, int],
+    kind: _CoreKind,
 ) -> tuple[pandas.DataFrame, pandas.DataFrame, pandas.DataFrame]:
     """Split staging rows into insert, update, and skip buckets.
 
@@ -310,7 +412,9 @@ def _partition_staging(
     core_ref_dates: dict[int, object] = {}
     with engine.connect() as conn:
         rows = conn.execute(
-            text(f"SELECT unit_id, reference_date FROM {CORE_SCHEMA}.generators")
+            text(
+                f"SELECT unit_id, reference_date FROM {CORE_SCHEMA}.{kind.core_table}"
+            )
         ).fetchall()
     for unit_id, ref_date in rows:
         core_ref_dates[unit_id] = ref_date
@@ -356,56 +460,38 @@ def _is_fresher(staging_date, core_date) -> bool:
 
 
 # ------------------------------------------------------------------ #
-#  Upsert into core.generators                                         #
+#  Upsert into core table (generators / storages)                      #
 # ------------------------------------------------------------------ #
 
 
-# Staging column → core.generators column mapping for the write path.
-_INSERT_COLUMN_MAP = {
-    "energy_source": "energy_source",
-    "installed_capacity": "installed_capacity",
-    "commissioning_date": "commissioning_date",
-    "decommissioning_date": "decommissioning_date",
-    "geometry": "geometry",
-    "x_coordinates": "longitude",
-    "y_coordinates": "latitude",
-    "geo_accuracy": "geo_accuracy",
-    "reference_id": "reference_id",
-    "reference_date": "reference_date",
-    "secondary_attributes": "secondary_attributes",
-    "country_iso": "country_iso",
-    "region": "region",
-    "district": "district",
-    "municipality": "municipality",
-}
-
-
 def _apply_upsert(
-    engine: Engine, insert_df: pandas.DataFrame, update_df: pandas.DataFrame
+    engine: Engine, insert_df: pandas.DataFrame, update_df: pandas.DataFrame, kind: _CoreKind
 ) -> None:
-    """Insert new rows and update existing rows in core.generators."""
+    """Insert new rows and update existing rows in the core table."""
     with engine.begin() as conn:
-        _insert_core_rows(conn, insert_df)
+        _insert_core_rows(conn, insert_df, kind)
         for _, row in update_df.iterrows():
-            _update_core_row(conn, row)
+            _update_core_row(conn, row, kind)
 
 
-def _max_unit_id(engine: Engine) -> int:
-    """Return the current max unit_id in core.generators (0 if empty)."""
+def _max_unit_id(engine: Engine, kind: _CoreKind) -> int:
+    """Return the current max unit_id in the core table (0 if empty)."""
     with engine.connect() as conn:
         return int(
             conn.execute(
-                text(f"SELECT COALESCE(MAX(unit_id), 0) FROM {CORE_SCHEMA}.generators")
+                text(
+                    f"SELECT COALESCE(MAX(unit_id), 0) FROM {CORE_SCHEMA}.{kind.core_table}"
+                )
             ).scalar()
         )
 
 
-def _inserted_unit_ids(engine: Engine, after: int) -> list[int]:
+def _inserted_unit_ids(engine: Engine, after: int, kind: _CoreKind) -> list[int]:
     """Return unit_ids inserted since *after* (exclusive)."""
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                f"SELECT unit_id FROM {CORE_SCHEMA}.generators "
+                f"SELECT unit_id FROM {CORE_SCHEMA}.{kind.core_table} "
                 f"WHERE unit_id > :after"
             ),
             {"after": after},
@@ -425,42 +511,42 @@ def _sql_value(v):
     return v
 
 
-def _core_row_values(row: pandas.Series) -> dict:
-    """Map a staging row's values to core.generators columns."""
+def _core_row_values(row: pandas.Series, column_map: dict[str, str]) -> dict:
+    """Map a staging row's values to the core table columns."""
     return {
         core_col: _sql_value(row.get(stg_col))
-        for stg_col, core_col in _INSERT_COLUMN_MAP.items()
+        for stg_col, core_col in column_map.items()
     }
 
 
-def _insert_core_rows(conn, df: pandas.DataFrame) -> None:
-    """Bulk-insert staging rows into core.generators via execute_values."""
+def _insert_core_rows(conn, df: pandas.DataFrame, kind: _CoreKind) -> None:
+    """Bulk-insert staging rows into the core table via execute_values."""
     if df.empty:
         return
-    sub = df[list(_INSERT_COLUMN_MAP)].rename(columns=_INSERT_COLUMN_MAP)
+    sub = df[list(kind.column_map)].rename(columns=kind.column_map)
     sub = sub.astype("object").where(pandas.notna(sub), None)
     cols = ", ".join(sub.columns)
     records = [tuple(r[k] for k in sub.columns) for r in sub.to_dict("records")]
     execute_values(
         conn.connection.cursor(),
-        f"INSERT INTO {CORE_SCHEMA}.generators ({cols}) VALUES %s",
+        f"INSERT INTO {CORE_SCHEMA}.{kind.core_table} ({cols}) VALUES %s",
         records,
         page_size=1000,
     )
 
 
-def _update_core_row(conn, row: pandas.Series) -> None:
-    """Update an existing core.generators row by its core unit_id.
+def _update_core_row(conn, row: pandas.Series, kind: _CoreKind) -> None:
+    """Update an existing core row by its core unit_id.
 
     The unit_id comes from the identity-matched core row; the matching itself
     was done in _partition_staging, so the update is precise.
     """
-    vals = _core_row_values(row)
+    vals = _core_row_values(row, kind.column_map)
     set_clause = ", ".join(f"{k} = :{k}" for k in vals)
     vals["core_unit_id"] = int(row["_core_unit_id"])
     conn.execute(
         text(
-            f"UPDATE {CORE_SCHEMA}.generators SET {set_clause} "
+            f"UPDATE {CORE_SCHEMA}.{kind.core_table} SET {set_clause} "
             f"WHERE unit_id = :core_unit_id"
         ),
         vals,
@@ -473,7 +559,7 @@ def _update_core_row(conn, row: pandas.Series) -> None:
 
 
 def _detect_collisions(
-    engine: Engine, affected_ids: list[int] | None = None
+    engine: Engine, kind: _CoreKind, affected_ids: list[int] | None = None
 ) -> tuple[pandas.DataFrame, dict[int, list[int]]]:
     """Detect collision conditions; return (flag df, close-pair map).
 
@@ -481,7 +567,7 @@ def _detect_collisions(
     newline-joined ``reasons`` value.  The close-pair map records for each
     flagged unit the ids of its geo_accuracy=1 neighbours within
     COLLISION_CLOSE_DISTANCE_M (``{unit_id: [neighbour_ids]}``) — these live
-    in core.generators.secondary_attributes, not as property links.
+    in the core table's secondary_attributes, not as property links.
 
     When *affected_ids* is ``None`` (first load) every core row is checked.
     When it is provided only rows in that list, plus any pairs they form with
@@ -491,9 +577,11 @@ def _detect_collisions(
     collision_units: dict[int, list[str]] = {}
     close_units: dict[int, list[int]] = {}
 
-    _detect_close_location(engine, collision_units, close_units, affected_ids)
-    _detect_region_null(engine, collision_units, affected_ids)
-    _detect_onshore_in_sea(engine, collision_units, affected_ids)
+    _detect_close_location(engine, collision_units, close_units, kind, affected_ids)
+    _detect_region_null(engine, collision_units, kind, affected_ids)
+    _detect_onshore_in_sea(engine, collision_units, kind, affected_ids)
+    if kind.check_storage_capacity:
+        _detect_storage_capacity(engine, collision_units, kind, affected_ids)
 
     if not collision_units:
         return (
@@ -512,6 +600,7 @@ def _detect_close_location(
     engine: Engine,
     collision_units: dict[int, list[str]],
     close_units: dict[int, list[int]],
+    kind: _CoreKind,
     affected_ids: list[int] | None = None,
 ) -> None:
     """Find pairs of geo_accuracy=1 units within 10m of each other.
@@ -533,8 +622,8 @@ def _detect_close_location(
         pairs = conn.execute(
             text(
                 f"SELECT a.unit_id, b.unit_id "
-                f"FROM {CORE_SCHEMA}.generators a "
-                f"JOIN {CORE_SCHEMA}.generators b "
+                f"FROM {CORE_SCHEMA}.{kind.core_table} a "
+                f"JOIN {CORE_SCHEMA}.{kind.core_table} b "
                 f"ON ST_DWithin(a.geometry::geography, b.geometry::geography, "
                 f"{COLLISION_CLOSE_DISTANCE_M}) "
                 f"WHERE a.unit_id < b.unit_id "
@@ -555,6 +644,7 @@ def _detect_close_location(
 def _detect_region_null(
     engine: Engine,
     collision_units: dict[int, list[str]],
+    kind: _CoreKind,
     affected_ids: list[int] | None = None,
 ) -> None:
     """Flag units whose region is NULL (outside every boundary)."""
@@ -570,7 +660,7 @@ def _detect_region_null(
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                f"SELECT unit_id FROM {CORE_SCHEMA}.generators "
+                f"SELECT unit_id FROM {CORE_SCHEMA}.{kind.core_table} "
                 f"WHERE region IS NULL {region_filter}"
             ),
             params,
@@ -582,9 +672,10 @@ def _detect_region_null(
 def _detect_onshore_in_sea(
     engine: Engine,
     collision_units: dict[int, list[str]],
+    kind: _CoreKind,
     affected_ids: list[int] | None = None,
 ) -> None:
-    """Flag onshore-only sources (bio/gas/hydro/solar) in sea/EEZ regions."""
+    """Flag onshore-only sources in sea/EEZ regions."""
     if affected_ids is not None and not affected_ids:
         return
 
@@ -594,12 +685,12 @@ def _detect_onshore_in_sea(
         sea_filter = "AND unit_id = ANY(:affected)"
         params["affected"] = affected_ids
 
-    sources = ", ".join(f"'{s}'" for s in ONSHORE_SOURCES)
+    sources = ", ".join(f"'{s}'" for s in kind.onshore_sources)
     regions = ", ".join(f"'{r}'" for r in SEA_REGIONS)
     with engine.connect() as conn:
         rows = conn.execute(
             text(
-                f"SELECT unit_id FROM {CORE_SCHEMA}.generators "
+                f"SELECT unit_id FROM {CORE_SCHEMA}.{kind.core_table} "
                 f"WHERE energy_source IN ({sources}) "
                 f"AND region IN ({regions}) "
                 f"{sea_filter}"
@@ -608,6 +699,35 @@ def _detect_onshore_in_sea(
         ).fetchall()
     for (uid,) in rows:
         collision_units.setdefault(uid, []).append("onshore unit in the sea")
+
+
+def _detect_storage_capacity(
+    engine: Engine,
+    collision_units: dict[int, list[str]],
+    kind: _CoreKind,
+    affected_ids: list[int] | None = None,
+) -> None:
+    """Flag storages with storage_capacity <= 0 or null (spec Load check)."""
+    if affected_ids is not None and not affected_ids:
+        return
+
+    capacity_filter = ""
+    params: dict[str, object] = {}
+    if affected_ids is not None:
+        capacity_filter = "AND unit_id = ANY(:affected)"
+        params["affected"] = affected_ids
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT unit_id FROM {CORE_SCHEMA}.{kind.core_table} "
+                f"WHERE (storage_capacity IS NULL OR storage_capacity <= 0) "
+                f"{capacity_filter}"
+            ),
+            params,
+        ).fetchall()
+    for (uid,) in rows:
+        collision_units.setdefault(uid, []).append(STORAGE_CAPACITY_COLLISION_REASON)
 
 
 # ------------------------------------------------------------------ #
@@ -619,6 +739,7 @@ def _write_collision_links(
     engine: Engine,
     collision_df: pandas.DataFrame,
     close_units: dict[int, list[int]],
+    kind: _CoreKind,
 ) -> int:
     """Write collision property links and close_to neighbour attributes.
 
@@ -626,7 +747,7 @@ def _write_collision_links(
     only writes links for the units in *collision_df*: one 'collision' link
     per flagged unit carrying the joined reasons (a close-location pair
     contributes the CLOSE_LOCATION_REASON phrase, without unit ids) and the
-    close-pair neighbours are stored on core.generators.secondary_attributes
+    close-pair neighbours are stored on the core table's secondary_attributes
     as a ``close_to`` JSON list instead of property links.  A unit with no
     detection keeps collision=false and no annotation.  Returns the total
     number of property links written.
@@ -649,12 +770,12 @@ def _write_collision_links(
     with engine.begin() as conn:
         conn.execute(
             text(
-                f"UPDATE {CORE_SCHEMA}.generators SET collision = true "
+                f"UPDATE {CORE_SCHEMA}.{kind.core_table} SET collision = true "
                 f"WHERE unit_id = ANY(:ids)"
             ),
             {"ids": flagged},
         )
-        prop_map = _ensure_properties(conn, prop_keys)
+        prop_map = _ensure_properties(conn, prop_keys, kind)
         pairs = [
             (uid, prop_map[key])
             for key, uids in wanted.items()
@@ -662,24 +783,24 @@ def _write_collision_links(
         ]
         execute_values(
             conn.connection.cursor(),
-            f"INSERT INTO {CORE_SCHEMA}.generator_units_properties "
+            f"INSERT INTO {CORE_SCHEMA}.{kind.units_properties_table} "
             f"(unit_id, prop_id) VALUES %s ON CONFLICT DO NOTHING",
             pairs,
             page_size=2000,
         )
-        _write_close_locations(conn, close_units)
+        _write_close_locations(conn, close_units, kind)
 
     return len(pairs)
 
 
 def _write_close_locations(
-    conn, close_units: dict[int, list[int]]
+    conn, close_units: dict[int, list[int]], kind: _CoreKind
 ) -> None:
     """Persist close-pair neighbours into secondary_attributes.close_to.
 
-    For every unit in *close_units* the ``close_to`` key of its
-    core.generators.secondary_attributes JSON is set to the sorted list of
-    neighbour unit ids (replacing any previous value for that key).
+    For every unit in *close_units* the ``close_to`` key of its core
+    secondary_attributes JSON is set to the sorted list of neighbour unit ids
+    (replacing any previous value for that key).
     """
     if not close_units:
         return
@@ -690,7 +811,7 @@ def _write_close_locations(
     ]
     execute_values(
         conn.connection.cursor(),
-        f"UPDATE {CORE_SCHEMA}.generators g "
+        f"UPDATE {CORE_SCHEMA}.{kind.core_table} g "
         f"SET secondary_attributes = jsonb_set("
         f"COALESCE(g.secondary_attributes::jsonb, '{{}}'::jsonb), "
         f"'{{close_to}}'::text[], v.neighbours::jsonb, true)::text "
@@ -702,13 +823,13 @@ def _write_close_locations(
 
 
 def _ensure_properties(
-    conn, keys: set[tuple[str, str]]
+    conn, keys: set[tuple[str, str]], kind: _CoreKind
 ) -> dict[tuple[str, str], int]:
     """Ensure every (name, value) property key exists; return key → prop_id."""
     names = sorted({name for name, _ in keys})
     names_sql = ", ".join(f"'{n}'" for n in names)
     select_sql = (
-        f"SELECT name, value, prop_id FROM {CORE_SCHEMA}.generator_properties "
+        f"SELECT name, value, prop_id FROM {CORE_SCHEMA}.{kind.properties_table} "
         f"WHERE name IN ({names_sql})"
     )
     prop_map = {
@@ -719,7 +840,7 @@ def _ensure_properties(
     if missing:
         execute_values(
             conn.connection.cursor(),
-            f"INSERT INTO {CORE_SCHEMA}.generator_properties (name, value) "
+            f"INSERT INTO {CORE_SCHEMA}.{kind.properties_table} (name, value) "
             f"VALUES %s ON CONFLICT DO NOTHING",
             missing,
             page_size=1000,
@@ -736,7 +857,7 @@ def _ensure_properties(
 
 
 def _reset_collision_annotation(
-    engine: Engine, affected_ids: list[int] | None = None
+    engine: Engine, affected_ids: list[int] | None, kind: _CoreKind
 ) -> None:
     """Clear collision flags, links, and secondary_attributes close_to data.
 
@@ -751,8 +872,8 @@ def _reset_collision_annotation(
         # Deprecated: close_to used to be a property link; purge everywhere.
         conn.execute(
             text(
-                f"DELETE FROM {CORE_SCHEMA}.generator_units_properties up "
-                f"USING {CORE_SCHEMA}.generator_properties p "
+                f"DELETE FROM {CORE_SCHEMA}.{kind.units_properties_table} up "
+                f"USING {CORE_SCHEMA}.{kind.properties_table} p "
                 f"WHERE up.prop_id = p.prop_id "
                 f"AND p.name = :close_to"
             ),
@@ -760,7 +881,7 @@ def _reset_collision_annotation(
         )
         conn.execute(
             text(
-                f"DELETE FROM {CORE_SCHEMA}.generator_properties "
+                f"DELETE FROM {CORE_SCHEMA}.{kind.properties_table} "
                 f"WHERE name = :close_to"
             ),
             {"close_to": CLOSE_TO_PROPERTY},
@@ -769,12 +890,12 @@ def _reset_collision_annotation(
         if affected_ids is None:
             conn.execute(
                 text(
-                    f"UPDATE {CORE_SCHEMA}.generators SET collision = false"
+                    f"UPDATE {CORE_SCHEMA}.{kind.core_table} SET collision = false"
                 )
             )
             conn.execute(
                 text(
-                    f"UPDATE {CORE_SCHEMA}.generators "
+                    f"UPDATE {CORE_SCHEMA}.{kind.core_table} "
                     f"SET secondary_attributes = "
                     f"(secondary_attributes::jsonb - 'close_to')::text "
                     f"WHERE secondary_attributes IS NOT NULL "
@@ -783,8 +904,8 @@ def _reset_collision_annotation(
             )
             conn.execute(
                 text(
-                    f"DELETE FROM {CORE_SCHEMA}.generator_units_properties up "
-                    f"USING {CORE_SCHEMA}.generator_properties p "
+                    f"DELETE FROM {CORE_SCHEMA}.{kind.units_properties_table} up "
+                    f"USING {CORE_SCHEMA}.{kind.properties_table} p "
                     f"WHERE up.prop_id = p.prop_id "
                     f"AND p.name = :collision"
                 ),
@@ -798,7 +919,7 @@ def _reset_collision_annotation(
         # Clear collision flags for affected rows.
         conn.execute(
             text(
-                f"UPDATE {CORE_SCHEMA}.generators SET collision = false "
+                f"UPDATE {CORE_SCHEMA}.{kind.core_table} SET collision = false "
                 f"WHERE unit_id = ANY(:ids)"
             ),
             {"ids": affected_ids},
@@ -806,8 +927,8 @@ def _reset_collision_annotation(
         # Delete affected rows' own collision links.
         conn.execute(
             text(
-                f"DELETE FROM {CORE_SCHEMA}.generator_units_properties up "
-                f"USING {CORE_SCHEMA}.generator_properties p "
+                f"DELETE FROM {CORE_SCHEMA}.{kind.units_properties_table} up "
+                f"USING {CORE_SCHEMA}.{kind.properties_table} p "
                 f"WHERE up.prop_id = p.prop_id "
                 f"AND up.unit_id = ANY(:ids) "
                 f"AND p.name = :collision"
@@ -818,7 +939,7 @@ def _reset_collision_annotation(
         # siblings added in _detect_close_location get recomputed.
         conn.execute(
             text(
-                f"UPDATE {CORE_SCHEMA}.generators "
+                f"UPDATE {CORE_SCHEMA}.{kind.core_table} "
                 f"SET secondary_attributes = "
                 f"(secondary_attributes::jsonb - 'close_to')::text "
                 f"WHERE unit_id = ANY(:ids) "
@@ -830,7 +951,7 @@ def _reset_collision_annotation(
         # Scrub affected ids out of every other row's close_to lists.
         conn.execute(
             text(
-                f"UPDATE {CORE_SCHEMA}.generators g "
+                f"UPDATE {CORE_SCHEMA}.{kind.core_table} g "
                 f"SET secondary_attributes = CASE "
                 f"WHEN v.new_value = '[]'::jsonb "
                 f"THEN (g.secondary_attributes::jsonb - 'close_to')::text "
@@ -842,7 +963,7 @@ def _reset_collision_annotation(
                 f"secondary_attributes::jsonb -> 'close_to') AS elem "
                 f"WHERE NOT (elem #>> '{{}}')::int = ANY(:ids)), "
                 f"'[]'::jsonb) AS new_value "
-                f"FROM {CORE_SCHEMA}.generators "
+                f"FROM {CORE_SCHEMA}.{kind.core_table} "
                 f"WHERE secondary_attributes IS NOT NULL "
                 f"AND secondary_attributes::jsonb ? 'close_to') v "
                 f"WHERE g.unit_id = v.unit_id"
@@ -856,7 +977,7 @@ def _reset_collision_annotation(
 # ------------------------------------------------------------------ #
 
 
-def _staging_to_core_unit_map(engine: Engine) -> dict[str, int]:
+def _staging_to_core_unit_map(engine: Engine, kind: _CoreKind) -> dict[str, int]:
     """Map each staging unit_id to its core unit_id.
 
     Staging unit_ids are '<source>_<reference_id>' for referenced rows and
@@ -865,10 +986,10 @@ def _staging_to_core_unit_map(engine: Engine) -> dict[str, int]:
     re-deriving the identity from each staging row.  bad_quality rows (never
     loaded into core) are skipped by the lookup miss.
     """
-    core_lookup, _ = _build_core_lookup(engine)
+    core_lookup, _ = _build_core_lookup(engine, kind)
     mapping: dict[str, int] = {}
     with engine.connect() as conn:
-        for source in STAGING_GENERATOR_SOURCES:
+        for source in kind.staging_sources:
             rows = conn.execute(
                 text(
                     f"SELECT unit_id, reference_id, energy_source, "
@@ -890,15 +1011,15 @@ def _staging_to_core_unit_map(engine: Engine) -> dict[str, int]:
 def _transfer_properties(
     engine: Engine,
     staging_to_core: dict[str, int],
+    kind: _CoreKind,
     affected_ids: list[int] | None = None,
 ) -> tuple[int, int]:
     """Move the staging whitelist decomposition into core for affected units.
 
     Collects every (name, value) pair a staging row links (bad_quality pairs
     skipped — they stay staging-only, ADR 0005), maps the staging unit_id onto
-    its core serial unit_id, and reconciles core.generator_properties /
-core.generator_units_properties
-    for the affected units:
+    its core serial unit_id, and reconciles the kind's core properties /
+    units_properties tables for the affected units:
 
     * *affected_ids* ``None`` (first load) rewrites every mapped unit.
     * a list rewrites just those units — deleting their old whitelist links
@@ -914,7 +1035,7 @@ core.generator_units_properties
 
     wanted_units: dict[int, list[tuple[str, str]]] = defaultdict(list)
     with engine.connect() as conn:
-        for source in STAGING_GENERATOR_SOURCES:
+        for source in kind.staging_sources:
             rows = conn.execute(
                 text(
                     f"SELECT up.unit_id, p.name, p.value "
@@ -942,8 +1063,8 @@ core.generator_units_properties
             whitelist = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
             conn.execute(
                 text(
-                    f"DELETE FROM {CORE_SCHEMA}.generator_units_properties up "
-                    f"USING {CORE_SCHEMA}.generator_properties p "
+                    f"DELETE FROM {CORE_SCHEMA}.{kind.units_properties_table} up "
+                    f"USING {CORE_SCHEMA}.{kind.properties_table} p "
                     f"WHERE up.prop_id = p.prop_id "
                     f"AND up.unit_id = ANY(:ids) "
                     f"AND p.name IN ({whitelist})"
@@ -951,7 +1072,7 @@ core.generator_units_properties
                 {"ids": affected_ids},
             )
 
-        prop_map = _ensure_properties(conn, prop_keys)
+        prop_map = _ensure_properties(conn, prop_keys, kind)
         pairs = [
             (core_uid, prop_map[key])
             for core_uid, keys in wanted_units.items()
@@ -959,7 +1080,7 @@ core.generator_units_properties
         ]
         execute_values(
             conn.connection.cursor(),
-            f"INSERT INTO {CORE_SCHEMA}.generator_units_properties "
+            f"INSERT INTO {CORE_SCHEMA}.{kind.units_properties_table} "
             f"(unit_id, prop_id) VALUES %s ON CONFLICT DO NOTHING",
             pairs,
             page_size=2000,

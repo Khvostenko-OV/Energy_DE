@@ -448,3 +448,182 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
             stored, core_props, core_links, float(core_cap or 0),
         )
     return errors
+
+
+def _verify_load_storages(engine: Engine, report: LoadReport) -> list[str]:
+    """Verify core.storages against the load report and staging.
+
+    Mirrors the generator load verification for the storage kind: row and
+    capacity reconciliation against good storage staging rows, no duplicate
+    (energy_source, reference_id) pairs where reference_id is present,
+    per-row invariants (geometry, longitude/latitude, secondary attributes),
+    collision flag/link agreement, and that every staging bad-quality row
+    stayed out of core.
+    """
+    errors: list[str] = []
+
+    def scalar(sql: str):
+        with engine.connect() as conn:
+            return conn.execute(text(sql)).scalar()
+
+    stored = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages"))
+
+    good_staging_count = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.storage WHERE NOT bad_quality"
+        )
+    )
+    if stored != good_staging_count:
+        errors.append(f"Core rows {stored} != good staging rows {good_staging_count}")
+
+    dups = int(
+        scalar(
+            f"SELECT COUNT(*) FROM ("
+            f"SELECT energy_source, reference_id FROM {CORE_SCHEMA}.storages "
+            f"WHERE reference_id IS NOT NULL "
+            f"GROUP BY energy_source, reference_id HAVING COUNT(*) > 1) d"
+        )
+    )
+    if dups:
+        errors.append(f"Duplicate (energy_source, reference_id) pairs: {dups}")
+
+    # Storage capacity reconciles against good staging rows (the primary
+    # capacity of the storage kind).
+    staging_cap = float(
+        scalar(
+            f"SELECT COALESCE((SELECT SUM(storage_capacity) "
+            f"FROM {STAGING_SCHEMA}.storage WHERE NOT bad_quality), 0)"
+        )
+    )
+    core_cap = scalar(f"SELECT SUM(storage_capacity) FROM {CORE_SCHEMA}.storages")
+    if core_cap is not None and abs(float(core_cap) - staging_cap) > 0.01:
+        errors.append(
+            f"Storage capacity drift: core {core_cap} vs good staging {staging_cap}"
+        )
+
+    staging_inst = float(
+        scalar(
+            f"SELECT COALESCE((SELECT SUM(installed_capacity) "
+            f"FROM {STAGING_SCHEMA}.storage WHERE NOT bad_quality), 0)"
+        )
+    )
+    core_inst = scalar(f"SELECT SUM(installed_capacity) FROM {CORE_SCHEMA}.storages")
+    if core_inst is not None and abs(float(core_inst) - staging_inst) > 0.01:
+        errors.append(
+            f"Installed capacity drift: core {core_inst} vs good staging {staging_inst}"
+        )
+
+    without_geom = int(
+        scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages WHERE geometry IS NULL")
+    )
+    if without_geom:
+        errors.append(f"{without_geom} core rows missing geometry")
+
+    without_coords = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages "
+            f"WHERE longitude IS NULL OR latitude IS NULL"
+        )
+    )
+    if without_coords:
+        errors.append(f"{without_coords} core rows missing longitude/latitude")
+
+    leaked_bad = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages g "
+            f"JOIN {CORE_SCHEMA}.storage_units_properties gp ON gp.unit_id = g.unit_id "
+            f"JOIN {CORE_SCHEMA}.storage_properties p ON p.prop_id = gp.prop_id "
+            f"WHERE p.name = '{BAD_QUALITY_PROPERTY}' "
+            f"LIMIT 1"
+        )
+    )
+    if leaked_bad:
+        errors.append("bad_quality property links leaked into core")
+
+    flagged = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages WHERE collision"))
+    linked = int(
+        scalar(
+            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.storage_units_properties gp "
+            f"JOIN {CORE_SCHEMA}.storage_properties p ON p.prop_id = gp.prop_id "
+            f"WHERE p.name = '{COLLISION_PROPERTY}'"
+        )
+    )
+    if flagged != linked:
+        errors.append(
+            f"Collision flag drift: {flagged} collision=true rows vs {linked} "
+            f"units with a collision link"
+        )
+
+    whitelist_names = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
+    annotation_names = f"'{COLLISION_PROPERTY}'"
+
+    # Every whitelist (name, value) used by a good storage staging row must
+    # exist in core.storage_properties.
+    staging_prop_union = (
+        f"SELECT DISTINCT p.name, p.value FROM {STAGING_SCHEMA}.storage_properties p "
+        f"JOIN {STAGING_SCHEMA}.storage_units_properties up ON up.param_id = p.param_id "
+        f"JOIN {STAGING_SCHEMA}.storage u ON u.unit_id = up.unit_id "
+        f"WHERE p.name <> '{BAD_QUALITY_PROPERTY}' AND NOT u.bad_quality"
+    )
+    expected_props = int(scalar(f"SELECT COUNT(*) FROM ({staging_prop_union}) d"))
+    core_props = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storage_properties "
+            f"WHERE name IN ({whitelist_names})"
+        )
+    )
+    if core_props != expected_props:
+        errors.append(
+            f"Core whitelist properties {core_props} != staging {expected_props}"
+        )
+
+    # No property outside the whitelist and the collision annotations.
+    stray = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storage_properties "
+            f"WHERE name NOT IN ({whitelist_names}, {annotation_names})"
+        )
+    )
+    if stray:
+        errors.append(f"{stray} core properties outside whitelist/annotations")
+
+    # Whitelist links in core must equal the whitelist links carried by good
+    # storage staging rows (bad rows are never loaded).
+    expected_links = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.storage_units_properties up "
+            f"JOIN {STAGING_SCHEMA}.storage_properties p ON p.param_id = up.param_id "
+            f"JOIN {STAGING_SCHEMA}.storage u ON u.unit_id = up.unit_id "
+            f"WHERE p.name <> '{BAD_QUALITY_PROPERTY}' AND NOT u.bad_quality"
+        )
+    )
+    core_links = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storage_units_properties up "
+            f"JOIN {CORE_SCHEMA}.storage_properties p ON p.prop_id = up.prop_id "
+            f"WHERE p.name IN ({whitelist_names})"
+        )
+    )
+    if core_links != expected_links:
+        errors.append(
+            f"Core whitelist links {core_links} != good staging {expected_links}"
+        )
+
+    # No link may reference a missing core unit_id.
+    orphans = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storage_units_properties up "
+            f"LEFT JOIN {CORE_SCHEMA}.storages g ON g.unit_id = up.unit_id "
+            f"WHERE g.unit_id IS NULL"
+        )
+    )
+    if orphans:
+        errors.append(f"{orphans} orphaned property links (missing unit_id)")
+
+    if not errors:
+        log.info(
+            "Core storages verified (%d rows, %d whitelist properties, "
+            "%d whitelist links, storage capacity %.1f kWh)",
+            stored, core_props, core_links, float(core_cap or 0),
+        )
+    return errors

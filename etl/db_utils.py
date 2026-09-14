@@ -116,6 +116,86 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
         )
 
 
+def _create_core_storages(engine: Engine) -> None:
+    """Drop and recreate core.storages with the v2.3 storage shape.
+
+    Mirrors `_create_core_generators` for the storage kind: serial `unit_id`
+    PK, the storage shape (`storage_type`, `storage_capacity`), a data-
+    integrity unique index on `(energy_source, reference_id)` where present,
+    a GIST index on the geometry for the close-location collision self-join,
+    and the per-kind dimension tables `storage_properties` /
+    `storage_units_properties` FK'd to core.storages (ADR 0006).
+    """
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.storage_units_properties CASCADE"))
+        conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.storage_properties CASCADE"))
+        conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.storages CASCADE"))
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE {CORE_SCHEMA}.storages (
+                    unit_id              SERIAL PRIMARY KEY,
+                    energy_source        TEXT NOT NULL,
+                    storage_type         TEXT,
+                    storage_capacity     DOUBLE PRECISION,
+                    installed_capacity   DOUBLE PRECISION,
+                    commissioning_date   DATE,
+                    decommissioning_date DATE,
+                    geometry             geometry(Point, 4326),
+                    longitude            DOUBLE PRECISION,
+                    latitude             DOUBLE PRECISION,
+                    geo_accuracy         BIGINT,
+                    reference_id         TEXT,
+                    reference_date       TIMESTAMP,
+                    secondary_attributes TEXT,
+                    country_iso          TEXT,
+                    region               TEXT,
+                    district             TEXT,
+                    municipality         TEXT,
+                    collision            BOOLEAN NOT NULL DEFAULT false
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"CREATE UNIQUE INDEX idx_storages_energy_ref "
+                f"ON {CORE_SCHEMA}.storages (energy_source, reference_id) "
+                f"WHERE reference_id IS NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                f"CREATE INDEX idx_storages_geog "
+                f"ON {CORE_SCHEMA}.storages USING GIST ((geometry::geography))"
+            )
+        )
+
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE {CORE_SCHEMA}.storage_properties (
+                    prop_id BIGSERIAL PRIMARY KEY,
+                    name    TEXT NOT NULL,
+                    value   TEXT NOT NULL,
+                    UNIQUE (name, value)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                CREATE TABLE {CORE_SCHEMA}.storage_units_properties (
+                    unit_id  INT NOT NULL REFERENCES {CORE_SCHEMA}.storages(unit_id),
+                    prop_id BIGINT NOT NULL REFERENCES {CORE_SCHEMA}.storage_properties(prop_id),
+                    PRIMARY KEY (unit_id, prop_id)
+                )
+                """
+            )
+        )
+
+
 def _create_core_generators(engine: Engine) -> None:
     """Drop and recreate core.generators with the v2.3 shape.
 

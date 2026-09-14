@@ -111,6 +111,7 @@ CORE_GENERATORS_COLUMNS = (
 COLLISION_PROPERTY = "collision"
 CLOSE_TO_PROPERTY = "close_to"
 CLOSE_LOCATION_REASON = "close location"
+STORAGE_CAPACITY_COLLISION_REASON = "storage_capacity <= 0 or null"
 
 SYNTHETIC_ID_PREFIX = "syn_"
 

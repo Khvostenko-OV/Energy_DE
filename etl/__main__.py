@@ -5,7 +5,7 @@ import click
 
 from etl.config import SOURCE_NAMES
 from etl.extract import extract_boundaries, extract_source
-from etl.load import load_generators
+from etl.load import load_generators, load_storages
 from etl.transform import transform_source
 from etl.utils import _read_manifest
 
@@ -97,18 +97,23 @@ def transform(source: str):
 
 @cli.command()
 def load():
-    """Load consolidated generators into core.generators.
+    """Load consolidated generators and storages into core.
 
-    Reads the good staging rows from all five generator sources and upserts
-    them into core.generators with a serial surrogate key, collision checks,
-    and property-link annotation.  The load is incremental and idempotent.
+    Reads the good staging rows from all six sources and upserts generators
+    into core.generators and storages into core.storages, each with a serial
+    surrogate key, collision checks, and property-link annotation.  The load
+    is incremental and idempotent.
     """
-    report = load_generators()
+    reports = [
+        load_generators(),
+        load_storages(),
+    ]
 
-    click.echo(f"\nLoad report (generators):")
-    click.echo(report.summary())
+    for report in reports:
+        click.echo(f"\nLoad report ({report.target}):")
+        click.echo(report.summary())
 
-    if not report.passed:
+    if any(not report.passed for report in reports):
         raise SystemExit(1)
 
 
@@ -127,7 +132,7 @@ def run_all():
     for source in SOURCE_NAMES:
         ctx.invoke(transform, source=source)
 
-    click.echo("\nRunning load stage for generators...")
+    click.echo("\nRunning load stage for generators and storages...")
     ctx.invoke(load)
 
     click.echo("\nAll stages complete.")
