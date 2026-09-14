@@ -7,6 +7,7 @@ from sqlalchemy.engine import Engine
 
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
+    CLOSE_TO_PROPERTY,
     COLLISION_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
@@ -373,9 +374,78 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
             f"units with a collision link"
         )
 
+    whitelist_names = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
+    annotation_names = f"'{COLLISION_PROPERTY}', '{CLOSE_TO_PROPERTY}'"
+
+    # Every whitelist (name, value) used by a good staging row must exist in
+    # core.properties (deduplicated across sources; bad_quality pairs are
+    # staging-only and bad rows are not loaded at all).
+    staging_prop_unions = " UNION ".join(
+        f"SELECT p.name, p.value FROM {STAGING_SCHEMA}.{s}_properties p "
+        f"JOIN {STAGING_SCHEMA}.{s}_units_properties up ON up.param_id = p.param_id "
+        f"JOIN {STAGING_SCHEMA}.{s} u ON u.unit_id = up.unit_id "
+        f"WHERE p.name <> '{BAD_QUALITY_PROPERTY}' AND NOT u.bad_quality"
+        for s in STAGING_GENERATOR_SOURCES
+    )
+    expected_props = int(scalar(f"SELECT COUNT(*) FROM ({staging_prop_unions}) d"))
+    core_props = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"WHERE name IN ({whitelist_names})"
+        )
+    )
+    if core_props != expected_props:
+        errors.append(
+            f"Core whitelist properties {core_props} != staging {expected_props}"
+        )
+
+    # No property outside the whitelist and the collision annotations.
+    stray = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"WHERE name NOT IN ({whitelist_names}, {annotation_names})"
+        )
+    )
+    if stray:
+        errors.append(f"{stray} core properties outside whitelist/annotations")
+
+    # Whitelist links in core must equal the staging whitelist links carried by
+    # good rows (bad rows are never loaded; bad_quality pairs are staging-only).
+    staging_link_sums = " + ".join(
+        f"(SELECT COUNT(*) FROM {STAGING_SCHEMA}.{s}_units_properties up "
+        f"JOIN {STAGING_SCHEMA}.{s}_properties p ON p.param_id = up.param_id "
+        f"JOIN {STAGING_SCHEMA}.{s} u ON u.unit_id = up.unit_id "
+        f"WHERE p.name <> '{BAD_QUALITY_PROPERTY}' AND NOT u.bad_quality)"
+        for s in STAGING_GENERATOR_SOURCES
+    )
+    expected_links = int(scalar(f"SELECT {staging_link_sums}"))
+    core_links = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.units_properties up "
+            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = up.prop_id "
+            f"WHERE p.name IN ({whitelist_names})"
+        )
+    )
+    if core_links != expected_links:
+        errors.append(
+            f"Core whitelist links {core_links} != good staging {expected_links}"
+        )
+
+    # No link may reference a missing core unit_id.
+    orphans = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.units_properties up "
+            f"LEFT JOIN {CORE_SCHEMA}.generators g ON g.unit_id = up.unit_id "
+            f"WHERE g.unit_id IS NULL"
+        )
+    )
+    if orphans:
+        errors.append(f"{orphans} orphaned property links (missing unit_id)")
+
     if not errors:
         log.info(
-            "Core generators verified (%d rows, capacity %.1f kW)",
-            stored, float(core_cap or 0),
+            "Core generators verified (%d rows, %d whitelist properties, "
+            "%d whitelist links, capacity %.1f kW)",
+            stored, core_props, core_links, float(core_cap or 0),
         )
     return errors

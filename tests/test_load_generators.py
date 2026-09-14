@@ -11,7 +11,13 @@ import os
 import pytest
 from sqlalchemy import create_engine, text
 
-from etl.db_schema import CORE_SCHEMA, STAGING_SCHEMA, STAGING_GENERATOR_SOURCES
+from etl.db_schema import (
+    BAD_QUALITY_PROPERTY,
+    CORE_SCHEMA,
+    DECOMPOSED_PROPERTIES,
+    STAGING_SCHEMA,
+    STAGING_GENERATOR_SOURCES,
+)
 from etl.load import load_generators
 from etl.transform import transform_source
 
@@ -413,3 +419,156 @@ class TestVerification:
             f"SELECT SUM(installed_capacity) FROM {CORE_SCHEMA}.generators"
         )
         assert abs(core_cap - staging_cap) < 0.01
+
+
+# ------------------------------------------------------------------ #
+#  Normalized property transfer (issue #8)                            #
+# ------------------------------------------------------------------ #
+
+
+class TestPropertyTransfer:
+    def _whitelist_sql(self) -> str:
+        return ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
+
+    def test_core_properties_cover_good_staging(self, _loaded_core):
+        """Every whitelist (name, value) on a good staging row is in core."""
+        staged = set()
+        with ENGINE.connect() as conn:
+            for s in GENERATOR_SOURCES:
+                rows = conn.execute(
+                    text(
+                        f"SELECT DISTINCT p.name, p.value "
+                        f"FROM {STAGING_SCHEMA}.{s}_units_properties up "
+                        f"JOIN {STAGING_SCHEMA}.{s}_properties p ON p.param_id = up.param_id "
+                        f"JOIN {STAGING_SCHEMA}.{s} u ON u.unit_id = up.unit_id "
+                        f"WHERE NOT u.bad_quality"
+                    )
+                ).fetchall()
+                staged.update((n, v) for n, v in rows)
+        staged = {(n, v) for n, v in staged if n != BAD_QUALITY_PROPERTY}
+
+        with ENGINE.connect() as conn:
+            core_rows = set(
+                conn.execute(
+                    text(
+                        f"SELECT name, value FROM {CORE_SCHEMA}.properties "
+                        f"WHERE name IN ({self._whitelist_sql()})"
+                    )
+                ).fetchall()
+            )
+        assert staged - core_rows == set()
+
+    def test_core_links_match_good_staging_links(self, _loaded_core):
+        """Whitelist links in core equal the whitelist links of good staging rows."""
+        with ENGINE.connect() as conn:
+            staged_links = 0
+            for s in GENERATOR_SOURCES:
+                n = conn.execute(
+                    text(
+                        f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{s}_units_properties up "
+                        f"JOIN {STAGING_SCHEMA}.{s}_properties p ON p.param_id = up.param_id "
+                        f"JOIN {STAGING_SCHEMA}.{s} u ON u.unit_id = up.unit_id "
+                        f"WHERE NOT u.bad_quality AND p.name IN ({self._whitelist_sql()})"
+                    )
+                ).scalar()
+                staged_links += int(n)
+            core_links = conn.execute(
+                text(
+                    f"SELECT COUNT(*) FROM {CORE_SCHEMA}.units_properties up "
+                    f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = up.prop_id "
+                    f"WHERE p.name IN ({self._whitelist_sql()})"
+                )
+            ).scalar()
+        assert int(core_links) == staged_links
+
+    def test_bad_quality_absent_from_core(self, _loaded_core):
+        n = _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"WHERE name = '{BAD_QUALITY_PROPERTY}' "
+            f"LIMIT 1"
+        )
+        assert n == 0
+
+    def test_no_orphaned_links(self, _loaded_core):
+        orphans = _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.units_properties up "
+            f"LEFT JOIN {CORE_SCHEMA}.generators g ON g.unit_id = up.unit_id "
+            f"WHERE g.unit_id IS NULL"
+        )
+        assert orphans == 0
+
+    def test_updated_unit_links_refresh(self):
+        """An in-place update rewrites the unit's whitelist links (ADR 0001)."""
+        load_generators()
+        # Pick a core unit with a reference_id and a refreshed staging row
+        with ENGINE.connect() as conn:
+            row = conn.execute(
+                text(
+                    f"SELECT g.unit_id, g.energy_source, g.reference_id "
+                    f"FROM {CORE_SCHEMA}.generators g "
+                    f"JOIN {CORE_SCHEMA}.units_properties up ON up.unit_id = g.unit_id "
+                    f"WHERE g.reference_id IS NOT NULL "
+                    f"LIMIT 1"
+                )
+            ).fetchone()
+        assert row is not None
+        core_unit_id, energy_source, reference_id = row
+
+        import datetime
+
+        new_ref_date = datetime.datetime(2999, 1, 1, 0, 0, 0)
+        with ENGINE.begin() as conn:
+            conn.execute(
+                text(
+                    f"UPDATE {STAGING_SCHEMA}.{energy_source} "
+                    f"SET reference_date = :d WHERE reference_id = :r"
+                ),
+                {"d": new_ref_date, "r": reference_id},
+            )
+        load_generators()
+
+        # The unit must now carry every whitelist link its staging row has.
+        staged_pairs = set()
+        core_pairs = set()
+        whitelist = self._whitelist_sql()
+        with ENGINE.connect() as conn:
+            staged = conn.execute(
+                text(
+                    f"SELECT p.name, p.value "
+                    f"FROM {STAGING_SCHEMA}.{energy_source}_units_properties up "
+                    f"JOIN {STAGING_SCHEMA}.{energy_source}_properties p ON p.param_id = up.param_id "
+                    f"JOIN {STAGING_SCHEMA}.{energy_source} u ON u.unit_id = up.unit_id "
+                    f"WHERE u.reference_id = :r AND p.name IN ({whitelist})"
+                ),
+                {"r": reference_id},
+            ).fetchall()
+            staged_pairs = {(n, v) for n, v in staged}
+            core = conn.execute(
+                text(
+                    f"SELECT p.name, p.value "
+                    f"FROM {CORE_SCHEMA}.units_properties up "
+                    f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = up.prop_id "
+                    f"WHERE up.unit_id = :uid AND p.name IN ({whitelist})"
+                ),
+                {"uid": core_unit_id},
+            ).fetchall()
+            core_pairs = {(n, v) for n, v in core}
+            old_date = conn.execute(
+                text(
+                    f"SELECT reference_date FROM {STAGING_SCHEMA}.{energy_source} "
+                    f"WHERE reference_id = :r"
+                ),
+                {"r": reference_id},
+            ).scalar()
+        assert staged_pairs == core_pairs
+
+        # Restore staging and re-load to reset core state.
+        with ENGINE.begin() as conn:
+            conn.execute(
+                text(
+                    f"UPDATE {STAGING_SCHEMA}.{energy_source} "
+                    f"SET reference_date = :d WHERE reference_id = :r"
+                ),
+                {"d": old_date, "r": reference_id},
+            )
+        load_generators()

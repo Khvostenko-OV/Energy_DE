@@ -12,10 +12,12 @@ from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
 from etl.db_schema import (
+    BAD_QUALITY_PROPERTY,
     CLOSE_TO_PROPERTY,
     COLLISION_CLOSE_DISTANCE_M,
     COLLISION_PROPERTY,
     CORE_SCHEMA,
+    DECOMPOSED_PROPERTIES,
     SEA_REGIONS,
     STAGING_GENERATOR_SOURCES,
     STAGING_SCHEMA,
@@ -93,35 +95,55 @@ def load_generators() -> LoadReport:
 
         has_changes = not insert_df.empty or not update_df.empty
 
-        log.info("Running collision checks...")
-        t = time.perf_counter()
+        affected: list[int] | None
+        if first_load:
+            affected = None
+        elif not has_changes:
+            affected = []
+        else:
+            inserted = (
+                _inserted_unit_ids(engine, max_existing_id)
+                if not insert_df.empty
+                else []
+            )
+            updated = [
+                int(row["_core_unit_id"])
+                for _, row in update_df.iterrows()
+            ]
+            affected = inserted + updated
+
         if has_changes:
-            if first_load:
-                _reset_collision_annotation(engine)
-                collision_df = _detect_collisions(engine)
-            else:
-                inserted = (
-                    _inserted_unit_ids(engine, max_existing_id)
-                    if not insert_df.empty
-                    else []
-                )
-                updated = [
-                    int(row["_core_unit_id"])
-                    for _, row in update_df.iterrows()
-                ]
-                affected = inserted + updated
-                log.info("Affected rows for collision: %d", len(affected))
-                _reset_collision_annotation(engine, affected_ids=affected)
-                collision_df = _detect_collisions(engine, affected_ids=affected)
+            log.info("Running collision checks...")
+            t = time.perf_counter()
+            _reset_collision_annotation(engine, affected_ids=affected)
+            collision_df = _detect_collisions(engine, affected_ids=affected)
+            report.collisions = len(collision_df)
+            report.collision_links = _write_collision_links(engine, collision_df)
+            log.info(
+                "%d collision rows, %d links, time %.3fs",
+                report.collisions,
+                report.collision_links,
+                time.perf_counter() - t,
+            )
         else:
             log.info("No changes — skipping collision detection")
             collision_df = pandas.DataFrame(columns=["unit_id", "reasons"])
-        report.collisions = len(collision_df)
-        report.collision_links = _write_collision_links(engine, collision_df)
+            report.collisions = 0
+            report.collision_links = 0
+
+        log.info("Transferring normalized properties...")
+        t = time.perf_counter()
+        if first_load or affected:
+            staging_to_core = _staging_to_core_unit_map(engine)
+            report.properties_count, report.links_count = _transfer_properties(
+                engine, staging_to_core, affected_ids=affected
+            )
+        else:
+            log.info("No changes — skipping property transfer")
         log.info(
-            "%d collision rows, %d links, time %.3fs",
-            report.collisions,
-            report.collision_links,
+            "%d properties, %d links, time %.3fs",
+            report.properties_count,
+            report.links_count,
             time.perf_counter() - t,
         )
 
@@ -723,3 +745,119 @@ def _reset_collision_annotation(
             ),
             {"close_to": CLOSE_TO_PROPERTY, "values": close_to_values},
         )
+
+
+# ------------------------------------------------------------------ #
+#  Normalized property transfer (issue #8)                            #
+# ------------------------------------------------------------------ #
+
+
+def _staging_to_core_unit_map(engine: Engine) -> dict[str, int]:
+    """Map each staging unit_id to its core unit_id.
+
+    Staging unit_ids are '<source>_<reference_id>' for referenced rows and
+    'syn_<hash>' for synthetic rows.  The core identity lookup keys on the
+    bare reference_id and the synthetic hash, so the map is built by
+    re-deriving the identity from each staging row.  bad_quality rows (never
+    loaded into core) are skipped by the lookup miss.
+    """
+    core_lookup, _ = _build_core_lookup(engine)
+    mapping: dict[str, int] = {}
+    with engine.connect() as conn:
+        for source in STAGING_GENERATOR_SOURCES:
+            rows = conn.execute(
+                text(
+                    f"SELECT unit_id, reference_id, energy_source, "
+                    f"x_coordinates, y_coordinates, installed_capacity, "
+                    f"commissioning_date FROM {STAGING_SCHEMA}.{source}"
+                )
+            ).fetchall()
+            for unit_id, reference_id, source_name, x, y, cap, comm in rows:
+                if reference_id is not None:
+                    identity = str(reference_id)
+                else:
+                    identity = _synthetic_hash(source_name, x, y, cap, comm)
+                core_uid = core_lookup.get(identity)
+                if core_uid is not None:
+                    mapping[str(unit_id)] = core_uid
+    return mapping
+
+
+def _transfer_properties(
+    engine: Engine,
+    staging_to_core: dict[str, int],
+    affected_ids: list[int] | None = None,
+) -> tuple[int, int]:
+    """Move the staging whitelist decomposition into core for affected units.
+
+    Collects every (name, value) pair a staging row links (bad_quality pairs
+    skipped — they stay staging-only, ADR 0005), maps the staging unit_id onto
+    its core serial unit_id, and reconciles core.properties / core.units_properties
+    for the affected units:
+
+    * *affected_ids* ``None`` (first load) rewrites every mapped unit.
+    * a list rewrites just those units — deleting their old whitelist links
+      first so an in-place update reflects the new record (ADR 0001), while
+      collision/close_to links and skipped units are left untouched.
+
+    Returns (properties, links) counts written in this transfer.
+    """
+    if affected_ids is not None and not affected_ids:
+        return 0, 0
+
+    affected = set(affected_ids) if affected_ids is not None else None
+
+    wanted_units: dict[int, list[tuple[str, str]]] = defaultdict(list)
+    with engine.connect() as conn:
+        for source in STAGING_GENERATOR_SOURCES:
+            rows = conn.execute(
+                text(
+                    f"SELECT up.unit_id, p.name, p.value "
+                    f"FROM {STAGING_SCHEMA}.{source}_units_properties up "
+                    f"JOIN {STAGING_SCHEMA}.{source}_properties p "
+                    f"ON p.param_id = up.param_id "
+                    f"WHERE p.name <> '{BAD_QUALITY_PROPERTY}'"
+                )
+            ).fetchall()
+            for staging_unit_id, name, value in rows:
+                core_uid = staging_to_core.get(staging_unit_id)
+                if core_uid is None:
+                    continue
+                if affected is not None and core_uid not in affected:
+                    continue
+                wanted_units[core_uid].append((name, value))
+
+    if not wanted_units:
+        return 0, 0
+
+    prop_keys = {key for keys in wanted_units.values() for key in keys}
+
+    with engine.begin() as conn:
+        if affected_ids is not None:
+            whitelist = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
+            conn.execute(
+                text(
+                    f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                    f"USING {CORE_SCHEMA}.properties p "
+                    f"WHERE up.prop_id = p.prop_id "
+                    f"AND up.unit_id = ANY(:ids) "
+                    f"AND p.name IN ({whitelist})"
+                ),
+                {"ids": affected_ids},
+            )
+
+        prop_map = _ensure_properties(conn, prop_keys)
+        pairs = [
+            (core_uid, prop_map[key])
+            for core_uid, keys in wanted_units.items()
+            for key in keys
+        ]
+        execute_values(
+            conn.connection.cursor(),
+            f"INSERT INTO {CORE_SCHEMA}.units_properties "
+            f"(unit_id, prop_id) VALUES %s ON CONFLICT DO NOTHING",
+            pairs,
+            page_size=2000,
+        )
+
+    return len(prop_keys), len(pairs)
