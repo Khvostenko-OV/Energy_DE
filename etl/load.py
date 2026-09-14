@@ -77,6 +77,7 @@ def load_generators() -> LoadReport:
 
         log.info("Partitioning staging into insert/update/skip...")
         t = time.perf_counter()
+        max_existing_id = _max_unit_id(engine)
         insert_df, update_df, skip_df = _partition_staging(engine, staging_df, core_lookup)
         _apply_upsert(engine, insert_df, update_df)
         report.rows_inserted = len(insert_df)
@@ -90,9 +91,31 @@ def load_generators() -> LoadReport:
             time.perf_counter() - t,
         )
 
+        has_changes = not insert_df.empty or not update_df.empty
+
         log.info("Running collision checks...")
         t = time.perf_counter()
-        collision_df = _detect_collisions(engine)
+        if has_changes:
+            if first_load:
+                _reset_collision_annotation(engine)
+                collision_df = _detect_collisions(engine)
+            else:
+                inserted = (
+                    _inserted_unit_ids(engine, max_existing_id)
+                    if not insert_df.empty
+                    else []
+                )
+                updated = [
+                    int(row["_core_unit_id"])
+                    for _, row in update_df.iterrows()
+                ]
+                affected = inserted + updated
+                log.info("Affected rows for collision: %d", len(affected))
+                _reset_collision_annotation(engine, affected_ids=affected)
+                collision_df = _detect_collisions(engine, affected_ids=affected)
+        else:
+            log.info("No changes — skipping collision detection")
+            collision_df = pandas.DataFrame(columns=["unit_id", "reasons"])
         report.collisions = len(collision_df)
         report.collision_links = _write_collision_links(engine, collision_df)
         log.info(
@@ -325,6 +348,29 @@ def _apply_upsert(
             _update_core_row(conn, row)
 
 
+def _max_unit_id(engine: Engine) -> int:
+    """Return the current max unit_id in core.generators (0 if empty)."""
+    with engine.connect() as conn:
+        return int(
+            conn.execute(
+                text(f"SELECT COALESCE(MAX(unit_id), 0) FROM {CORE_SCHEMA}.generators")
+            ).scalar()
+        )
+
+
+def _inserted_unit_ids(engine: Engine, after: int) -> list[int]:
+    """Return unit_ids inserted since *after* (exclusive)."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT unit_id FROM {CORE_SCHEMA}.generators "
+                f"WHERE unit_id > :after"
+            ),
+            {"after": after},
+        ).fetchall()
+    return [r[0] for r in rows]
+
+
 def _sql_value(v):
     """Convert numpy/pandas missing values to SQL NULL."""
     if v is None:
@@ -384,19 +430,21 @@ def _update_core_row(conn, row: pandas.Series) -> None:
 # ------------------------------------------------------------------ #
 
 
-def _detect_collisions(engine: Engine) -> pandas.DataFrame:
-    """Detect all collision conditions and return a DataFrame of unit_ids with collision reasons.
+def _detect_collisions(
+    engine: Engine, affected_ids: list[int] | None = None
+) -> pandas.DataFrame:
+    """Detect collision conditions and return a DataFrame of unit_ids with reasons.
 
-    Conditions:
-    1. Close-location pairs: geo_accuracy=1, distance < 10m apart
-    2. Region null: unit has no region after the spatial join
-    3. Onshore-in-sea: bio/gas/hydro/solar in a sea/EEZ region
+    When *affected_ids* is ``None`` (first load) every core row is checked.
+    When it is provided only rows in that list, plus any pairs they form with
+    other core rows, are examined — the remaining rows are assumed to be
+    unchanged from a previous run.
     """
-    collision_units: dict[int, list[str]] = {}  # unit_id → list of reasons
+    collision_units: dict[int, list[str]] = {}
 
-    _detect_close_location(engine, collision_units)
-    _detect_region_null(engine, collision_units)
-    _detect_onshore_in_sea(engine, collision_units)
+    _detect_close_location(engine, collision_units, affected_ids)
+    _detect_region_null(engine, collision_units, affected_ids)
+    _detect_onshore_in_sea(engine, collision_units, affected_ids)
 
     if not collision_units:
         return pandas.DataFrame(columns=["unit_id", "reasons"])
@@ -408,9 +456,24 @@ def _detect_collisions(engine: Engine) -> pandas.DataFrame:
 
 
 def _detect_close_location(
-    engine: Engine, collision_units: dict[int, list[str]]
+    engine: Engine,
+    collision_units: dict[int, list[str]],
+    affected_ids: list[int] | None = None,
 ) -> None:
-    """Find pairs of geo_accuracy=1 units within 10m of each other."""
+    """Find pairs of geo_accuracy=1 units within 10m of each other.
+
+    When *affected_ids* is given the join is restricted to rows where at
+    least one side is affected — pairs between two unchanged rows are
+    already known from the previous run.
+    """
+    affected_filter = ""
+    params: dict[str, object] = {}
+    if affected_ids is not None:
+        affected_filter = (
+            "AND (a.unit_id = ANY(:affected) OR b.unit_id = ANY(:affected))"
+        )
+        params["affected"] = affected_ids
+
     with engine.connect() as conn:
         pairs = conn.execute(
             text(
@@ -421,8 +484,10 @@ def _detect_close_location(
                 f"{COLLISION_CLOSE_DISTANCE_M}) "
                 f"WHERE a.unit_id < b.unit_id "
                 f"AND a.geo_accuracy = 1 AND b.geo_accuracy = 1 "
-                f"AND a.geometry IS NOT NULL AND b.geometry IS NOT NULL"
-            )
+                f"AND a.geometry IS NOT NULL AND b.geometry IS NOT NULL "
+                f"{affected_filter}"
+            ),
+            params,
         ).fetchall()
 
     for uid_a, uid_b in pairs:
@@ -434,23 +499,48 @@ def _detect_close_location(
         )
 
 
-def _detect_region_null(engine: Engine, collision_units: dict[int, list[str]]) -> None:
+def _detect_region_null(
+    engine: Engine,
+    collision_units: dict[int, list[str]],
+    affected_ids: list[int] | None = None,
+) -> None:
     """Flag units whose region is NULL (outside every boundary)."""
+    if affected_ids is not None and not affected_ids:
+        return
+
+    region_filter = ""
+    params: dict[str, object] = {}
+    if affected_ids is not None:
+        region_filter = "AND unit_id = ANY(:affected)"
+        params["affected"] = affected_ids
+
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 f"SELECT unit_id FROM {CORE_SCHEMA}.generators "
-                f"WHERE region IS NULL"
-            )
+                f"WHERE region IS NULL {region_filter}"
+            ),
+            params,
         ).fetchall()
     for (uid,) in rows:
         collision_units.setdefault(uid, []).append("region is null")
 
 
 def _detect_onshore_in_sea(
-    engine: Engine, collision_units: dict[int, list[str]]
+    engine: Engine,
+    collision_units: dict[int, list[str]],
+    affected_ids: list[int] | None = None,
 ) -> None:
     """Flag onshore-only sources (bio/gas/hydro/solar) in sea/EEZ regions."""
+    if affected_ids is not None and not affected_ids:
+        return
+
+    sea_filter = ""
+    params: dict[str, object] = {}
+    if affected_ids is not None:
+        sea_filter = "AND unit_id = ANY(:affected)"
+        params["affected"] = affected_ids
+
     sources = ", ".join(f"'{s}'" for s in ONSHORE_SOURCES)
     regions = ", ".join(f"'{r}'" for r in SEA_REGIONS)
     with engine.connect() as conn:
@@ -458,8 +548,10 @@ def _detect_onshore_in_sea(
             text(
                 f"SELECT unit_id FROM {CORE_SCHEMA}.generators "
                 f"WHERE energy_source IN ({sources}) "
-                f"AND region IN ({regions})"
-            )
+                f"AND region IN ({regions}) "
+                f"{sea_filter}"
+            ),
+            params,
         ).fetchall()
     for (uid,) in rows:
         collision_units.setdefault(uid, []).append("onshore unit in the sea")
@@ -475,15 +567,13 @@ def _write_collision_links(
 ) -> int:
     """Write collision and close_to property links for all flagged units.
 
-    Resets the generator collision annotation first (flags to false, existing
-    generator collision/close_to links cleared), then writes a 'collision'
-    link carrying the joined reasons and one 'close_to' link per neighbouring
-    unit involved in a close-location pair for every unit with a detection.
-    A unit with no detection keeps collision=false and no annotation links.
-    Returns the total number of property links written.
+    Called by the loader *after* the collision annotation was reset, so it
+    only writes links for the units in *collision_df*: a 'collision' link
+    carrying the joined reasons and one 'close_to' link per neighbouring
+    unit involved in a close-location pair.  A unit with no detection keeps
+    collision=false and no annotation links.  Returns the total number of
+    property links written.
     """
-    _reset_collision_annotation(engine)
-
     if collision_df.empty:
         return 0
 
@@ -563,25 +653,73 @@ def _ensure_properties(
     return prop_map
 
 
-def _reset_collision_annotation(engine: Engine) -> None:
+def _reset_collision_annotation(
+    engine: Engine, affected_ids: list[int] | None = None
+) -> None:
     """Clear collision flags and generator collision/close_to links.
 
-    Deleting annotation links first avoids orphaning generator rows.  The
-    underlying properties rows are kept — they may be re-used by other units
-    or by the storage load in a later ticket.
+    When *affected_ids* is ``None`` (first load) every flag and link is
+    wiped.  When it is provided only annotations for affected rows and
+    close_to links from neighbours pointing *to* affected rows are removed —
+    the rest are still valid from the previous run.
     """
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                f"UPDATE {CORE_SCHEMA}.generators SET collision = false"
+    if affected_ids is None:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"UPDATE {CORE_SCHEMA}.generators SET collision = false"
+                )
             )
-        )
+            conn.execute(
+                text(
+                    f"DELETE FROM {CORE_SCHEMA}.units_properties gp "
+                    f"USING {CORE_SCHEMA}.properties p "
+                    f"WHERE gp.prop_id = p.prop_id "
+                    f"AND p.name IN (:collision, :close_to)"
+                ),
+                {
+                    "collision": COLLISION_PROPERTY,
+                    "close_to": CLOSE_TO_PROPERTY,
+                },
+            )
+        return
+
+    if not affected_ids:
+        return
+
+    close_to_values = [f"close_to {uid}" for uid in affected_ids]
+    with engine.begin() as conn:
+        # Clear collision flags for affected rows.
         conn.execute(
             text(
-                f"DELETE FROM {CORE_SCHEMA}.units_properties gp "
+                f"UPDATE {CORE_SCHEMA}.generators SET collision = false "
+                f"WHERE unit_id = ANY(:ids)"
+            ),
+            {"ids": affected_ids},
+        )
+        # Delete affected rows' own collision/close_to links.
+        conn.execute(
+            text(
+                f"DELETE FROM {CORE_SCHEMA}.units_properties up "
                 f"USING {CORE_SCHEMA}.properties p "
-                f"WHERE gp.prop_id = p.prop_id "
+                f"WHERE up.prop_id = p.prop_id "
+                f"AND up.unit_id = ANY(:ids) "
                 f"AND p.name IN (:collision, :close_to)"
             ),
-            {"collision": COLLISION_PROPERTY, "close_to": CLOSE_TO_PROPERTY},
+            {
+                "ids": affected_ids,
+                "collision": COLLISION_PROPERTY,
+                "close_to": CLOSE_TO_PROPERTY,
+            },
+        )
+        # Delete close_to links from any row that point TO affected rows.
+        conn.execute(
+            text(
+                f"DELETE FROM {CORE_SCHEMA}.units_properties up "
+                f"USING {CORE_SCHEMA}.properties p "
+                f"WHERE up.prop_id = p.prop_id "
+                f"AND p.name = :close_to "
+                f"AND p.value = ANY(:values)"
+            ),
+            {"close_to": CLOSE_TO_PROPERTY, "values": close_to_values},
         )
