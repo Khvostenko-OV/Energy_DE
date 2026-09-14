@@ -113,8 +113,13 @@ def transform_source(source: str) -> TransformReport:
 
         log.info("Decomposing attributes...")
         t = time.perf_counter()
+        df["secondary_json"] = df["secondary_attributes"].apply(json.loads)
         props, links = _decompose_attributes(df, reasons)
-        df["secondary_attributes"] = df["secondary_attributes"].map(_drop_whitelisted)
+        df["secondary_attributes"] = df["secondary_json"].map( # dropping decomposed attributes out of secondary_attributes
+            lambda d: json.dumps(
+                {k: v for k, v in d.items() if k not in DECOMPOSED_PROPERTIES}
+            )
+        )
         report.properties_count = len(props)
         report.links_count = len(links)
         log.info(
@@ -255,21 +260,6 @@ def _reason_histogram(reasons: pandas.Series) -> dict[str, int]:
     return hist
 
 
-def _safe_attributes(json_str: object) -> dict[str, object]:
-    """Parse a secondary-attributes json document into a plain dict.
-
-    Nulls, empty documents, and unparseable leftovers all resolve to an empty
-    dict so downstream code never trips over a missing or malformed value.
-    """
-    if not json_str or str(json_str).strip() in ("", "{}"):
-        return {}
-    try:
-        parsed = json.loads(str(json_str))
-    except ValueError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 def _decompose_attributes(
     df: pandas.DataFrame, reasons: pandas.Series
 ) -> tuple[pandas.DataFrame, pandas.DataFrame]:
@@ -283,42 +273,28 @@ def _decompose_attributes(
     newline-joined failed-check descriptions.
     """
     unique: set[tuple[str, str]] = set()  # distinct (name, value) pairs across all units
-    per_unit: list[tuple[str, list[tuple[str, str]]]] = []  # (unit_id, its pairs) per row
-    for unit_id, attrs_json, failed in zip(
-        df["unit_id"], df["secondary_attributes"], reasons
+    rows: list[tuple[object, str, str]] = []  # flat (unit_id, name, value) triples
+    for unit_id, attributes, failed in zip(
+        df["unit_id"], df["secondary_json"], reasons
     ):
-        pairs: list[tuple[str, str]] = []  # this unit's (name, value) pairs + bad_quality link
-        for name, value in _safe_attributes(attrs_json).items():
-            if name in DECOMPOSED_PROPERTIES:
-                pairs.append((str(name), str(value)))
+        pairs = [
+            (str(name), str(value))
+            for name, value in attributes.items()
+            if name in DECOMPOSED_PROPERTIES
+        ]
         if failed:
             pairs.append((BAD_QUALITY_PROPERTY, "\n".join(failed)))
         unique.update(pairs)
-        per_unit.append((unit_id, pairs))
+        rows.extend((unit_id, name, value) for name, value in pairs)
 
-    ordered = sorted(unique)  # sorted pairs -> deterministic param_id assignment
-    param_id = {pair: i + 1 for i, pair in enumerate(ordered)}
+    ordered = sorted(unique)
+    param_id = {pair: i + 1 for i, pair in enumerate(ordered)} # sorted pairs -> deterministic param_id assignment
     props = pandas.DataFrame(
         [(i, name, value) for (name, value), i in param_id.items()],
         columns=["param_id", "name", "value"],
     )
     links = pandas.DataFrame(
-        [(unit_id, param_id[pair]) for unit_id, pairs in per_unit for pair in pairs],
+        [(unit_id, param_id[(name, value)]) for unit_id, name, value in rows],
         columns=["unit_id", "param_id"],
     )
     return props, links
-
-
-def _drop_whitelisted(json_str: object) -> str:
-    """Return the row's attribute json minus the decomposed keys.
-
-    Whitelisted attributes live in the normalized property tables, so they
-    must not be duplicated in the json written to the staging
-    `secondary_attributes` column (spec v2.2).
-    """
-    reduced = {
-        k: v
-        for k, v in _safe_attributes(json_str).items()
-        if k not in DECOMPOSED_PROPERTIES
-    }
-    return json.dumps(reduced)
