@@ -72,6 +72,10 @@ A Gemeinde (municipality).
 **Offshore**:
 A wind unit located at sea, enriched against the EEZ region layer rather than onshore boundaries.
 
+**Coordinates**:
+The WGS-84 longitude/latitude pair of a unit. Carried as `x_coordinates` / `y_coordinates` in raw and staging, and as `longitude` / `latitude` in core, where it rides alongside the retained `geometry` point.
+_Avoid_: Position, Lat/lng
+
 ### Data stages
 
 **Raw version**:
@@ -84,10 +88,10 @@ The `(filename, filesize, modified_at)` triplet recorded in `loaded_files`. A fi
 The extract layer: versioned per-source tables with secondary attributes folded into a `secondary_attributes` jsonb column, plus the `loaded_files` log and the level-coded `boundaries` table.
 
 **Staging**:
-The transform layer: raw rows enriched with region, district, and municipality via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`).
+The transform layer: raw rows enriched with region, district, and municipality via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`). Staging carries both the `geometry` point and explicit `x_coordinates` / `y_coordinates`.
 
 **Core**:
-The consolidated layer: `generators` and `storages`, each unit appearing exactly once, holding a serial surrogate key, the reduced `secondary_attributes` jsonb, and collision flags. Core rows are updated in place and never deleted.
+The consolidated layer: `generators` and `storages`, each unit appearing exactly once, holding a serial surrogate key, the reduced `secondary_attributes` jsonb, the retained `geometry` point plus `longitude` / `latitude`, and collision flags. Core rows are updated in place and never deleted.
 
 **Marts**:
 The aggregation layer: three Postgres materialized views (installation counts, generation capacity, storage capacity) at region grain, computed from active units only.
