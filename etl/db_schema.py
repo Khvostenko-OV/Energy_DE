@@ -9,6 +9,9 @@ STAGING_SCHEMA = "stage"
 CORE_SCHEMA = "core"
 SERVICE_SCHEMA = "serv"
 
+# Generator sources consolidated into core.generators (storage is separate).
+STAGING_GENERATOR_SOURCES = ("bio", "gas", "hydro", "solar", "wind")
+
 RAW_COLUMNS = (
     "energy_source",
     "installed_capacity",
@@ -84,3 +87,34 @@ BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
 BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
 BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
+
+CORE_GENERATORS_COLUMNS = (
+    "unit_id",
+    "energy_source",
+    "installed_capacity",
+    "commissioning_date",
+    "decommissioning_date",
+    "geometry",
+    "longitude",
+    "latitude",
+    "geo_accuracy",
+    "reference_id",
+    "reference_date",
+    "secondary_attributes",
+    "country_iso",
+    "region",
+    "district",
+    "municipality",
+    "collision",
+)
+
+COLLISION_PROPERTY = "collision"
+CLOSE_TO_PROPERTY = "close_to"
+
+SYNTHETIC_ID_PREFIX = "syn_"
+
+# Sea/EEZ areas at boundary level 1 — assigning any of these as a region to an
+# onshore-only source (bio/gas/hydro/solar) flags an onshore-in-sea collision.
+SEA_REGIONS = ("North Sea", "Baltic Sea", "Kattegat")
+
+COLLISION_CLOSE_DISTANCE_M = 10.0

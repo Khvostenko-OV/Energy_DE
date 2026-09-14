@@ -18,6 +18,7 @@ from etl.db_schema import (
     SERVICE_SCHEMA,
     STAGING_COLUMNS,
     STAGING_SCHEMA,
+    SYNTHETIC_ID_PREFIX,
 )
 from etl.db_utils import _create_staging_tables, _ensure_schema
 from etl.reports import TransformReport
@@ -27,8 +28,6 @@ from etl.verify import _verify_transform
 log = logging.getLogger(__name__)
 
 COORD_TOLERANCE_DEG = 1e-9
-
-SYNTHETIC_ID_PREFIX = "syn_"
 
 QUALITY_CAPACITY_NULL = "installed_capacity is null"
 QUALITY_CAPACITY_NONPOSITIVE = "installed_capacity <= 0"

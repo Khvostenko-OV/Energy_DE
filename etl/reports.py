@@ -98,3 +98,39 @@ class TransformReport(ReportBase):
         ]
         lines.extend(self._error_lines())
         return "\n".join(lines)
+
+
+@dataclass
+class LoadReport(ReportBase):
+    """Result of loading consolidated units into core."""
+
+    target: str = ""
+    rows_read: int = 0
+    rows_inserted: int = 0
+    rows_updated: int = 0
+    rows_skipped: int = 0
+    collisions: int = 0
+    collision_links: int = 0
+    links_count: int = 0
+    properties_count: int = 0
+    idempotent: bool = True
+    errors: list[str] = field(default_factory=list)
+    total_time: float = 0.0
+
+    def summary(self) -> str:
+        lines = [
+            f"  Core table       : {self.target or '-'}",
+            f"  Rows read        : {self.rows_read}",
+            f"  Rows inserted    : {self.rows_inserted}",
+            f"  Rows updated     : {self.rows_updated}",
+            f"  Rows skipped     : {self.rows_skipped}",
+            f"  Collisions       : {self.collisions}",
+            f"  Collision links  : {self.collision_links}",
+            f"  Properties       : {self.properties_count}",
+            f"  Links            : {self.links_count}",
+            f"  Idempotency      : {'PASS' if self.idempotent else 'FAIL'}",
+            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
+            f"  Total time       : {self.total_time:.3f}s",
+        ]
+        lines.extend(self._error_lines())
+        return "\n".join(lines)

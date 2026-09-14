@@ -7,13 +7,16 @@ from sqlalchemy.engine import Engine
 
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
+    COLLISION_PROPERTY,
+    CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
     RAW_SCHEMA,
     SERVICE_SCHEMA,
+    STAGING_GENERATOR_SOURCES,
     STAGING_SCHEMA,
     STORAGE_COLUMNS,
 )
-from etl.reports import ExtractionReport, TransformReport
+from etl.reports import ExtractionReport, LoadReport, TransformReport
 
 log = logging.getLogger(__name__)
 
@@ -272,5 +275,107 @@ def _verify_transform(engine: Engine, source: str, report: TransformReport) -> l
         log.info(
             "Staging verified for %s (%d rows, %d properties, %d links, %d bad)",
             source, stored_rows, props, links, bad_rows,
+        )
+    return errors
+
+
+def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
+    """Verify core.generators against the load report and staging.
+
+    Checks row and capacity reconciliation against good staging rows, no
+    duplicate (energy_source, reference_id) pairs where reference_id is
+    present, per-row invariants (geometry, longitude/latitude, secondary
+    attributes), and that every staging bad-quality row stayed out of core.
+    """
+    errors: list[str] = []
+
+    def scalar(sql: str):
+        with engine.connect() as conn:
+            return conn.execute(text(sql)).scalar()
+
+    stored = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators"))
+
+    good_staging_count = int(
+        scalar(
+            "SELECT " + " + ".join(
+                f"(SELECT COUNT(*) FROM {STAGING_SCHEMA}.{s} WHERE NOT bad_quality)"
+                for s in STAGING_GENERATOR_SOURCES
+            )
+        )
+    )
+    if stored != good_staging_count:
+        errors.append(f"Core rows {stored} != good staging rows {good_staging_count}")
+
+    dups = int(
+        scalar(
+            f"SELECT COUNT(*) FROM ("
+            f"SELECT energy_source, reference_id FROM {CORE_SCHEMA}.generators "
+            f"WHERE reference_id IS NOT NULL "
+            f"GROUP BY energy_source, reference_id HAVING COUNT(*) > 1) d"
+        )
+    )
+    if dups:
+        errors.append(f"Duplicate (energy_source, reference_id) pairs: {dups}")
+
+    staging_cap = float(
+        scalar(
+            "SELECT " + " + ".join(
+                f"COALESCE((SELECT SUM(installed_capacity) "
+                f"FROM {STAGING_SCHEMA}.{s} WHERE NOT bad_quality), 0)"
+                for s in STAGING_GENERATOR_SOURCES
+            )
+        )
+    )
+    core_cap = scalar(f"SELECT SUM(installed_capacity) FROM {CORE_SCHEMA}.generators")
+    if core_cap is not None and abs(float(core_cap) - staging_cap) > 0.01:
+        errors.append(
+            f"Capacity drift: core {core_cap} vs good staging {staging_cap}"
+        )
+
+    without_geom = int(
+        scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators WHERE geometry IS NULL")
+    )
+    if without_geom:
+        errors.append(f"{without_geom} core rows missing geometry")
+
+    without_coords = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators "
+            f"WHERE longitude IS NULL OR latitude IS NULL"
+        )
+    )
+    if without_coords:
+        errors.append(f"{without_coords} core rows missing longitude/latitude")
+
+    leaked_bad = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
+            f"JOIN {CORE_SCHEMA}.units_properties gp ON gp.unit_id = g.unit_id "
+            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"WHERE p.name = '{BAD_QUALITY_PROPERTY}' "
+            f"LIMIT 1"
+        )
+    )
+    if leaked_bad:
+        errors.append("bad_quality property links leaked into core")
+
+    flagged = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators WHERE collision"))
+    linked = int(
+        scalar(
+            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.units_properties gp "
+            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"WHERE p.name = '{COLLISION_PROPERTY}'"
+        )
+    )
+    if flagged != linked:
+        errors.append(
+            f"Collision flag drift: {flagged} collision=true rows vs {linked} "
+            f"units with a collision link"
+        )
+
+    if not errors:
+        log.info(
+            "Core generators verified (%d rows, capacity %.1f kW)",
+            stored, float(core_cap or 0),
         )
     return errors

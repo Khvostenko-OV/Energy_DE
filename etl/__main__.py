@@ -5,6 +5,7 @@ import click
 
 from etl.config import SOURCE_NAMES
 from etl.extract import extract_boundaries, extract_source
+from etl.load import load_generators
 from etl.transform import transform_source
 from etl.utils import _read_manifest
 
@@ -95,6 +96,23 @@ def transform(source: str):
 
 
 @cli.command()
+def load():
+    """Load consolidated generators into core.generators.
+
+    Reads the good staging rows from all five generator sources and upserts
+    them into core.generators with a serial surrogate key, collision checks,
+    and property-link annotation.  The load is incremental and idempotent.
+    """
+    report = load_generators()
+
+    click.echo(f"\nLoad report (generators):")
+    click.echo(report.summary())
+
+    if not report.passed:
+        raise SystemExit(1)
+
+
+@cli.command()
 def run_all():
     """Run all ETL stages."""
     ctx = click.get_current_context()
@@ -108,6 +126,9 @@ def run_all():
     click.echo("\nRunning transform stage for all sources...")
     for source in SOURCE_NAMES:
         ctx.invoke(transform, source=source)
+
+    click.echo("\nRunning load stage for generators...")
+    ctx.invoke(load)
 
     click.echo("\nAll stages complete.")
 
