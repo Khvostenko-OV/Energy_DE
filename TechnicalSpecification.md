@@ -230,6 +230,7 @@ add property 'close_to' with reference to close unit
 | installed_capacity   | float     | Kilowatt (kW)                                     |
 | commissioning_date   | date      | Commissioning date of the system                  |
 | decommissioning_date | date      | Decommissioning date of the system                |
+| geometry             | point     | WGS-84                                            |
 | longitude            | float     | Longitude WGS-84                                  |
 | latitude             | float     | Latitude WGS-84                                   |
 | geo_accuracy         | int       | 1/2                                               |
@@ -247,10 +248,11 @@ add property 'close_to' with reference to close unit
 |----------------------|-----------|----------------------------------------------------|
 | unit_id              | int       | pk                                                 |
 | storage_type         | str       | Type of energy storage system                      |
-| storage_capacity     | str       | Usable energy storage capacity Kilowatt-hour (kWh) |
+| storage_capacity     | float     | Usable energy storage capacity Kilowatt-hour (kWh) |
 | installed_capacity   | float     | Kilowatt (kW)                                      |
 | commissioning_date   | date      | Commissioning date of the system                   |
 | decommissioning_date | date      | Decommissioning date of the system                 |
+| geometry             | point     | WGS-84                                             |
 | longitude            | float     | Longitude WGS-84                                   |
 | latitude             | float     | Latitude WGS-84                                    |
 | geo_accuracy         | int       | 1/2                                                |
