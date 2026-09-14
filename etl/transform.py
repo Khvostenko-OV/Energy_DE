@@ -114,7 +114,7 @@ def transform_source(source: str) -> TransformReport:
         log.info("Decomposing attributes...")
         t = time.perf_counter()
         props, links = _decompose_attributes(df, reasons)
-        df["secondary_attributes"] = _reduce_secondary_attributes(df["secondary_attributes"])
+        df["secondary_attributes"] = df["secondary_attributes"].map(_drop_whitelisted)
         report.properties_count = len(props)
         report.links_count = len(links)
         log.info(
@@ -309,20 +309,16 @@ def _decompose_attributes(
     return props, links
 
 
-def _reduce_secondary_attributes(values: pandas.Series) -> pandas.Series:
-    """Strip the whitelisted keys from each row's attribute json.
+def _drop_whitelisted(json_str: object) -> str:
+    """Return the row's attribute json minus the decomposed keys.
 
-    Returns a json-serialized dict holding only the keys outside
-    DECOMPOSED_PROPERTIES; those attributes live in the normalized property
-    tables and must not be duplicated in the json (spec v2.2).
+    Whitelisted attributes live in the normalized property tables, so they
+    must not be duplicated in the json written to the staging
+    `secondary_attributes` column (spec v2.2).
     """
-
-    def drop_whitelisted(json_str: object) -> str:
-        reduced = {
-            k: v
-            for k, v in _safe_attributes(json_str).items()
-            if k not in DECOMPOSED_PROPERTIES
-        }
-        return json.dumps(reduced)
-
-    return values.map(drop_whitelisted)
+    reduced = {
+        k: v
+        for k, v in _safe_attributes(json_str).items()
+        if k not in DECOMPOSED_PROPERTIES
+    }
+    return json.dumps(reduced)
