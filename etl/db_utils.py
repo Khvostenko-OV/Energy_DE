@@ -119,17 +119,18 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
 def _create_core_generators(engine: Engine) -> None:
     """Drop and recreate core.generators with the v2.3 shape.
 
-    Also (re)creates the core dimension tables: `properties` holds the
-    normalized (name, value) pairs and `generator_properties` links them to
-    core.generator serial unit_ids.  The link table is per unit-kind — storages
-    get their own `storage_properties` FK'd to core.storages (ADR 0006) — so
-    `generator_properties.unit_id` carries a real FK instead of the FK-less
-    shared `units_properties` that could not tell a generator id from a
-    storage id.
+    Also (re)creates the per-kind dimension tables: `generator_properties`
+    holds the normalized (name, value) pairs and `generator_units_properties`
+    links them to core.generator serial unit_ids.  Both tables are per
+    unit-kind — storages get their own `storage_properties` /
+    `storage_units_properties` FK'd to core.storages when they land (ADR
+    0006) — so `generator_units_properties.unit_id` carries a real FK instead
+    of the FK-less shared `units_properties` that could not tell a generator
+    id from a storage id.
     """
     with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.generator_units_properties CASCADE"))
         conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.generator_properties CASCADE"))
-        conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.properties CASCADE"))
         conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.generators CASCADE"))
         conn.execute(
             text(
@@ -178,7 +179,7 @@ def _create_core_generators(engine: Engine) -> None:
         conn.execute(
             text(
                 f"""
-                CREATE TABLE {CORE_SCHEMA}.properties (
+                CREATE TABLE {CORE_SCHEMA}.generator_properties (
                     prop_id BIGSERIAL PRIMARY KEY,
                     name    TEXT NOT NULL,
                     value   TEXT NOT NULL,
@@ -190,9 +191,9 @@ def _create_core_generators(engine: Engine) -> None:
         conn.execute(
             text(
                 f"""
-                CREATE TABLE {CORE_SCHEMA}.generator_properties (
+                CREATE TABLE {CORE_SCHEMA}.generator_units_properties (
                     unit_id  INT NOT NULL REFERENCES {CORE_SCHEMA}.generators(unit_id),
-                    prop_id BIGINT NOT NULL REFERENCES {CORE_SCHEMA}.properties(prop_id),
+                    prop_id BIGINT NOT NULL REFERENCES {CORE_SCHEMA}.generator_properties(prop_id),
                     PRIMARY KEY (unit_id, prop_id)
                 )
                 """

@@ -350,8 +350,8 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     leaked_bad = int(
         scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
-            f"JOIN {CORE_SCHEMA}.generator_properties gp ON gp.unit_id = g.unit_id "
-            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"JOIN {CORE_SCHEMA}.generator_units_properties gp ON gp.unit_id = g.unit_id "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = gp.prop_id "
             f"WHERE p.name = '{BAD_QUALITY_PROPERTY}' "
             f"LIMIT 1"
         )
@@ -362,8 +362,8 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     flagged = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators WHERE collision"))
     linked = int(
         scalar(
-            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.generator_properties gp "
-            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.generator_units_properties gp "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = gp.prop_id "
             f"WHERE p.name = '{COLLISION_PROPERTY}'"
         )
     )
@@ -377,8 +377,8 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     annotation_names = f"'{COLLISION_PROPERTY}'"
 
     # Every whitelist (name, value) used by a good staging row must exist in
-    # core.properties (deduplicated across sources; bad_quality pairs are
-    # staging-only and bad rows are not loaded at all).
+    # core.generator_properties (deduplicated across sources; bad_quality pairs
+    # are staging-only and bad rows are not loaded at all).
     staging_prop_unions = " UNION ".join(
         f"SELECT p.name, p.value FROM {STAGING_SCHEMA}.{s}_properties p "
         f"JOIN {STAGING_SCHEMA}.{s}_units_properties up ON up.param_id = p.param_id "
@@ -389,7 +389,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     expected_props = int(scalar(f"SELECT COUNT(*) FROM ({staging_prop_unions}) d"))
     core_props = int(
         scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties "
             f"WHERE name IN ({whitelist_names})"
         )
     )
@@ -401,7 +401,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     # No property outside the whitelist and the collision annotations.
     stray = int(
         scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties "
             f"WHERE name NOT IN ({whitelist_names}, {annotation_names})"
         )
     )
@@ -420,8 +420,8 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     expected_links = int(scalar(f"SELECT {staging_link_sums}"))
     core_links = int(
         scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties up "
-            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = up.prop_id "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_units_properties up "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = up.prop_id "
             f"WHERE p.name IN ({whitelist_names})"
         )
     )
@@ -433,7 +433,7 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     # No link may reference a missing core unit_id.
     orphans = int(
         scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties up "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_units_properties up "
             f"LEFT JOIN {CORE_SCHEMA}.generators g ON g.unit_id = up.unit_id "
             f"WHERE g.unit_id IS NULL"
         )

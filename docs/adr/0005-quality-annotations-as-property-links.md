@@ -2,11 +2,12 @@
 
 Transform-level quality failures set a staging `bad_quality` boolean and write a property link `(name='bad_quality', value='\n'.join(failed-check descriptions))` through `units_properties`; only good records are inserted into core. Load-level collisions set a core `collision` boolean and write descriptive property links (`collision`, and `close_to` naming the neighbouring unit's id). The normalized dimension tables are named `properties` / `units_properties` (renamed from `parameters` / `units_parameters`), and the jsonb bag of secondary attributes is named `secondary_attributes` (formerly `properties`), stopping the column and the table colliding on the same word.
 
-> **Superseded in part (ADR 0006):** the *shared* `units_properties` link
-> table, and its FK-less `unit_id`, are replaced by per-kind link tables
-> `generator_properties` / `storage_properties`, each FK'd to its unit table.
-> `properties` stays a single shared dimension. The rest of this ADR
-> (whitelist decomposition, annotations as property links) is unchanged.
+> **Superseded in part (ADR 0006):** the *shared* `properties` /
+> `units_properties` tables, and the FK-less `unit_id`, are replaced by
+> per-kind tables — `generator_properties` / `generator_units_properties`
+> (and `storage_properties` / `storage_units_properties` for storages), each
+> FK'd to its unit table. The rest of this ADR (whitelist decomposition,
+> annotations as property links) is unchanged.
 
 Spec v2.2 (2026-09-14) narrowed the decomposition contract and reshuffled one quality check. Only the 14 named attribute keys — `biomass_type`, `fuel_type`, `technology`, `reference_source`, `solar_type`, `note`, `location`, `alignment`, `inclination`, `hydro_type`, `inflow_type`, `manufacturer`, `rotor_diameter`, `hub_height` — decompose into `properties`; every other key (e.g. `biogas_unit`, `chp_unit`, `area_id`, `turbine_type`) stays in the json, which now survives through staging and core instead of being dropped after staging. A decomposed key is removed from the json, so a whitelisted attribute exists once. And the "region is null" check moved from the transform-level `bad_quality` gate (v2.0–v2.1) to the load-level collision set (v2.2): a unit outside every boundary reaches core flagged `collision` and falls under the "outside" region bucket in the marts.
 

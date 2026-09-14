@@ -42,8 +42,8 @@ def _drop_core():
     """Drop core tables so each test/module starts clean."""
     with ENGINE.begin() as conn:
         for tbl in (
+            "generator_units_properties",
             "generator_properties",
-            "properties",
             "generators",
         ):
             conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.{tbl} CASCADE"))
@@ -372,8 +372,8 @@ class TestCollisions:
     def test_collision_property_links_exist(self, _loaded_core):
         collision_links = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
-            f"JOIN {CORE_SCHEMA}.generator_properties gp ON gp.unit_id = g.unit_id "
-            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"JOIN {CORE_SCHEMA}.generator_units_properties gp ON gp.unit_id = g.unit_id "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = gp.prop_id "
             f"WHERE g.collision AND p.name = 'collision'"
         )
         collision_rows = _scalar(
@@ -385,15 +385,15 @@ class TestCollisions:
         # close_to neighbours live in secondary_attributes, not property links.
         close_to_links = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
-            f"JOIN {CORE_SCHEMA}.generator_properties gp ON gp.unit_id = g.unit_id "
-            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"JOIN {CORE_SCHEMA}.generator_units_properties gp ON gp.unit_id = g.unit_id "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = gp.prop_id "
             f"WHERE p.name = 'close_to'"
         )
         assert close_to_links == 0
 
         # Collision values carry the phrase, never a unit id.
         unit_id_reasons = _scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties "
             f"WHERE name = 'collision' AND value LIKE '%close_to %'"
         )
         assert unit_id_reasons == 0
@@ -404,8 +404,8 @@ class TestCollisions:
             f"AND secondary_attributes::jsonb ? 'close_to'"
         )
         close_phrase = _scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties gp "
-            f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = gp.prop_id "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_units_properties gp "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = gp.prop_id "
             f"WHERE p.name = 'collision' AND p.value LIKE '%close location%'"
         )
         assert close_phrase == close_units
@@ -486,7 +486,7 @@ class TestPropertyTransfer:
             core_rows = set(
                 conn.execute(
                     text(
-                        f"SELECT name, value FROM {CORE_SCHEMA}.properties "
+                        f"SELECT name, value FROM {CORE_SCHEMA}.generator_properties "
                         f"WHERE name IN ({self._whitelist_sql()})"
                     )
                 ).fetchall()
@@ -509,8 +509,8 @@ class TestPropertyTransfer:
                 staged_links += int(n)
             core_links = conn.execute(
                 text(
-                    f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties up "
-                    f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = up.prop_id "
+                    f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_units_properties up "
+                    f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = up.prop_id "
                     f"WHERE p.name IN ({self._whitelist_sql()})"
                 )
             ).scalar()
@@ -518,7 +518,7 @@ class TestPropertyTransfer:
 
     def test_bad_quality_absent_from_core(self, _loaded_core):
         n = _scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.properties "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties "
             f"WHERE name = '{BAD_QUALITY_PROPERTY}' "
             f"LIMIT 1"
         )
@@ -526,7 +526,7 @@ class TestPropertyTransfer:
 
     def test_no_orphaned_links(self, _loaded_core):
         orphans = _scalar(
-            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties up "
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_units_properties up "
             f"LEFT JOIN {CORE_SCHEMA}.generators g ON g.unit_id = up.unit_id "
             f"WHERE g.unit_id IS NULL"
         )
@@ -541,7 +541,7 @@ class TestPropertyTransfer:
                 text(
                     f"SELECT g.unit_id, g.energy_source, g.reference_id "
                     f"FROM {CORE_SCHEMA}.generators g "
-                    f"JOIN {CORE_SCHEMA}.generator_properties up ON up.unit_id = g.unit_id "
+                    f"JOIN {CORE_SCHEMA}.generator_units_properties up ON up.unit_id = g.unit_id "
                     f"WHERE g.reference_id IS NOT NULL "
                     f"LIMIT 1"
                 )
@@ -581,8 +581,8 @@ class TestPropertyTransfer:
             core = conn.execute(
                 text(
                     f"SELECT p.name, p.value "
-                    f"FROM {CORE_SCHEMA}.generator_properties up "
-                    f"JOIN {CORE_SCHEMA}.properties p ON p.prop_id = up.prop_id "
+                    f"FROM {CORE_SCHEMA}.generator_units_properties up "
+                    f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = up.prop_id "
                     f"WHERE up.unit_id = :uid AND p.name IN ({whitelist})"
                 ),
                 {"uid": core_unit_id},
