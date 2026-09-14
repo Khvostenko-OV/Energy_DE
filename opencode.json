@@ -5,9 +5,11 @@
     "bash": {
       "*": "ask",
       "ls*": "allow",
+      "cd *": "allow",
       "wc *": "allow",
       "rg *": "allow",
       "grep *": "allow",
+      "sed *": "allow",
       "for *": "allow",
       "cat *": "allow",
       "docker *": "allow",

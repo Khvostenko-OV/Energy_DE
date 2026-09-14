@@ -106,6 +106,7 @@ class LoadReport(ReportBase):
 
     target: str = ""
     rows_read: int = 0
+    bad_rows_dropped: int = 0
     rows_inserted: int = 0
     rows_updated: int = 0
     rows_skipped: int = 0
@@ -120,7 +121,8 @@ class LoadReport(ReportBase):
     def summary(self) -> str:
         lines = [
             f"  Core table       : {self.target or '-'}",
-            f"  Rows read        : {self.rows_read}",
+            f"  Good rows read   : {self.rows_read}",
+            f"  Bad rows dropped : {self.bad_rows_dropped}",
             f"  Rows inserted    : {self.rows_inserted}",
             f"  Rows updated     : {self.rows_updated}",
             f"  Rows skipped     : {self.rows_skipped}",

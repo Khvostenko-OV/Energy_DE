@@ -68,8 +68,12 @@ def load_generators() -> LoadReport:
         t = time.perf_counter()
         staging_df = _read_staging(engine)
         report.rows_read = len(staging_df)
+        report.bad_rows_dropped = _bad_quality_count(engine)
         log.info(
-            "%d good staging rows, time %.3fs", report.rows_read, time.perf_counter() - t
+            "%d good staging rows, %d bad dropped, time %.3fs",
+            report.rows_read,
+            report.bad_rows_dropped,
+            time.perf_counter() - t,
         )
 
         log.info("Building core identity lookup...")
@@ -203,6 +207,16 @@ def _read_staging(engine: Engine) -> pandas.DataFrame:
         union_parts.append(f'SELECT * FROM {STAGING_SCHEMA}.{source} WHERE NOT bad_quality')
     sql = " UNION ALL ".join(union_parts)
     return pandas.read_sql(text(sql), engine)
+
+
+def _bad_quality_count(engine: Engine) -> int:
+    """Count all bad_quality rows across the generator staging tables."""
+    sums = " + ".join(
+        f"(SELECT COUNT(*) FROM {STAGING_SCHEMA}.{s} WHERE bad_quality)"
+        for s in STAGING_GENERATOR_SOURCES
+    )
+    with engine.connect() as conn:
+        return int(conn.execute(text(f"SELECT {sums}")).scalar())
 
 
 # ------------------------------------------------------------------ #
