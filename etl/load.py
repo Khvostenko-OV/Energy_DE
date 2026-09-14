@@ -19,7 +19,7 @@ from etl.db_schema import (
     STAGING_SCHEMA,
     SYNTHETIC_ID_PREFIX,
 )
-from etl.db_utils import _create_core_generators, _ensure_schema
+from etl.db_utils import _create_core_generators, _ensure_schema, _table_exists
 from etl.reports import LoadReport
 from etl.verify import _verify_load_generators
 
@@ -136,17 +136,6 @@ def load_generators() -> LoadReport:
     return report
 
 
-def _table_exists(engine: Engine, table: str) -> bool:
-    """True if the named table exists in the core schema."""
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                "SELECT 1 FROM information_schema.tables "
-                "WHERE table_schema = :schema AND table_name = :name"
-            ),
-            {"schema": CORE_SCHEMA, "name": table},
-        ).first()
-    return row is not None
 
 
 # ------------------------------------------------------------------ #

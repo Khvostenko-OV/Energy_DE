@@ -12,6 +12,19 @@ from etl.db_schema import (
 )
 
 
+def _table_exists(engine: Engine, table: str, schema: str = CORE_SCHEMA) -> bool:
+    """True if the named table exists in the given schema."""
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = :schema AND table_name = :name"
+            ),
+            {"schema": schema, "name": table},
+        ).first()
+    return row is not None
+
+
 def _ensure_schema(engine: Engine, schema: str = RAW_SCHEMA) -> None:
     """Create the given schema in the database if it does not exist."""
     with engine.connect() as conn:
