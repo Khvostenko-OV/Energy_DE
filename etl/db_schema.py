@@ -111,7 +111,13 @@ CORE_GENERATORS_COLUMNS = (
 COLLISION_PROPERTY = "collision"
 CLOSE_TO_PROPERTY = "close_to"
 CLOSE_LOCATION_REASON = "close location"
+REGION_NULL_COLLISION_REASON = "region is null"
+ONSHORE_IN_SEA_COLLISION_REASON = "onshore unit in the sea"
 STORAGE_CAPACITY_COLLISION_REASON = "storage_capacity <= 0 or null"
+
+# Sources whose units are onshore-only: an energy_source in this set whose
+# region is a sea/EEZ area is an "onshore unit in the sea" collision.
+ONSHORE_SOURCES = ("bio", "gas", "hydro", "solar")
 
 SYNTHETIC_ID_PREFIX = "syn_"
 

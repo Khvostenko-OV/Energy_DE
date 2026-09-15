@@ -7,13 +7,19 @@ from sqlalchemy.engine import Engine
 
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
+    CLOSE_LOCATION_REASON,
     COLLISION_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
+    ONSHORE_IN_SEA_COLLISION_REASON,
+    ONSHORE_SOURCES,
     RAW_SCHEMA,
+    REGION_NULL_COLLISION_REASON,
+    SEA_REGIONS,
     SERVICE_SCHEMA,
     STAGING_GENERATOR_SOURCES,
     STAGING_SCHEMA,
+    STORAGE_CAPACITY_COLLISION_REASON,
     STORAGE_COLUMNS,
 )
 from etl.reports import ExtractionReport, LoadReport, TransformReport
@@ -359,19 +365,66 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     if leaked_bad:
         errors.append("bad_quality property links leaked into core")
 
-    flagged = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators WHERE collision"))
-    linked = int(
+    # Collision annotation integrity, per unit (ADR 0005): every collision=true
+    # row must carry a collision property link, and no collision=false row may.
+    # A directional per-unit check (not an aggregate count) catches compensated
+    # drift — a link moved off one flagged row and onto a clean row keeps the
+    # aggregate totals equal.
+    missing_link = int(
         scalar(
-            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.generator_units_properties gp "
-            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = gp.prop_id "
-            f"WHERE p.name = '{COLLISION_PROPERTY}'"
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
+            f"WHERE g.collision AND NOT EXISTS ("
+            f"SELECT 1 FROM {CORE_SCHEMA}.generator_units_properties up "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = up.prop_id "
+            f"WHERE up.unit_id = g.unit_id AND p.name = '{COLLISION_PROPERTY}')"
         )
     )
-    if flagged != linked:
-        errors.append(
-            f"Collision flag drift: {flagged} collision=true rows vs {linked} "
-            f"units with a collision link"
+    if missing_link:
+        errors.append(f"{missing_link} collision=true rows lack a collision link")
+
+    stale_link = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
+            f"WHERE NOT g.collision AND EXISTS ("
+            f"SELECT 1 FROM {CORE_SCHEMA}.generator_units_properties up "
+            f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = up.prop_id "
+            f"WHERE up.unit_id = g.unit_id AND p.name = '{COLLISION_PROPERTY}')"
         )
+    )
+    if stale_link:
+        errors.append(f"{stale_link} collision=false rows carry a collision link")
+
+    # "Present and correct" (ADR 0005): the collision link value must name the
+    # reasons the row merits.  A stripped or re-phrased reason is drift even
+    # though a 'collision' link still exists.
+    onshore_sql = ", ".join(f"'{s}'" for s in ONSHORE_SOURCES)
+    sea_sql = ", ".join(f"'{r}'" for r in SEA_REGIONS)
+    for reason, condition in (
+        (REGION_NULL_COLLISION_REASON, "g.region IS NULL"),
+        (
+            ONSHORE_IN_SEA_COLLISION_REASON,
+            f"g.energy_source IN ({onshore_sql}) AND g.region IN ({sea_sql})",
+        ),
+        (
+            CLOSE_LOCATION_REASON,
+            "g.secondary_attributes IS NOT NULL "
+            "AND g.secondary_attributes::jsonb ? 'close_to'",
+        ),
+    ):
+        stripped = int(
+            scalar(
+                f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators g "
+                f"JOIN {CORE_SCHEMA}.generator_units_properties up ON up.unit_id = g.unit_id "
+                f"JOIN {CORE_SCHEMA}.generator_properties p ON p.prop_id = up.prop_id "
+                f"WHERE {condition} AND p.name = '{COLLISION_PROPERTY}' "
+                f"AND p.value NOT LIKE '%{reason}%'"
+            )
+        )
+        if stripped:
+            errors.append(
+                f"{stripped} collision=true rows carry a collision link missing "
+                f"the '{reason}' reason"
+            )
 
     whitelist_names = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
     annotation_names = f"'{COLLISION_PROPERTY}'"
@@ -540,19 +593,69 @@ def _verify_load_storages(engine: Engine, report: LoadReport) -> list[str]:
     if leaked_bad:
         errors.append("bad_quality property links leaked into core")
 
-    flagged = int(scalar(f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages WHERE collision"))
-    linked = int(
+    # Collision annotation integrity, per unit (ADR 0005): every collision=true
+    # row must carry a collision property link, and no collision=false row may.
+    # A directional per-unit check (not an aggregate count) catches compensated
+    # drift — a link moved off one flagged row and onto a clean row keeps the
+    # aggregate totals equal.
+    missing_link = int(
         scalar(
-            f"SELECT COUNT(DISTINCT gp.unit_id) FROM {CORE_SCHEMA}.storage_units_properties gp "
-            f"JOIN {CORE_SCHEMA}.storage_properties p ON p.prop_id = gp.prop_id "
-            f"WHERE p.name = '{COLLISION_PROPERTY}'"
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages g "
+            f"WHERE g.collision AND NOT EXISTS ("
+            f"SELECT 1 FROM {CORE_SCHEMA}.storage_units_properties up "
+            f"JOIN {CORE_SCHEMA}.storage_properties p ON p.prop_id = up.prop_id "
+            f"WHERE up.unit_id = g.unit_id AND p.name = '{COLLISION_PROPERTY}')"
         )
     )
-    if flagged != linked:
-        errors.append(
-            f"Collision flag drift: {flagged} collision=true rows vs {linked} "
-            f"units with a collision link"
+    if missing_link:
+        errors.append(f"{missing_link} collision=true rows lack a collision link")
+
+    stale_link = int(
+        scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages g "
+            f"WHERE NOT g.collision AND EXISTS ("
+            f"SELECT 1 FROM {CORE_SCHEMA}.storage_units_properties up "
+            f"JOIN {CORE_SCHEMA}.storage_properties p ON p.prop_id = up.prop_id "
+            f"WHERE up.unit_id = g.unit_id AND p.name = '{COLLISION_PROPERTY}')"
         )
+    )
+    if stale_link:
+        errors.append(f"{stale_link} collision=false rows carry a collision link")
+
+    # "Present and correct" (ADR 0005): the collision link value must name the
+    # reasons the row merits.  A stripped or re-phrased reason is drift even
+    # though a 'collision' link still exists.
+    sea_sql = ", ".join(f"'{r}'" for r in SEA_REGIONS)
+    for reason, condition in (
+        (REGION_NULL_COLLISION_REASON, "g.region IS NULL"),
+        (
+            ONSHORE_IN_SEA_COLLISION_REASON,
+            f"g.energy_source = 'storage' AND g.region IN ({sea_sql})",
+        ),
+        (
+            STORAGE_CAPACITY_COLLISION_REASON,
+            "(g.storage_capacity IS NULL OR g.storage_capacity <= 0)",
+        ),
+        (
+            CLOSE_LOCATION_REASON,
+            "g.secondary_attributes IS NOT NULL "
+            "AND g.secondary_attributes::jsonb ? 'close_to'",
+        ),
+    ):
+        stripped = int(
+            scalar(
+                f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages g "
+                f"JOIN {CORE_SCHEMA}.storage_units_properties up ON up.unit_id = g.unit_id "
+                f"JOIN {CORE_SCHEMA}.storage_properties p ON p.prop_id = up.prop_id "
+                f"WHERE {condition} AND p.name = '{COLLISION_PROPERTY}' "
+                f"AND p.value NOT LIKE '%{reason}%'"
+            )
+        )
+        if stripped:
+            errors.append(
+                f"{stripped} collision=true rows carry a collision link missing "
+                f"the '{reason}' reason"
+            )
 
     whitelist_names = ", ".join(f"'{n}'" for n in DECOMPOSED_PROPERTIES)
     annotation_names = f"'{COLLISION_PROPERTY}'"

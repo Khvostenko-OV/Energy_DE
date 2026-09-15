@@ -22,6 +22,9 @@ from etl.db_schema import (
     COLLISION_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
+    ONSHORE_IN_SEA_COLLISION_REASON,
+    ONSHORE_SOURCES,
+    REGION_NULL_COLLISION_REASON,
     SEA_REGIONS,
     STAGING_GENERATOR_SOURCES,
     STAGING_SCHEMA,
@@ -38,8 +41,6 @@ from etl.reports import LoadReport
 from etl.verify import _verify_load_generators, _verify_load_storages
 
 log = logging.getLogger(__name__)
-
-ONSHORE_SOURCES = ("bio", "gas", "hydro", "solar")
 
 
 @dataclass(frozen=True)
@@ -666,7 +667,7 @@ def _detect_region_null(
             params,
         ).fetchall()
     for (uid,) in rows:
-        collision_units.setdefault(uid, []).append("region is null")
+        collision_units.setdefault(uid, []).append(REGION_NULL_COLLISION_REASON)
 
 
 def _detect_onshore_in_sea(
@@ -698,7 +699,7 @@ def _detect_onshore_in_sea(
             params,
         ).fetchall()
     for (uid,) in rows:
-        collision_units.setdefault(uid, []).append("onshore unit in the sea")
+        collision_units.setdefault(uid, []).append(ONSHORE_IN_SEA_COLLISION_REASON)
 
 
 def _detect_storage_capacity(
