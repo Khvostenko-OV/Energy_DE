@@ -3,7 +3,7 @@
 import pytest
 
 from etl.config import SOURCE_NAMES
-from etl.transform import transform_sorces
+from etl.transform import transform_sources
 
 
 @pytest.fixture(scope="session")
@@ -17,5 +17,5 @@ def _staged_sources():
     `finally`).
     """
     for source in SOURCE_NAMES:
-        report = transform_sorces(source)
+        report = transform_sources(source)
         assert report.passed, report.errors

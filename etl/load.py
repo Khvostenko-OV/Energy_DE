@@ -466,15 +466,6 @@ def _partition_staging(
     return insert_df, update_df, skip_df
 
 
-def _is_fresher(staging_date, core_date) -> bool:
-    """True when the staging reference_date is strictly fresher than core's."""
-    if staging_date is None or pandas.isna(staging_date):
-        return False
-    if core_date is None or pandas.isna(core_date):
-        return True
-    return staging_date > core_date
-
-
 # ------------------------------------------------------------------ #
 #  Upsert into core table (generators / storages)                      #
 # ------------------------------------------------------------------ #

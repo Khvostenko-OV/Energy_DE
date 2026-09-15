@@ -35,7 +35,7 @@ QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
 
 
-def transform_sorces(*sources: str) -> TransformReport:
+def transform_sources(*sources: str) -> TransformReport:
     """Transform one or more sources into their staging tables.
 
     SOURCES is any number of SOURCE_NAMES values; the special value "all"
@@ -197,7 +197,7 @@ def _merge_transform_reports(
 ) -> TransformReport:
     """Fold per-source transform reports into one aggregate report.
 
-    ``transform_sorces(*sources)`` runs each source through the single-source
+    ``transform_sources(*sources)`` runs each source through the single-source
     path and merges the reports: scalar counters and per-level join_unmapped
     sums across sources, quality_reasons keyed by their exact reason strings,
     raw_table set to a comma-joined list (or None when nothing transformed),

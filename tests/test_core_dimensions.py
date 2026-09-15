@@ -31,7 +31,7 @@ from etl.db_schema import (
 )
 from etl.load import load_generators, load_storages
 from etl.reports import LoadReport
-from etl.transform import transform_sorces
+from etl.transform import transform_sources
 from etl.verify import _verify_load_generators, _verify_load_storages
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
@@ -762,6 +762,6 @@ class TestRefreshOnUpdate:
             )
             assert remaining == 0
         finally:
-            report = transform_sorces(energy_source)
+            report = transform_sources(energy_source)
             assert report.passed, report.errors
             load_generators()

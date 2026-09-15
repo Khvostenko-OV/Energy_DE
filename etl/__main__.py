@@ -7,7 +7,7 @@ from etl.config import SOURCE_NAMES
 from etl.extract import extract_boundaries, extract_source
 from etl.load import load_generators, load_storages
 from etl.marts import build_marts
-from etl.transform import transform_sorces
+from etl.transform import transform_sources
 from etl.utils import _read_manifest
 
 
@@ -93,7 +93,7 @@ def transform(sources):
     (spec v2.2). Storage staging additionally carries its storage shape
     (storage_type, storage_capacity).
     """
-    report = transform_sorces(*sources) if sources else transform_sorces()
+    report = transform_sources(*sources) if sources else transform_sources()
 
     click.echo(f"\nTransform report ({report.source}):")
     click.echo(report.summary())
