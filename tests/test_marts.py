@@ -17,7 +17,7 @@ from etl.config import SOURCE_NAMES
 from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_REGION
 from etl.load import load_generators, load_storages
 from etl.marts import MART_DEFINITIONS, build_marts, verify_marts
-from etl.transform import transform_source
+from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -36,7 +36,7 @@ def _scalar(sql: str):
 def _ensure_staging():
     """Transform all six sources so the staging tables are fresh."""
     for source in SOURCE_NAMES:
-        report = transform_source(source)
+        report = transform_sorces(source)
         assert report.passed, report.errors
 
 

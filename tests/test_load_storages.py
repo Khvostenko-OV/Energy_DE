@@ -18,7 +18,7 @@ from etl.db_schema import (
     STAGING_SCHEMA,
 )
 from etl.load import load_storages
-from etl.transform import transform_source
+from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -32,7 +32,7 @@ def _scalar(sql: str) -> int:
 
 def _ensure_staging():
     """Transform the storage source to ensure its staging tables are fresh."""
-    report = transform_source(SOURCE)
+    report = transform_sorces(SOURCE)
     assert report.passed, report.errors
 
 

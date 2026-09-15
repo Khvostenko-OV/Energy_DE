@@ -4,7 +4,7 @@
 `python -m etl load` requires the staging tables; when they are absent the
 stage must report a clear, submitted-style failure instead of crashing with an
 undifferentiated exception.  The transform guard is exercised through the
-public `transform_source` with an unknown source name (no raw tables exist for
+public `transform_sorces` with an unknown source name (no raw tables exist for
 it); the load guard is exercised through `_load` with a fabricated kind whose
 staging sources do not exist.  Both tests are non-destructive — they do not
 drop, rename, or rebuild any real tables.
@@ -15,13 +15,13 @@ import os
 from sqlalchemy import create_engine
 
 from etl.load import _load, _CoreKind
-from etl.transform import transform_source
+from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
 
 def test_transform_fails_cleanly_when_raw_tables_missing():
-    report = transform_source("nonexistent_source")
+    report = transform_sorces("nonexistent_source")
 
     assert not report.passed
     assert report.raw_table is None
@@ -42,7 +42,7 @@ def test_transform_fails_cleanly_when_boundaries_missing(monkeypatch):
         lambda engine, table, schema: table != "boundaries",
     )
 
-    report = transform_source("wind")
+    report = transform_sorces("wind")
 
     assert not report.passed
     assert report.raw_table == "nonexistent_source_20260915_1"

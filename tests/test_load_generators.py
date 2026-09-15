@@ -19,7 +19,7 @@ from etl.db_schema import (
     STAGING_GENERATOR_SOURCES,
 )
 from etl.load import load_generators
-from etl.transform import transform_source
+from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -34,7 +34,7 @@ def _scalar(sql: str) -> int:
 def _ensure_staging():
     """Transform all generator sources to ensure staging tables are fresh."""
     for source in GENERATOR_SOURCES:
-        report = transform_source(source)
+        report = transform_sorces(source)
         assert report.passed, report.errors
 
 

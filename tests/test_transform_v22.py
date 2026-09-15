@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from etl.db_schema import DECOMPOSED_PROPERTIES
-from etl.transform import transform_source
+from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -58,7 +58,7 @@ EXPECTED_BAD_QUALITY = {"bio": 0, "gas": 0, "hydro": 0, "solar": 12, "wind": 0, 
 
 
 def run_transform(source: str):
-    report = transform_source(source)
+    report = transform_sorces(source)
     assert report.passed, report.errors
 
 

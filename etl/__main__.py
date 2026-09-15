@@ -7,7 +7,7 @@ from etl.config import SOURCE_NAMES
 from etl.extract import extract_boundaries, extract_source
 from etl.load import load_generators, load_storages
 from etl.marts import build_marts
-from etl.transform import transform_source
+from etl.transform import transform_sorces
 from etl.utils import _read_manifest
 
 
@@ -75,23 +75,25 @@ def boundaries(target: str):
 
 @cli.command()
 @click.argument(
-    "source",
+    "sources",
+    nargs=-1,
     type=click.Choice(SOURCE_NAMES + ("all",)),
-    default="all",
 )
-def transform(source: str):
-    """Transform SOURCE into its staging tables (default: all sources).
+def transform(sources):
+    """Transform SOURCES into their staging tables (default: all).
 
-    SOURCE is one of the six unit sources or "all".  Builds the staging row
-    (unit_id — natural from reference_id or synthetic where absent, canonical
-    energy_source, geo_accuracy, country_iso, geometry), spatially joins
-    boundaries to assign region/district/municipality, runs the quality gate,
-    and decomposes the whitelisted secondary attributes into normalized
-    properties (the rest staying in the reduced secondary_attributes json). A
-    region-null row is not bad quality (spec v2.2). Storage staging
-    additionally carries its storage shape (storage_type, storage_capacity).
+    SOURCES is one or more of the six unit sources, or "all" to transform
+    every source.  With no arguments, all sources are transformed.  Builds
+    the staging row (unit_id — natural from reference_id or synthetic where
+    absent, canonical energy_source, geo_accuracy, country_iso, geometry),
+    spatially joins boundaries to assign region/district/municipality, runs
+    the quality gate, and decomposes the whitelisted secondary attributes
+    into normalized properties (the rest staying in the reduced
+    secondary_attributes json). A region-null row is not bad quality
+    (spec v2.2). Storage staging additionally carries its storage shape
+    (storage_type, storage_capacity).
     """
-    report = transform_source(source)
+    report = transform_sorces(*sources) if sources else transform_sorces()
 
     click.echo(f"\nTransform report ({report.source}):")
     click.echo(report.summary())
@@ -153,8 +155,7 @@ def run_all():
     ctx.invoke(extract, target="data/geo/sources.txt", force=False)
 
     click.echo("\nRunning transform stage for all sources...")
-    for source in SOURCE_NAMES:
-        ctx.invoke(transform, source=source)
+    ctx.invoke(transform)
 
     click.echo("\nRunning load stage for generators and storages...")
     ctx.invoke(load)

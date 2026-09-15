@@ -35,23 +35,30 @@ QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
 
 
-def transform_source(source: str = "all") -> TransformReport:
-    """Transform the latest raw version of one source into its staging tables.
+def transform_sorces(*sources: str) -> TransformReport:
+    """Transform one or more sources into their staging tables.
 
-    SOURCE is one of SOURCE_NAMES, or "all" (the default) to transform every
-    source.  Reads raw.<source>_<YYYYMMDD>_<n> (the latest version), assigns
-    each unit its staging identity (natural key from reference_id, synthetic
-    hash where absent), enriches with region/district/municipality via a
-    spatial join against the boundary reference layers, applies the quality
-    gate, and decomposes the whitelisted secondary attributes into normalized
+    SOURCES is any number of SOURCE_NAMES values; the special value "all"
+    (or calling with no arguments) transforms every source.  Each source
+    reads raw.<source>_<YYYYMMDD>_<n> (the latest version), assigns units
+    their staging identity (natural key from reference_id, synthetic hash
+    where absent), enriches with region/district/municipality via a spatial
+    join against the boundary reference layers, applies the quality gate,
+    and decomposes the whitelisted secondary attributes into normalized
     property tables (the rest staying in the reduced `secondary_attributes`
     json).  A bad quality row stays in staging but is never a candidate for
     core; a region-null row is not bad quality (spec v2.2 leaves that to the
-    load stage's collision checks).
+    load stage's collision checks).  The per-source reports are merged into
+    one aggregate report.
     """
-    if source == "all":
-        return _transform_all()
+    if not sources or "all" in sources:
+        sources = SOURCE_NAMES
+    reports = [_transform_source(s) for s in sources]
+    return _merge_transform_reports(sources, reports)
 
+
+def _transform_source(source: str) -> TransformReport:
+    """Transform the latest raw version of one source into its staging tables."""
     report = TransformReport(source=source)
     start = time.perf_counter()
     try:
@@ -185,19 +192,19 @@ def transform_source(source: str = "all") -> TransformReport:
     return report
 
 
-def _transform_all() -> TransformReport:
-    """Transform every source in SOURCE_NAMES and merge the reports.
+def _merge_transform_reports(
+    sources: tuple[str, ...], reports: list[TransformReport]
+) -> TransformReport:
+    """Fold per-source transform reports into one aggregate report.
 
-    ``transform_source('all')`` runs each source through the single-source
-    path and folds the reports into one: scalar counters and per-level
-    join_unmapped sums across sources, quality_reasons keyed by their exact
-    reason strings, raw_table set to a comma-joined list (or "all" when none
-    transformed), and errors concatenated per source.  A source whose raw
-    tables or boundaries are missing contributes its own clean error, so the
-    merged report fails without raising.
+    ``transform_sorces(*sources)`` runs each source through the single-source
+    path and merges the reports: scalar counters and per-level join_unmapped
+    sums across sources, quality_reasons keyed by their exact reason strings,
+    raw_table set to a comma-joined list (or None when nothing transformed),
+    and errors concatenated per source.  A source whose raw tables or
+    boundaries are missing contributes its own clean error, so the merged
+    report fails without raising.
     """
-    reports = [transform_source(s) for s in SOURCE_NAMES]
-
     merged = TransformReport(source="all")
     merged.rows_read = sum(r.rows_read for r in reports)
     merged.rows_written = sum(r.rows_written for r in reports)
@@ -213,14 +220,15 @@ def _transform_all() -> TransformReport:
     for r in reports:
         merged.errors.extend(r.errors)
     raw_tables = [r.raw_table for r in reports if r.raw_table]
-    merged.raw_table = ", ".join(raw_tables) if raw_tables else "all"
+    merged.raw_table = ", ".join(raw_tables) if raw_tables else None
     merged.total_time = sum(r.total_time for r in reports)
     if merged.errors:
         for err in merged.errors:
             log.error("Transform failed: %s", err)
     else:
         log.info(
-            "Transform passed for all sources (%d rows)",
+            "Transform passed for %s (%d rows)",
+            "all" if sources == SOURCE_NAMES else ", ".join(sources),
             merged.rows_read,
         )
     log.info("Total time: %.3fs", merged.total_time)

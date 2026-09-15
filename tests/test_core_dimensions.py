@@ -31,7 +31,7 @@ from etl.db_schema import (
 )
 from etl.load import load_generators, load_storages
 from etl.reports import LoadReport
-from etl.transform import transform_source
+from etl.transform import transform_sorces
 from etl.verify import _verify_load_generators, _verify_load_storages
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
@@ -54,7 +54,7 @@ def _scalar(sql: str):
 def _ensure_staging():
     """Transform all six sources so the staging whitelist decomposition is fresh."""
     for source in (*GENERATOR_SOURCES, "storage"):
-        report = transform_source(source)
+        report = transform_sorces(source)
         assert report.passed, report.errors
 
 
