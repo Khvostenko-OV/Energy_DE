@@ -51,13 +51,6 @@ def _scalar(sql: str):
         return conn.execute(text(sql)).scalar()
 
 
-def _ensure_staging():
-    """Transform all six sources so the staging whitelist decomposition is fresh."""
-    for source in (*GENERATOR_SOURCES, "storage"):
-        report = transform_sorces(source)
-        assert report.passed, report.errors
-
-
 def _drop_core():
     """Drop core tables so the module starts and ends clean."""
     with ENGINE.begin() as conn:
@@ -83,9 +76,8 @@ def _loaded_core():
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _staging_ready():
-    """Transform all sources once per module."""
-    _ensure_staging()
+def _staging_ready(_staged_sources):
+    """Staging is transformed once per session; nothing to do here."""
 
 
 # ------------------------------------------------------------------ #
@@ -770,5 +762,6 @@ class TestRefreshOnUpdate:
             )
             assert remaining == 0
         finally:
-            _ensure_staging()
+            report = transform_sorces(energy_source)
+            assert report.passed, report.errors
             load_generators()

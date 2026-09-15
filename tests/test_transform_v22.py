@@ -13,7 +13,6 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from etl.db_schema import DECOMPOSED_PROPERTIES
-from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -57,21 +56,14 @@ EXPECTED_REGION_NULLS = {"hydro": 15, "solar": 5, "wind": 1, "storage": 30}
 EXPECTED_BAD_QUALITY = {"bio": 0, "gas": 0, "hydro": 0, "solar": 12, "wind": 0, "storage": 0}
 
 
-def run_transform(source: str):
-    report = transform_sorces(source)
-    assert report.passed, report.errors
-
-
 def scalar(sql: str) -> int:
     with ENGINE.connect() as conn:
         return int(conn.execute(text(sql)).scalar())
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _transformed_all():
-    """Transform every source once per module."""
-    for source in SOURCE_NAMES:
-        run_transform(source)
+def _transformed_all(_staged_sources):
+    """Staging is transformed once per session; nothing to do here."""
 
 
 def test_staging_tables_have_secondary_attributes_column():

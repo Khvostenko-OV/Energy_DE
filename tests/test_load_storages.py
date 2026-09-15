@@ -18,7 +18,6 @@ from etl.db_schema import (
     STAGING_SCHEMA,
 )
 from etl.load import load_storages
-from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -28,12 +27,6 @@ SOURCE = "storage"
 def _scalar(sql: str) -> int:
     with ENGINE.connect() as conn:
         return int(conn.execute(text(sql)).scalar())
-
-
-def _ensure_staging():
-    """Transform the storage source to ensure its staging tables are fresh."""
-    report = transform_sorces(SOURCE)
-    assert report.passed, report.errors
 
 
 def _drop_core():
@@ -58,9 +51,8 @@ def _loaded_core():
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _staging_ready():
-    """Transform the storage source once per module."""
-    _ensure_staging()
+def _staging_ready(_staged_sources):
+    """Staging is transformed once per session; nothing to do here."""
 
 
 # ------------------------------------------------------------------ #

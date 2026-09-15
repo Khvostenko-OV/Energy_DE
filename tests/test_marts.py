@@ -13,11 +13,9 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, text
 
-from etl.config import SOURCE_NAMES
 from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_REGION
 from etl.load import load_generators, load_storages
 from etl.marts import MART_DEFINITIONS, build_marts, verify_marts
-from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -31,13 +29,6 @@ STORAGE_KIND = ("storages", "storage_units_properties", "storage_properties")
 def _scalar(sql: str):
     with ENGINE.connect() as conn:
         return conn.execute(text(sql)).scalar()
-
-
-def _ensure_staging():
-    """Transform all six sources so the staging tables are fresh."""
-    for source in SOURCE_NAMES:
-        report = transform_sorces(source)
-        assert report.passed, report.errors
 
 
 def _drop_marts():
@@ -80,9 +71,8 @@ def _marts(_loaded_core):
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _staging_ready():
-    """Transform all sources once per module."""
-    _ensure_staging()
+def _staging_ready(_staged_sources):
+    """Staging is transformed once per session; nothing to do here."""
 
 
 # ------------------------------------------------------------------ #

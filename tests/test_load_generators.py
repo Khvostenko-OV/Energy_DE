@@ -19,7 +19,6 @@ from etl.db_schema import (
     STAGING_GENERATOR_SOURCES,
 )
 from etl.load import load_generators
-from etl.transform import transform_sorces
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
@@ -29,13 +28,6 @@ GENERATOR_SOURCES = STAGING_GENERATOR_SOURCES  # bio, gas, hydro, solar, wind
 def _scalar(sql: str) -> int:
     with ENGINE.connect() as conn:
         return int(conn.execute(text(sql)).scalar())
-
-
-def _ensure_staging():
-    """Transform all generator sources to ensure staging tables are fresh."""
-    for source in GENERATOR_SOURCES:
-        report = transform_sorces(source)
-        assert report.passed, report.errors
 
 
 def _drop_core():
@@ -60,9 +52,8 @@ def _loaded_core():
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _staging_ready():
-    """Transform all generator sources once per module."""
-    _ensure_staging()
+def _staging_ready(_staged_sources):
+    """Staging is transformed once per session; nothing to do here."""
 
 
 # ------------------------------------------------------------------ #
