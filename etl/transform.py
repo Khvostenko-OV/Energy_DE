@@ -56,7 +56,14 @@ def transform_source(source: str) -> TransformReport:
 
         raw_table = _latest_table_version(engine, source)
         if raw_table is None:
-            raise ValueError(f"No raw version table found for source {source!r}")
+            report.errors.append(
+                f"raw tables missing for source {source!r}; "
+                "run 'python -m etl extract' first"
+            )
+            report.total_time = time.perf_counter() - start
+            log.error("Transform failed for %s: %s", source, report.errors[0])
+            log.info("Total time: %.3fs", report.total_time)
+            return report
         report.raw_table = raw_table
 
         log.info("Transforming %s from %s.%s", source, RAW_SCHEMA, raw_table)

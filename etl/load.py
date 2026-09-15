@@ -157,6 +157,21 @@ def _load(kind: _CoreKind) -> LoadReport:
     start = time.perf_counter()
     try:
         engine = get_engine()
+
+        missing = [
+            t for t in kind.staging_sources
+            if not _table_exists(engine, t, STAGING_SCHEMA)
+        ]
+        if missing:
+            report.errors.append(
+                f"staging tables missing for {report.target}; "
+                "run 'python -m etl transform' first"
+            )
+            report.total_time = time.perf_counter() - start
+            log.error("Load failed for %s: %s", report.target, report.errors[0])
+            log.info("Total time: %.3fs", report.total_time)
+            return report
+
         _ensure_schema(engine, CORE_SCHEMA)
 
         first_load = not _table_exists(engine, kind.core_table)
