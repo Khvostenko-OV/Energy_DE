@@ -7,6 +7,7 @@
       "ls*": "allow",
       "ps*": "allow",
       "cd *": "allow",
+      "mv *": "allow",
       "wc *": "allow",
       "rg *": "allow",
       "grep *": "allow",
