@@ -3,9 +3,9 @@
 Each core unit-kind owns its property tables. For generators that is
 `core.generator_properties` (the normalized (name, value) dimension) and
 `core.generator_units_properties` (the unit → property link table, FK'd to
-both core.generators and core.generator_properties). Storages get their own
-`storage_properties` / `storage_units_properties` when `core.storages` lands
-(issue #7). Neither dimension nor links are shared across unit-kinds.
+both core.generators and core.generator_properties). Storages have their own
+`storage_properties` / `storage_units_properties` (issue #7). Neither
+dimension nor links are shared across unit-kinds.
 
 ## Context
 
@@ -24,9 +24,8 @@ application, never by the schema.
 Three core tables exist per generator kind today — `core.generators` (units),
 `core.generator_properties` (normalized property dictionary, prop_id / name /
 value), and `core.generator_units_properties` (links, FK unit_id →
-core.generators and prop_id → core.generator_properties). The storage kind
-gets `core.storages`, `core.storage_properties` and
-`core.storage_units_properties` when it lands, under the same pattern. The
+core.generators and prop_id → core.generator_properties). The storage kind has `core.storages`, `core.storage_properties` and
+`core.storage_units_properties`, under the same pattern. The
 staging per-source link tables stay named `{source}_units_properties` and
 keep the `<source>_<reference_id>` or `syn_<hash>` staging unit ids, since
 each staging source is a single unit kind.

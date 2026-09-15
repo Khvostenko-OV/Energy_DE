@@ -202,9 +202,9 @@ def _create_core_generators(engine: Engine) -> None:
     Also (re)creates the per-kind dimension tables: `generator_properties`
     holds the normalized (name, value) pairs and `generator_units_properties`
     links them to core.generator serial unit_ids.  Both tables are per
-    unit-kind — storages get their own `storage_properties` /
-    `storage_units_properties` FK'd to core.storages when they land (ADR
-    0006) — so `generator_units_properties.unit_id` carries a real FK instead
+    unit-kind — storages have their own `storage_properties` /
+    `storage_units_properties` FK'd to core.storages (ADR 0006) — so
+    `generator_units_properties.unit_id` carries a real FK instead
     of the FK-less shared `units_properties` that could not tell a generator
     id from a storage id.
     """

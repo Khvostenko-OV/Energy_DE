@@ -39,7 +39,7 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 - Convert secondary properties to dictionary, place it to column 'secondary_attributes'
 - Save to PostGIS datalake. Table names should contain source type, date of load, number of load
 #### Load administrative and maritime boundaries
-- Load .gpkg files with boundaries into table **boundaries**
+- Load .gpkg files with boundaries into the non-versioned `service.boundaries` table (see Data layers — Service)
 ### 2. Transform
 - Input: list of tables to be transformed
 - Add primary keys
@@ -111,15 +111,6 @@ add property 'close_to' with reference to close unit
 
 ## Data layers
 ### 1. Raw
-#### loaded_files - list of datafiles loaded into Raw layer
-| Column      | Data type |
-|-------------|-----------|
-| filename    | str       |
-| filesize    | int       |
-| modified_at | timestamp |
-| loaded_at   | timestamp |
-| loaded_to   | str       |
-
 #### Units tables: bio, gas, hydro, solar, wind
 | Column               | Data type | Description                                       |
 |----------------------|-----------|---------------------------------------------------|
@@ -152,7 +143,19 @@ add property 'close_to' with reference to close unit
 | geometry              | point     | WGS-84                                             |
 | secondary_attributes  | text      | Dictionary of secondary attributes                 |
 
-#### boundaries
+### 2. Service (operational metadata)
+Non-versioned operational metadata, deliberately separate from the versioned raw datalake (ADR 0007).
+
+#### loaded_files - list of datafiles loaded into the Raw layer (load-signature log)
+| Column      | Data type |
+|-------------|-----------|
+| filename    | str       |
+| filesize    | int       |
+| modified_at | timestamp |
+| loaded_at   | timestamp |
+| loaded_to   | str       |
+
+#### boundaries - administrative and maritime reference polygons
 | Column           | Data type    | Description                                         |
 |------------------|--------------|-----------------------------------------------------|
 | country_iso      | str          | DEU                                                 |
@@ -162,7 +165,7 @@ add property 'close_to' with reference to close unit
 | geometry         | multipolygon | WGS-84                                              |
 
 
-### 2. Staging
+### 3. Staging
 #### Units tables: bio, gas, hydro, solar, wind
 | Column               | Data type | Description                                       |
 |----------------------|-----------|---------------------------------------------------|
@@ -206,22 +209,22 @@ add property 'close_to' with reference to close unit
 | municipality         | str       | Gemeinde                                           |
 | bad_quality          | bool      | Flag bad quality record                            |
 
-### Dimension tables (normalized, one set for each Unit table)
-#### properties
+### Dimension tables (normalized, one per-kind set for each staging Unit table)
+#### `{source}_properties` (e.g. `bio_properties`, `storage_properties`)
 | Column        | Data type |
 |---------------|-----------|
 | param_id      | int pk    |
 | name          | str       |
 | value         | str       |
 | (name, value) | unique    |
-#### units_properties
+#### `{source}_units_properties` (links the staging unit to its properties)
 | Column              | Data type |
 |---------------------|-----------|
 | unit_id             | int fk    |
 | param_id            | int fk    |
 | (unit_id, param_id) | pk        |
 
-## 3. Core
+## 4. Core
 ### generators
 | Column               | Data type | Description                                       |
 |----------------------|-----------|---------------------------------------------------|
@@ -265,22 +268,22 @@ add property 'close_to' with reference to close unit
 | municipality         | str       | Gemeinde                                           |
 | collision            | bool      | Flag collisions                                    |
 
-### Dimension tables (double set)
-#### properties
+### Dimension tables (per unit-kind, ADR 0006)
+#### `generator_properties` / `storage_properties`
 | Column        | Data type |
 |---------------|-----------|
-| param_id      | int pk    |
+| prop_id       | int pk    |
 | name          | str       |
 | value         | str       |
 | (name, value) | unique    |
-#### units_properties
+#### `generator_units_properties` / `storage_units_properties` (links unit_id → unit table, prop_id → properties)
 | Column              | Data type |
 |---------------------|-----------|
 | unit_id             | int fk    |
-| param_id            | int fk    |
-| (unit_id, param_id) | pk        |
+| prop_id             | int fk    |
+| (unit_id, prop_id)  | pk        |
 
-## 4. Marts
+## 5. Marts
 - **Number of installations** pivot table (region / energy source)
 - **Generation capacity pivot** table (region / energy source)
 - **Storage capacity** pivot table (region / energy source)

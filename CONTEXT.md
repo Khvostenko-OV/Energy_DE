@@ -57,7 +57,7 @@ A generated staging unit_id for units lacking a reference ID (39 solar rows), de
 ### Geography
 
 **Boundaries**:
-The single level-coded `raw.boundaries` table of administrative and maritime polygons (0 country outline, 1 regions + EEZ, 2 districts, 3 municipalities) used to assign each unit its region, district, and municipality by spatial join.
+The single level-coded `service.boundaries` table of administrative and maritime polygons (0 country outline, 1 regions + EEZ, 2 districts, 3 municipalities) used to assign each unit its region, district, and municipality by spatial join.
 
 **Region**:
 A Bundesland (federal state) or, for offshore units, the sea/EEZ area they fall in. A unit that joins to no boundary row keeps a null region, is flagged `collision`, and is reported under the "outside" bucket in the marts.
@@ -82,10 +82,13 @@ _Avoid_: Position, Lat/lng
 A dated snapshot table `raw.<source>_<YYYYMMDD>_<n>` produced by one extract load. Every load appends a new version; versions are never dropped or overwritten.
 
 **Load signature**:
-The `(filename, filesize, modified_at)` triplet recorded in `loaded_files`. A file whose signature is already logged is skipped on extract unless forced with `-f`; `-f` appends another raw version and log row.
+The `(filename, filesize, modified_at)` triplet recorded in `service.loaded_files`. A file whose signature is already logged is skipped on extract unless forced with `-f`; `-f` appends another raw version and log row.
 
 **Raw**:
-The extract layer: versioned per-source tables with secondary attributes folded into a `secondary_attributes` jsonb column, plus the `loaded_files` log and the level-coded `boundaries` table.
+The extract layer: versioned per-source unit tables with secondary attributes folded into a `secondary_attributes` jsonb column. Records only — the load-signature log and the boundary reference layer live in the Service schema (see Service).
+
+**Service**:
+The operational-metadata schema, deliberately separate from the versioned raw datalake: the `loaded_files` log (see Load signature) and the non-versioned level-coded `boundaries` reference layer used by the transform spatial joins. Non-versioned by design; only the unit tables are versioned.
 
 **Staging**:
 The transform layer: raw rows enriched with region, district, and municipality via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`). Staging carries both the `geometry` point and explicit `x_coordinates` / `y_coordinates`.
