@@ -71,7 +71,7 @@ MART_DEFINITIONS: dict[str, _MartDefinition] = {
         select_sql=f"""
             SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
                    energy_source,
-                   ROUND(SUM(installed_capacity)::numeric, 6)
+                   ROUND(COALESCE(SUM(installed_capacity), 0)::numeric, 6)
                        AS generation_capacity
             FROM {CORE_SCHEMA}.generators
             WHERE {_ACTIVE}
@@ -84,7 +84,7 @@ MART_DEFINITIONS: dict[str, _MartDefinition] = {
         select_sql=f"""
             SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
                    storage_type AS source_type,
-                   ROUND(SUM(storage_capacity)::numeric, 6)
+                   ROUND(COALESCE(SUM(storage_capacity), 0)::numeric, 6)
                        AS storage_capacity
             FROM {CORE_SCHEMA}.storages
             WHERE {_ACTIVE}

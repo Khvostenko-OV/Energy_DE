@@ -384,8 +384,48 @@ class TestActiveOnly:
 
 
 # ------------------------------------------------------------------ #
-#  "outside" region bucket                                             #
+#  NULL handling — all-NULL capacity groups report 0, never NULL      #
 # ------------------------------------------------------------------ #
+
+
+class TestNullValues:
+    def test_null_generator_capacity_group_reports_zero(self, _loaded_core, _marts):
+        region = "Marts_Null_Cap"
+        ref_id = _insert_generator(region=region, capacity=None)
+        build_marts()
+        try:
+            with ENGINE.connect() as conn:
+                value = conn.execute(
+                    text(
+                        f"SELECT generation_capacity FROM {MARTS_SCHEMA}.generation_capacity "
+                        "WHERE region = :region AND energy_source = 'wind'"
+                    ),
+                    {"region": region},
+                ).scalar()
+            assert value is not None, "expected a row for the all-NULL capacity group"
+            assert value == 0, f"expected 0, got {value!r}"
+        finally:
+            _delete_probe("generators", ref_id)
+            build_marts()
+
+    def test_null_storage_capacity_group_reports_zero(self, _loaded_core, _marts):
+        region = "Marts_Null_Cap"
+        ref_id = _insert_storage(region=region, capacity=None)
+        build_marts()
+        try:
+            with ENGINE.connect() as conn:
+                value = conn.execute(
+                    text(
+                        f"SELECT storage_capacity FROM {MARTS_SCHEMA}.storage_capacity "
+                        "WHERE region = :region AND source_type = 'Battery'"
+                    ),
+                    {"region": region},
+                ).scalar()
+            assert value is not None, "expected a row for the all-NULL capacity group"
+            assert value == 0, f"expected 0, got {value!r}"
+        finally:
+            _delete_probe("storages", ref_id)
+            build_marts()
 
 
 class TestOutsideBucket:
