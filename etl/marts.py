@@ -23,7 +23,7 @@ from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
 from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_REGION
-from etl.db_utils import _ensure_schema
+from etl.db_utils import _ensure_schema, _table_exists
 from etl.reports import MartsReport
 from etl.verify import _verify_marts
 
@@ -70,7 +70,9 @@ MART_DEFINITIONS: dict[str, _MartDefinition] = {
         value="generation_capacity",
         select_sql=f"""
             SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
-                   energy_source, SUM(installed_capacity) AS generation_capacity
+                   energy_source,
+                   ROUND(SUM(installed_capacity)::numeric, 6)
+                       AS generation_capacity
             FROM {CORE_SCHEMA}.generators
             WHERE {_ACTIVE}
             GROUP BY COALESCE(region, '{OUTSIDE_REGION}'), energy_source
@@ -82,7 +84,8 @@ MART_DEFINITIONS: dict[str, _MartDefinition] = {
         select_sql=f"""
             SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
                    storage_type AS source_type,
-                   SUM(storage_capacity) AS storage_capacity
+                   ROUND(SUM(storage_capacity)::numeric, 6)
+                       AS storage_capacity
             FROM {CORE_SCHEMA}.storages
             WHERE {_ACTIVE}
             GROUP BY COALESCE(region, '{OUTSIDE_REGION}'), storage_type
@@ -104,11 +107,23 @@ def build_marts(engine: Engine | None = None) -> MartsReport:
     start = time.perf_counter()
     try:
         engine = engine or get_engine()
-        report.created = _create_marts(engine)
-        report.refresh_times = _refresh_marts(engine)
-        report.refreshed = list(MART_DEFINITIONS)
-        report.errors = _verify_marts(engine, MART_DEFINITIONS)
-        report.verified = not report.errors
+        missing = [
+            t
+            for t in ("generators", "storages")
+            if not _table_exists(engine, t, CORE_SCHEMA)
+        ]
+        if missing:
+            report.errors.append(
+                "core tables missing: "
+                + ", ".join(f"{CORE_SCHEMA}.{t}" for t in missing)
+                + "; run 'python -m etl load' first"
+            )
+        else:
+            report.created = _create_marts(engine)
+            report.refresh_times = _refresh_marts(engine)
+            report.refreshed = list(MART_DEFINITIONS)
+            report.errors = _verify_marts(engine, MART_DEFINITIONS)
+            report.verified = not report.errors
     except Exception as e:
         report.errors.append(f"Marts failed: {e}")
         log.exception("Marts failed")

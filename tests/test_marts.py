@@ -455,3 +455,22 @@ class TestVerification:
         assert any("installation_counts" in e for e in errors)
         assert any("generation_capacity" in e for e in errors)
         assert any("storage_capacity" in e for e in errors)
+
+
+# ------------------------------------------------------------------ #
+#  Core precondition — must run last (drops core tables)              #
+# ------------------------------------------------------------------ #
+
+
+class TestCorePrecondition:
+    def test_missing_core_tables_fails_cleanly(self, _loaded_core):
+        """A build without the core tables fails gracefully, not with a raw DDL error."""
+        _drop_core()
+        report = build_marts()
+        assert not report.passed
+        assert report.created == []
+        assert report.refreshed == []
+        assert any(
+            "core.generators" in e and "core.storages" in e for e in report.errors
+        ), f"expected a clear core-tables-missing error, got {report.errors}"
+        # _loaded_core teardown will drop whatever remains
