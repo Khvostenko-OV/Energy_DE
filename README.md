@@ -24,9 +24,9 @@ Greenfield. The pipeline is not implemented yet. Design work is done:
 
 | What                                                                 | Where                                     |
 |----------------------------------------------------------------------|-------------------------------------------|
-| Raw unit GPKG files (6 sources incl. solar, wind, storage)           | `data/geo/*.gpkg`                         |
-| Germany boundaries (state, regions + EEZ, districts, municipalities) | `data/geo/germany_*.gpkg`                 |
-| Source documentation                                                 | `data/geo/data_descriptor_V20260203.xlsx` |
+| Raw unit GPKG files (6 sources incl. solar, wind, storage)           | `data/sources/*.gpkg`                     |
+| Germany boundaries (state, regions + EEZ, districts, municipalities) | `data/boundaries/germany_*.gpkg`          |
+| Source documentation                                                 | `data/sources/data_descriptor_V20260203.xlsx` |
 
 All files are 2026-02-03 versions. The files are authoritative.
 

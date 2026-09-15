@@ -149,10 +149,10 @@ def run_all():
     ctx = click.get_current_context()
 
     click.echo("Loading boundaries...")
-    ctx.invoke(boundaries, target="data/geo/boundaries.txt")
+    ctx.invoke(boundaries, target="data/boundaries/boundaries.txt")
 
     click.echo("\nRunning extract stage...")
-    ctx.invoke(extract, target="data/geo/sources.txt", force=False)
+    ctx.invoke(extract, target="data/sources/sources.txt", force=False)
 
     click.echo("\nRunning transform stage for all sources...")
     ctx.invoke(transform)

@@ -14,9 +14,9 @@ single authoritative source for data models, table schemas (raw/staging/core/mar
 ## Location of your data
 | What | Where |
 |------|-------|
-| Raw unit GPKG files (8 sources incl. Solar polygons, cogeneration) | `data/geo/*.gpkg` |
-| Germany boundaries (state, regions+EEZ, districts, municipalities) | `data/geo/germany_*.gpkg` |
-| Source documentation | `data/geo/data_descriptor_V20260203.xlsx` |
+| Raw unit GPKG files (8 sources incl. Solar polygons, cogeneration) | `data/sources/*.gpkg` |
+| Germany boundaries (state, regions+EEZ, districts, municipalities) | `data/boundaries/germany_*.gpkg` |
+| Source documentation | `data/sources/data_descriptor_V20260203.xlsx` |
 
 Gotchas:
 - **Actual filenames/versions differ from `TechnicalSpecification.md`**: files are `V20260203`
