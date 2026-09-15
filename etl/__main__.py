@@ -6,6 +6,7 @@ import click
 from etl.config import SOURCE_NAMES
 from etl.extract import extract_boundaries, extract_source
 from etl.load import load_generators, load_storages
+from etl.marts import build_marts
 from etl.transform import transform_source
 from etl.utils import _read_manifest
 
@@ -118,6 +119,25 @@ def load():
 
 
 @cli.command()
+def marts():
+    """Create, refresh, and verify the marts materialized views.
+
+    Ensures the marts schema and the three stored pivots exist
+    (installation_counts, generation_capacity, storage_capacity), refreshes
+    them from core at region grain (active units only, region-null units
+    under the "outside" bucket), and verifies the stored pivots reconcile to
+    the live core aggregates — failing loudly and exiting non-zero on drift.
+    """
+    report = build_marts()
+
+    click.echo(f"\nMarts report:")
+    click.echo(report.summary())
+
+    if not report.passed:
+        raise SystemExit(1)
+
+
+@cli.command()
 def run_all():
     """Run all ETL stages."""
     ctx = click.get_current_context()
@@ -134,6 +154,9 @@ def run_all():
 
     click.echo("\nRunning load stage for generators and storages...")
     ctx.invoke(load)
+
+    click.echo("\nRunning marts stage...")
+    ctx.invoke(marts)
 
     click.echo("\nAll stages complete.")
 

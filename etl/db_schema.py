@@ -8,6 +8,12 @@ RAW_SCHEMA = "raw"
 STAGING_SCHEMA = "stage"
 CORE_SCHEMA = "core"
 SERVICE_SCHEMA = "serv"
+MARTS_SCHEMA = "marts"
+
+# Region key shown for units the spatial join left outside every boundary; a
+# region-null unit is a load-stage collision that still reaches core, so the
+# mart pivots report it under this bucket instead of a NULL key (#9).
+OUTSIDE_REGION = "outside"
 
 # Generator sources consolidated into core.generators (storage is separate).
 STAGING_GENERATOR_SOURCES = ("bio", "gas", "hydro", "solar", "wind")

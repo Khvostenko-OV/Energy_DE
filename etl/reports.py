@@ -136,3 +136,31 @@ class LoadReport(ReportBase):
         ]
         lines.extend(self._error_lines())
         return "\n".join(lines)
+
+
+@dataclass
+class MartsReport(ReportBase):
+    """Result of building (creating/refreshing/verifying) the marts views."""
+
+    created: list[str] = field(default_factory=list)
+    refreshed: list[str] = field(default_factory=list)
+    refresh_times: dict[str, float] = field(default_factory=dict)
+    verified: bool = False
+    errors: list[str] = field(default_factory=list)
+    total_time: float = 0.0
+
+    def summary(self) -> str:
+        lines = [
+            "  Created          : " + (", ".join(self.created) or "none"),
+            "  Refreshed        : " + (", ".join(self.refreshed) or "none"),
+            "  Refresh times    : "
+            + (
+                ", ".join(f"{k}: {t:.3f}s" for k, t in self.refresh_times.items())
+                or "-"
+            ),
+            f"  Verified         : {'yes' if self.verified else 'no'}",
+            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
+            f"  Total time       : {self.total_time:.3f}s",
+        ]
+        lines.extend(self._error_lines())
+        return "\n".join(lines)

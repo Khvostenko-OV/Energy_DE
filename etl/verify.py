@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+if TYPE_CHECKING:
+    from etl.marts import _MartDefinition
 
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
@@ -11,6 +16,7 @@ from etl.db_schema import (
     COLLISION_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
+    MARTS_SCHEMA,
     ONSHORE_IN_SEA_COLLISION_REASON,
     ONSHORE_SOURCES,
     RAW_SCHEMA,
@@ -729,4 +735,54 @@ def _verify_load_storages(engine: Engine, report: LoadReport) -> list[str]:
             "%d whitelist links, storage capacity %.1f kWh)",
             stored, core_props, core_links, float(core_cap or 0),
         )
+    return errors
+
+
+def _verify_marts(
+    engine: Engine, definitions: Mapping[str, _MartDefinition]
+) -> list[str]:
+    """Reconcile each stored pivot to a fresh aggregation of core.
+
+    For every mart the stored ``(region, pivot, value)`` cells are compared
+    against the live expected aggregation as a set difference (``EXCEPT``).
+    A row is drifted when a cell appears on one side but not the other —
+    either the mart carries a cell the expected aggregation does not, the
+    mart is missing a cell core warrants, or a stored ``value`` disagrees
+    with the expected one.  ``EXCEPT`` compares NULLs as equal, which is
+    exactly the outside-bucket / region-NULL semantics the pivots rely on.
+    The error list is non-empty on drift (fail loudly).
+    """
+    errors: list[str] = []
+    for name, defn in definitions.items():
+        p, v = defn.pivot, defn.value
+        mart_fq = f"{MARTS_SCHEMA}.{name}"
+        columns = f"region, {p}, {v}"
+
+        stale = (
+            f"SELECT COUNT(*) FROM ("
+            f"SELECT {columns} FROM {mart_fq} "
+            f"EXCEPT "
+            f"{defn.select_sql}) _d"
+        )
+        missing = (
+            f"SELECT COUNT(*) FROM ("
+            f"{defn.select_sql} "
+            f"EXCEPT "
+            f"SELECT {columns} FROM {mart_fq}) _d"
+        )
+
+        with engine.connect() as conn:
+            extra = int(conn.execute(text(stale)).scalar())
+            absent = int(conn.execute(text(missing)).scalar())
+
+        if extra or absent:
+            details = []
+            if extra:
+                details.append(f"{extra} stale/incorrect cell(s)")
+            if absent:
+                details.append(f"{absent} missing cell(s)")
+            errors.append(f"marts.{name} drifted from core: {', '.join(details)}")
+
+    if not errors:
+        log.info("Marts reconciled to core active-unit aggregates")
     return errors

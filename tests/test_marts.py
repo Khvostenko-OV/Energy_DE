@@ -1,0 +1,457 @@
+"""Integration tests for the marts materialized views (issue #9).
+
+Run against the live dev PostGIS (`DATABASE_URL`).  The module-scoped fixture
+loads both core kinds fresh, builds the three stored pivots, and refreshes
+them; read-only tests query that shared state.  Tests that mutate core or the
+views delete their probe rows and re-refresh before returning, so every later
+test sees marts reconciled to core.
+"""
+
+import os
+import uuid
+
+import pytest
+from sqlalchemy import create_engine, text
+
+from etl.config import SOURCE_NAMES
+from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_REGION
+from etl.load import load_generators, load_storages
+from etl.marts import MART_DEFINITIONS, build_marts, verify_marts
+from etl.transform import transform_source
+
+ENGINE = create_engine(os.environ["DATABASE_URL"])
+
+MART_NAMES = tuple(MART_DEFINITIONS)
+
+# (core_table, units_properties, properties) per unit-kind.
+GENERATOR_KIND = ("generators", "generator_units_properties", "generator_properties")
+STORAGE_KIND = ("storages", "storage_units_properties", "storage_properties")
+
+
+def _scalar(sql: str):
+    with ENGINE.connect() as conn:
+        return conn.execute(text(sql)).scalar()
+
+
+def _ensure_staging():
+    """Transform all six sources so the staging tables are fresh."""
+    for source in SOURCE_NAMES:
+        report = transform_source(source)
+        assert report.passed, report.errors
+
+
+def _drop_marts():
+    with ENGINE.begin() as conn:
+        for name in MART_NAMES:
+            conn.execute(
+                text(f"DROP MATERIALIZED VIEW IF EXISTS {MARTS_SCHEMA}.{name} CASCADE")
+            )
+
+
+def _drop_core():
+    with ENGINE.begin() as conn:
+        for table, links, props in (GENERATOR_KIND, STORAGE_KIND):
+            for tbl in (links, props):
+                conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.{tbl} CASCADE"))
+            conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.{table} CASCADE"))
+
+
+@pytest.fixture(scope="module")
+def _loaded_core():
+    """Load both core kinds fresh before the marts are built."""
+    _drop_marts()
+    _drop_core()
+    gen_report = load_generators()
+    sto_report = load_storages()
+    assert gen_report.passed, gen_report.errors
+    assert sto_report.passed, sto_report.errors
+    yield {"generators": gen_report, "storages": sto_report}
+    _drop_marts()
+    _drop_core()
+
+
+@pytest.fixture(scope="module")
+def _marts(_loaded_core):
+    """Build and refresh the marts views once per module."""
+    report = build_marts()
+    assert report.passed, report.errors
+    yield report
+    _drop_marts()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _staging_ready():
+    """Transform all sources once per module."""
+    _ensure_staging()
+
+
+# ------------------------------------------------------------------ #
+#  Table shape                                                         #
+# ------------------------------------------------------------------ #
+
+
+class TestTableShape:
+    def test_marts_schema_exists(self, _loaded_core, _marts):
+        n = _scalar(
+            "SELECT COUNT(*) FROM information_schema.schemata "
+            f"WHERE schema_name = '{MARTS_SCHEMA}'"
+        )
+        assert n == 1
+
+    def test_three_materialized_views_exist(self, _loaded_core, _marts):
+        with ENGINE.connect() as conn:
+            views = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT matviewname FROM pg_matviews "
+                        f"WHERE schemaname = '{MARTS_SCHEMA}'"
+                    )
+                ).fetchall()
+            }
+        assert views == set(MART_NAMES)
+
+    def test_installation_counts_columns(self, _loaded_core, _marts):
+        cols = self._column_names("installation_counts")
+        assert {"region", "energy_source", "installation_count"} <= cols, (
+            f"Missing columns: "
+            f"{({'region', 'energy_source', 'installation_count'} - cols)}"
+        )
+
+    def test_generation_capacity_columns(self, _loaded_core, _marts):
+        cols = self._column_names("generation_capacity")
+        assert {"region", "energy_source", "generation_capacity"} <= cols, (
+            f"Missing columns: "
+            f"{({'region', 'energy_source', 'generation_capacity'} - cols)}"
+        )
+
+    def test_storage_capacity_columns(self, _loaded_core, _marts):
+        cols = self._column_names("storage_capacity")
+        assert {"region", "source_type", "storage_capacity"} <= cols, (
+            f"Missing columns: "
+            f"{({'region', 'source_type', 'storage_capacity'} - cols)}"
+        )
+
+    def _column_names(self, view: str) -> set[str]:
+        with ENGINE.connect() as conn:
+            result = conn.execute(text(f"SELECT * FROM {MARTS_SCHEMA}.{view} LIMIT 0"))
+            return set(result.keys())
+
+
+# ------------------------------------------------------------------ #
+#  Shared helpers for the shared mart state                            #
+# ------------------------------------------------------------------ #
+
+ACTIVE = "decommissioning_date IS NULL OR decommissioning_date > CURRENT_DATE"
+
+
+def _cells(sql: str) -> dict[tuple[str, str], float]:
+    """Read an aggregate query into {(region, pivot): value} cells."""
+    with ENGINE.connect() as conn:
+        rows = conn.execute(text(sql)).fetchall()
+    return {(r[0], r[1]): float(r[2] or 0) for r in rows}
+
+
+def _mart_cells(view: str, pivot: str, value: str) -> dict[tuple[str, str], float]:
+    return _cells(f"SELECT region, {pivot}, {value} FROM {MARTS_SCHEMA}.{view}")
+
+
+def _assert_cells_equal(
+    expected_sql: str, view: str, pivot: str, value: str
+) -> None:
+    """Reconcile a stored pivot against a core aggregation (independent SQL)."""
+    expected = _cells(expected_sql)
+    stored = _mart_cells(view, pivot, value)
+    assert set(stored) == set(expected), (
+        f"{view} cell keys differ: only-in-mart="
+        f"{set(stored) - set(expected)}, only-in-core={set(expected) - set(stored)}"
+    )
+    for key in expected:
+        assert abs(stored[key] - expected[key]) < 0.01, (
+            f"{view}[{key}]: stored {stored[key]} != core {expected[key]}"
+        )
+
+
+def _null_regions(view: str) -> int:
+    return int(_scalar(f"SELECT COUNT(*) FROM {MARTS_SCHEMA}.{view} WHERE region IS NULL"))
+
+
+def _insert_generator(
+    *, region: str | None, decommissioning_date=None, capacity: float = 123.5
+) -> str:
+    """Insert a distinctive probe row into core.generators; return its id."""
+    ref_id = f"test_marts_probe_{uuid.uuid4().hex[:8]}"
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO {CORE_SCHEMA}.generators "
+                f"(energy_source, installed_capacity, commissioning_date, "
+                f"decommissioning_date, longitude, latitude, geo_accuracy, "
+                f"reference_id, reference_date, secondary_attributes, "
+                f"country_iso, region, district, municipality, collision) "
+                f"VALUES ('wind', :cap, '2010-01-01', :decommissioning_date, "
+                f"10.0, 50.0, 1, :ref, '2020-01-01 00:00:00', NULL, "
+                f"'DEU', :region, NULL, NULL, false)"
+            ),
+            {
+                "cap": capacity,
+                "decommissioning_date": decommissioning_date,
+                "ref": ref_id,
+                "region": region,
+            },
+        )
+    return ref_id
+
+
+def _insert_storage(
+    *, region: str | None, source_type: str = "Battery", capacity: float = 50.0
+) -> str:
+    """Insert a distinctive probe row into core.storages; return its id."""
+    ref_id = f"test_marts_probe_{uuid.uuid4().hex[:8]}"
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO {CORE_SCHEMA}.storages "
+                f"(energy_source, storage_type, storage_capacity, installed_capacity, "
+                f"commissioning_date, decommissioning_date, longitude, latitude, "
+                f"geo_accuracy, reference_id, reference_date, secondary_attributes, "
+                f"country_iso, region, district, municipality, collision) "
+                f"VALUES ('storage', :source_type, :cap, NULL, '2010-01-01', NULL, "
+                f"10.0, 50.0, 1, :ref, '2020-01-01 00:00:00', NULL, "
+                f"'DEU', :region, NULL, NULL, false)"
+            ),
+            {
+                "source_type": source_type,
+                "cap": capacity,
+                "ref": ref_id,
+                "region": region,
+            },
+        )
+    return ref_id
+
+
+def _delete_probe(table: str, ref_id: str) -> None:
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(f"DELETE FROM {CORE_SCHEMA}.{table} WHERE reference_id = :ref"),
+            {"ref": ref_id},
+        )
+
+
+def _set_decommissioning(table: str, ref_id: str, date: str | None) -> None:
+    with ENGINE.begin() as conn:
+        conn.execute(
+            text(
+                f"UPDATE {CORE_SCHEMA}.{table} "
+                f"SET decommissioning_date = :date WHERE reference_id = :ref"
+            ),
+            {"date": date, "ref": ref_id},
+        )
+
+
+# ------------------------------------------------------------------ #
+#  Build report contract                                              #
+# ------------------------------------------------------------------ #
+
+
+class TestBuildReport:
+    def test_created_all_three_on_fresh_build(self, _loaded_core, _marts):
+        assert _marts.created == list(MART_NAMES)
+
+    def test_refreshed_all_three(self, _loaded_core, _marts):
+        assert _marts.refreshed == list(MART_NAMES)
+
+    def test_refresh_times_recorded_for_all(self, _loaded_core, _marts):
+        assert set(_marts.refresh_times) == set(MART_NAMES)
+        assert all(t > 0 for t in _marts.refresh_times.values())
+
+    def test_verified_passes(self, _loaded_core, _marts):
+        assert _marts.verified
+        assert _marts.errors == []
+
+    def test_build_is_idempotent(self, _loaded_core, _marts):
+        """A second build creates nothing and still passes verification."""
+        again = build_marts()
+        assert again.created == []
+        assert again.refreshed == list(MART_NAMES)
+        assert again.verified
+        assert again.errors == []
+
+
+# ------------------------------------------------------------------ #
+#  Content reconciliation — pivots equal core active-unit aggregates  #
+# ------------------------------------------------------------------ #
+
+
+class TestContent:
+    def test_installation_counts_match_core(self, _loaded_core, _marts):
+        expected = f"""
+            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region, energy_source,
+                   COUNT(*) AS installation_count
+            FROM (
+                SELECT region, energy_source FROM {CORE_SCHEMA}.generators
+                WHERE {ACTIVE}
+                UNION ALL
+                SELECT region, energy_source FROM {CORE_SCHEMA}.storages
+                WHERE {ACTIVE}
+            ) active_units
+            GROUP BY region, energy_source
+        """
+        _assert_cells_equal(expected, "installation_counts", "energy_source", "installation_count")
+
+    def test_generation_capacity_matches_core(self, _loaded_core, _marts):
+        expected = f"""
+            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region, energy_source,
+                   SUM(installed_capacity) AS generation_capacity
+            FROM {CORE_SCHEMA}.generators
+            WHERE {ACTIVE}
+            GROUP BY region, energy_source
+        """
+        _assert_cells_equal(expected, "generation_capacity", "energy_source", "generation_capacity")
+
+    def test_storage_capacity_matches_core(self, _loaded_core, _marts):
+        expected = f"""
+            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
+                   storage_type AS source_type,
+                   SUM(storage_capacity) AS storage_capacity
+            FROM {CORE_SCHEMA}.storages
+            WHERE {ACTIVE}
+            GROUP BY region, storage_type
+        """
+        _assert_cells_equal(expected, "storage_capacity", "source_type", "storage_capacity")
+
+    def test_storage_capacity_keyed_by_source_type(self, _loaded_core, _marts):
+        """The storage pivot keys on source_type, not energy_source."""
+        with ENGINE.connect() as conn:
+            keys = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        f"SELECT DISTINCT source_type FROM {MARTS_SCHEMA}.storage_capacity "
+                        "ORDER BY 1"
+                    )
+                ).fetchall()
+            }
+        assert keys == {"Battery", "Pumped storage", "Hydrogen storage"}
+
+
+# ------------------------------------------------------------------ #
+#  Active units only + decommissioned exclusion                        #
+# ------------------------------------------------------------------ #
+
+
+class TestActiveOnly:
+    def test_decommissioned_generator_excluded(self, _loaded_core, _marts):
+        counts = _mart_cells("installation_counts", "energy_source", "installation_count")
+        caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
+        key = ("Bayern", "wind")
+        base_count, base_cap = counts[key], caps[key]
+
+        ref_id = _insert_generator(region="Bayern")
+        build_marts()
+        counts = _mart_cells("installation_counts", "energy_source", "installation_count")
+        caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
+        assert counts[key] == base_count + 1
+        assert abs(caps[key] - (base_cap + 123.5)) < 0.01
+
+        _set_decommissioning("generators", ref_id, "2000-01-01")
+        build_marts()
+        counts = _mart_cells("installation_counts", "energy_source", "installation_count")
+        caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
+        assert counts[key] == base_count
+        assert abs(caps[key] - base_cap) < 0.01
+
+        _delete_probe("generators", ref_id)
+        build_marts()
+
+    def test_decommissioned_storage_excluded(self, _loaded_core, _marts):
+        cells = _mart_cells("storage_capacity", "source_type", "storage_capacity")
+        key = ("Bayern", "Battery")
+        base = cells[key]
+
+        ref_id = _insert_storage(region="Bayern")
+        build_marts()
+        cells = _mart_cells("storage_capacity", "source_type", "storage_capacity")
+        assert abs(cells[key] - (base + 50.0)) < 0.01
+
+        _set_decommissioning("storages", ref_id, "2000-01-01")
+        build_marts()
+        cells = _mart_cells("storage_capacity", "source_type", "storage_capacity")
+        assert abs(cells[key] - base) < 0.01
+
+        _delete_probe("storages", ref_id)
+        build_marts()
+
+
+# ------------------------------------------------------------------ #
+#  "outside" region bucket                                             #
+# ------------------------------------------------------------------ #
+
+
+class TestOutsideBucket:
+    def test_region_null_units_reported_as_outside(self, _loaded_core, _marts):
+        counts = _mart_cells("installation_counts", "energy_source", "installation_count")
+        caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
+        out_key = (OUTSIDE_REGION, "wind")
+        base_count, base_cap = counts[out_key], caps[out_key]
+
+        ref_id = _insert_generator(region=None)
+        build_marts()
+
+        for view in MART_NAMES:
+            assert _null_regions(view) == 0, f"{view} has a NULL-region row"
+
+        counts = _mart_cells("installation_counts", "energy_source", "installation_count")
+        caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
+        assert counts[out_key] == base_count + 1
+        assert abs(caps[out_key] - (base_cap + 123.5)) < 0.01
+
+        _delete_probe("generators", ref_id)
+        build_marts()
+
+    def test_outside_cells_match_region_null_core_rows(self, _loaded_core, _marts):
+        expected = f"""
+            SELECT '{OUTSIDE_REGION}' AS region, energy_source, COUNT(*) AS installation_count
+            FROM {CORE_SCHEMA}.generators
+            WHERE ({ACTIVE}) AND region IS NULL
+            GROUP BY energy_source
+            UNION ALL
+            SELECT '{OUTSIDE_REGION}' AS region, energy_source, COUNT(*) AS installation_count
+            FROM {CORE_SCHEMA}.storages
+            WHERE ({ACTIVE}) AND region IS NULL
+            GROUP BY energy_source
+        """
+        stored = {
+            key: v
+            for key, v in _mart_cells(
+                "installation_counts", "energy_source", "installation_count"
+            ).items()
+            if key[0] == OUTSIDE_REGION
+        }
+        core = _cells(expected)
+        assert stored == core
+
+
+# ------------------------------------------------------------------ #
+#  Verification — fail loudly on drift                                 #
+# ------------------------------------------------------------------ #
+
+
+class TestVerification:
+    def test_verify_passes_when_fresh(self, _loaded_core, _marts):
+        assert verify_marts(ENGINE) == []
+
+    def test_verify_fails_on_unrefreshed_core_change(self, _loaded_core, _marts):
+        gen_id = _insert_generator(region="Bayern")
+        sto_id = _insert_storage(region="Bayern")
+        try:
+            errors = verify_marts(ENGINE)
+        finally:
+            _delete_probe("generators", gen_id)
+            _delete_probe("storages", sto_id)
+            build_marts()
+
+        assert errors, "verify_marts must fail loudly after an unrefreshed core change"
+        assert any("installation_counts" in e for e in errors)
+        assert any("generation_capacity" in e for e in errors)
+        assert any("storage_capacity" in e for e in errors)
