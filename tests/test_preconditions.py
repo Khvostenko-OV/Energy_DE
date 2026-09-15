@@ -32,6 +32,27 @@ def test_transform_fails_cleanly_when_raw_tables_missing():
     assert "run 'python -m etl extract' first" in message
 
 
+def test_transform_fails_cleanly_when_boundaries_missing(monkeypatch):
+    monkeypatch.setattr(
+        "etl.transform._latest_table_version",
+        lambda engine, source: "nonexistent_source_20260915_1",
+    )
+    monkeypatch.setattr(
+        "etl.transform._table_exists",
+        lambda engine, table, schema: table != "boundaries",
+    )
+
+    report = transform_source("wind")
+
+    assert not report.passed
+    assert report.raw_table == "nonexistent_source_20260915_1"
+    assert report.rows_read == 0
+    assert len(report.errors) == 1
+    message = report.errors[0]
+    assert "boundaries table missing for source 'wind'" in message
+    assert "run 'python -m etl boundaries' first" in message
+
+
 def test_load_fails_cleanly_when_staging_tables_missing():
     kind = _CoreKind(
         core_table="generators",

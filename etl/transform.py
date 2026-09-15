@@ -20,7 +20,7 @@ from etl.db_schema import (
     STAGING_SCHEMA,
     SYNTHETIC_ID_PREFIX,
 )
-from etl.db_utils import _create_staging_tables, _ensure_schema
+from etl.db_utils import _create_staging_tables, _ensure_schema, _table_exists
 from etl.reports import TransformReport
 from etl.utils import _latest_table_version
 from etl.verify import _verify_transform
@@ -65,6 +65,16 @@ def transform_source(source: str) -> TransformReport:
             log.info("Total time: %.3fs", report.total_time)
             return report
         report.raw_table = raw_table
+
+        if not _table_exists(engine, "boundaries", SERVICE_SCHEMA):
+            report.errors.append(
+                f"boundaries table missing for source {source!r}; "
+                "run 'python -m etl boundaries' first"
+            )
+            report.total_time = time.perf_counter() - start
+            log.error("Transform failed for %s: %s", source, report.errors[0])
+            log.info("Total time: %.3fs", report.total_time)
+            return report
 
         log.info("Transforming %s from %s.%s", source, RAW_SCHEMA, raw_table)
         t = time.perf_counter()
