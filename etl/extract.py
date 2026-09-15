@@ -190,7 +190,7 @@ def _build_secondary_attributes(df: pandas.DataFrame) -> int:
 
 
 def extract_boundaries(manifest: Path) -> BoundariesReport:
-    """Load the boundary reference files listed in a manifest into serv.boundaries.
+    """Load the boundary reference files listed in a manifest into service.boundaries.
 
     MANIFEST lists one germany_*.gpkg file per line, resolved against the
     manifest's directory; each file's level (0-3) is read from its name. Every

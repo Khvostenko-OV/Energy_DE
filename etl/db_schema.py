@@ -7,7 +7,7 @@ transform, and verification layers all read the same layout.
 RAW_SCHEMA = "raw"
 STAGING_SCHEMA = "stage"
 CORE_SCHEMA = "core"
-SERVICE_SCHEMA = "serv"
+SERVICE_SCHEMA = "service"
 MARTS_SCHEMA = "marts"
 
 # Region key shown for units the spatial join left outside every boundary; a
