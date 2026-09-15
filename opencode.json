@@ -15,6 +15,7 @@
       "cat *": "allow",
       "docker *": "allow",
       "echo *": "allow",
+      "export *": "allow",
       "find *": "allow",
       "sort *": "allow",
       "mkdir *": "allow",
