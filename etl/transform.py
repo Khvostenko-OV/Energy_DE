@@ -9,7 +9,7 @@ import geopandas as gpd
 import numpy
 import pandas
 
-from etl.config import get_engine
+from etl.config import SOURCE_NAMES, get_engine
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
     BOUNDARY_LEVEL_COLUMNS,
@@ -35,19 +35,23 @@ QUALITY_DATES = "bad pair commissioning_date/decommissioning_date"
 QUALITY_COORDS = "x/y coordinates disagree with geometry"
 
 
-def transform_source(source: str) -> TransformReport:
+def transform_source(source: str = "all") -> TransformReport:
     """Transform the latest raw version of one source into its staging tables.
 
-    Reads raw.<source>_<YYYYMMDD>_<n> (the latest version), assigns each unit
-    its staging identity (natural key from reference_id, synthetic hash where
-    absent), enriches with region/district/municipality via a spatial join
-    against the boundary reference layers, applies the quality gate, and
-    decomposes the whitelisted secondary attributes into normalized property
-    tables (the rest staying in the reduced `secondary_attributes` json).
-    A bad quality row stays in staging but is never a candidate for core; a
-    region-null row is not bad quality (spec v2.2 leaves that to the load
-    stage's collision checks).
+    SOURCE is one of SOURCE_NAMES, or "all" (the default) to transform every
+    source.  Reads raw.<source>_<YYYYMMDD>_<n> (the latest version), assigns
+    each unit its staging identity (natural key from reference_id, synthetic
+    hash where absent), enriches with region/district/municipality via a
+    spatial join against the boundary reference layers, applies the quality
+    gate, and decomposes the whitelisted secondary attributes into normalized
+    property tables (the rest staying in the reduced `secondary_attributes`
+    json).  A bad quality row stays in staging but is never a candidate for
+    core; a region-null row is not bad quality (spec v2.2 leaves that to the
+    load stage's collision checks).
     """
+    if source == "all":
+        return _transform_all()
+
     report = TransformReport(source=source)
     start = time.perf_counter()
     try:
@@ -179,6 +183,48 @@ def transform_source(source: str) -> TransformReport:
     log.info("Total time: %.3fs", report.total_time)
 
     return report
+
+
+def _transform_all() -> TransformReport:
+    """Transform every source in SOURCE_NAMES and merge the reports.
+
+    ``transform_source('all')`` runs each source through the single-source
+    path and folds the reports into one: scalar counters and per-level
+    join_unmapped sums across sources, quality_reasons keyed by their exact
+    reason strings, raw_table set to a comma-joined list (or "all" when none
+    transformed), and errors concatenated per source.  A source whose raw
+    tables or boundaries are missing contributes its own clean error, so the
+    merged report fails without raising.
+    """
+    reports = [transform_source(s) for s in SOURCE_NAMES]
+
+    merged = TransformReport(source="all")
+    merged.rows_read = sum(r.rows_read for r in reports)
+    merged.rows_written = sum(r.rows_written for r in reports)
+    merged.synthetic_ids = sum(r.synthetic_ids for r in reports)
+    merged.bad_quality = sum(r.bad_quality for r in reports)
+    merged.properties_count = sum(r.properties_count for r in reports)
+    merged.links_count = sum(r.links_count for r in reports)
+    for level in ("region", "district", "municipality"):
+        merged.join_unmapped[level] = sum(r.join_unmapped.get(level, 0) for r in reports)
+    for r in reports:
+        for reason, count in r.quality_reasons.items():
+            merged.quality_reasons[reason] = merged.quality_reasons.get(reason, 0) + count
+    for r in reports:
+        merged.errors.extend(r.errors)
+    raw_tables = [r.raw_table for r in reports if r.raw_table]
+    merged.raw_table = ", ".join(raw_tables) if raw_tables else "all"
+    merged.total_time = sum(r.total_time for r in reports)
+    if merged.errors:
+        for err in merged.errors:
+            log.error("Transform failed: %s", err)
+    else:
+        log.info(
+            "Transform passed for all sources (%d rows)",
+            merged.rows_read,
+        )
+    log.info("Total time: %.3fs", merged.total_time)
+    return merged
 
 
 def _unit_ids(df: pandas.DataFrame, source: str) -> pandas.Series:

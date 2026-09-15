@@ -54,7 +54,7 @@ def extract(target: str, force: bool):
 @cli.command()
 @click.argument("target")
 def boundaries(target: str):
-    """Load boundary reference files listed in a manifest into serv.boundaries.
+    """Load boundary reference files listed in a manifest into service.boundaries.
 
     TARGET is the manifest file path. Each file name on its own line is
     resolved against the manifest's directory; the first file replaces the
@@ -74,18 +74,22 @@ def boundaries(target: str):
 
 
 @cli.command()
-@click.argument("source", type=click.Choice(SOURCE_NAMES))
+@click.argument(
+    "source",
+    type=click.Choice(SOURCE_NAMES + ("all",)),
+    default="all",
+)
 def transform(source: str):
-    """Transform the latest raw version of SOURCE into its staging tables.
+    """Transform SOURCE into its staging tables (default: all sources).
 
-    Builds the staging row (unit_id — natural from reference_id or synthetic
-    where absent, canonical energy_source, geo_accuracy, country_iso,
-    geometry), spatially joins boundaries to assign region/district/
-    municipality, runs the quality gate, and decomposes the whitelisted
-    secondary attributes into normalized properties (the rest staying in the
-    reduced secondary_attributes json). A region-null row is not bad quality
-    (spec v2.2). Storage staging additionally carries its storage shape
-    (storage_type, storage_capacity).
+    SOURCE is one of the six unit sources or "all".  Builds the staging row
+    (unit_id — natural from reference_id or synthetic where absent, canonical
+    energy_source, geo_accuracy, country_iso, geometry), spatially joins
+    boundaries to assign region/district/municipality, runs the quality gate,
+    and decomposes the whitelisted secondary attributes into normalized
+    properties (the rest staying in the reduced secondary_attributes json). A
+    region-null row is not bad quality (spec v2.2). Storage staging
+    additionally carries its storage shape (storage_type, storage_capacity).
     """
     report = transform_source(source)
 
