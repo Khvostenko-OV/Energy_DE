@@ -5,6 +5,7 @@
     "bash": {
       "*": "ask",
       "ls*": "allow",
+      "ps*": "allow",
       "cd *": "allow",
       "wc *": "allow",
       "rg *": "allow",
@@ -23,6 +24,7 @@
       "psql *": "allow",
       "head *": "allow",
       "tail *": "allow",
+      "sleep *": "allow",
       "source *": "allow",
       "python *": "allow",
       "python3 *": "allow",
