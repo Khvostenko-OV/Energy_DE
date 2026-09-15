@@ -1,4 +1,0 @@
-germany_boundary.gpkg
-germany_regions.gpkg
-germany_districts.gpkg
-germany_munis.gpkg
