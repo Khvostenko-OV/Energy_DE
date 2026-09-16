@@ -21,11 +21,15 @@ server = app.server
 
 app.layout = html.Div(
     [
-        dcc.Graph(id="units-map", config={"displayModeBar": False}),
+        dcc.Graph(
+            id="units-map",
+            config={"displayModeBar": False},
+            style={"height": "100vh"},
+        ),
         # Data-less store drives the initial page-load callback.
         dcc.Store(id="units-store", data={}),
     ],
-    style={"height": "100vh"},
+    style={"height": "100vh", "margin": 0},
 )
 
 
