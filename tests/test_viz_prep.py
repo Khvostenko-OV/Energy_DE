@@ -115,7 +115,7 @@ def _db_count(level: int) -> int:
 
 
 def test_generation_report_passes_and_writes_all_levels(tmp_path):
-    report = generate_boundaries_geojson(tmp_path, engine=ENGINE)
+    report = generate_boundaries_geojson(tmp_path)
 
     assert report.passed, report.errors
     assert report.files == list(BOUNDARY_GEOJSON_FILES.values())
@@ -125,7 +125,7 @@ def test_generation_report_passes_and_writes_all_levels(tmp_path):
 
 
 def test_feature_counts_match_service_boundaries(tmp_path):
-    generate_boundaries_geojson(tmp_path, engine=ENGINE)
+    generate_boundaries_geojson(tmp_path)
 
     for level, filename in BOUNDARY_GEOJSON_FILES.items():
         data = json.loads((tmp_path / filename).read_text())
@@ -133,7 +133,7 @@ def test_feature_counts_match_service_boundaries(tmp_path):
 
 
 def test_generated_geometries_are_valid(tmp_path):
-    generate_boundaries_geojson(tmp_path, engine=ENGINE)
+    generate_boundaries_geojson(tmp_path)
     assert _verify_viz_prep(ENGINE, tmp_path) == []
 
     for level, filename in BOUNDARY_GEOJSON_FILES.items():
@@ -144,7 +144,7 @@ def test_generated_geometries_are_valid(tmp_path):
 
 
 def test_verify_detects_missing_feature(tmp_path):
-    generate_boundaries_geojson(tmp_path, engine=ENGINE)
+    generate_boundaries_geojson(tmp_path)
 
     path = tmp_path / BOUNDARY_GEOJSON_FILES[1]
     data = json.loads(path.read_text())

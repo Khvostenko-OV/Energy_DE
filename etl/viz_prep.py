@@ -19,7 +19,6 @@ from pathlib import Path
 import geopandas as gpd
 import numpy
 import shapely
-from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
 from etl.db_schema import BOUNDARY_GEOJSON_FILES, SERVICE_SCHEMA
@@ -56,7 +55,7 @@ def _simplify_geometry(geometry: shapely.Geometry) -> shapely.Geometry:
     return rounded
 
 
-def generate_boundaries_geojson(outdir: Path, engine: Engine | None = None) -> VizPrepReport:
+def generate_boundaries_geojson(outdir: Path) -> VizPrepReport:
     """Write per-level boundary GeoJSON files and verify them.
 
     Reads `service.boundaries` rows at levels 1-3 via GeoPandas, simplifies
@@ -70,7 +69,7 @@ def generate_boundaries_geojson(outdir: Path, engine: Engine | None = None) -> V
     try:
         outdir = Path(outdir)
         outdir.mkdir(parents=True, exist_ok=True)
-        engine = engine or get_engine()
+        engine = get_engine()
 
         gdf = gpd.read_postgis(
             f"SELECT name, area, level, geometry FROM {SERVICE_SCHEMA}.boundaries "
