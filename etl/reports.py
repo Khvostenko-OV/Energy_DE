@@ -140,6 +140,32 @@ class LoadReport(ReportBase):
 
 
 @dataclass
+class VizPrepReport(ReportBase):
+    """Result of preparing boundary GeoJSON for the visualization layer."""
+
+    outdir: str = ""
+    files: list[str] = field(default_factory=list)
+    features_by_level: dict[int, int] = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+    total_time: float = 0.0
+
+    def summary(self) -> str:
+        lines = [
+            f"  Output dir       : {self.outdir or '-'}",
+            "  Files            : " + (", ".join(self.files) or "-"),
+            "  Features/level   : "
+            + (
+                ", ".join(f"{k}={v}" for k, v in sorted(self.features_by_level.items()))
+                or "-"
+            ),
+            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
+            f"  Total time       : {self.total_time:.3f}s",
+        ]
+        lines.extend(self._error_lines())
+        return "\n".join(lines)
+
+
+@dataclass
 class MartsReport(ReportBase):
     """Result of building (creating/refreshing/verifying) the marts views."""
 

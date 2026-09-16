@@ -94,6 +94,10 @@ BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
 BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
 
+# Levels rendered in the Dash choropleth (0, the country outline, is not
+# needed) mapped to their generated GeoJSON file names.
+BOUNDARY_GEOJSON_FILES = {1: "level_1.geojson", 2: "level_2.geojson", 3: "level_3.geojson"}
+
 CORE_GENERATORS_COLUMNS = (
     "unit_id",
     "energy_source",

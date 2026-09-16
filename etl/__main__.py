@@ -9,6 +9,7 @@ from etl.load import load_generators, load_storages
 from etl.marts import build_marts
 from etl.transform import transform_sources
 from etl.utils import _read_manifest
+from etl.viz_prep import generate_boundaries_geojson
 
 
 @click.group()
@@ -123,6 +124,27 @@ def load():
         click.echo(report.summary())
 
     if any(not report.passed for report in reports):
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("outdir", type=click.Path(file_okay=False, path_type=Path))
+def boundaries_geojson(outdir: Path):
+    """Write simplified boundary GeoJSON per level for the choropleth layer.
+
+    Reads the boundary reference layer (service.boundaries, levels 1-3) via
+    GeoPandas, simplifies each polygon (Douglas-Peucker) and rounds its
+    coordinates to ~6 decimals, then writes one GeoJSON file per level
+    (level_1.geojson, level_2.geojson, level_3.geojson) into OUTDIR.  The
+    generated files are verified against the stored feature counts, failing
+    loudly on drift.
+    """
+    report = generate_boundaries_geojson(outdir)
+
+    click.echo("\nBoundary GeoJSON report:")
+    click.echo(report.summary())
+
+    if not report.passed:
         raise SystemExit(1)
 
 

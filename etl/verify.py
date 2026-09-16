@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sqlalchemy import text
@@ -12,6 +14,7 @@ if TYPE_CHECKING:
 
 from etl.db_schema import (
     BAD_QUALITY_PROPERTY,
+    BOUNDARY_GEOJSON_FILES,
     CLOSE_LOCATION_REASON,
     COLLISION_PROPERTY,
     CORE_SCHEMA,
@@ -33,18 +36,23 @@ from etl.reports import ExtractionReport, LoadReport, TransformReport
 log = logging.getLogger(__name__)
 
 
+def _boundary_level_counts(engine: Engine) -> dict[int, int]:
+    """Map each service.boundaries level to the number of rows stored."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT level, COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
+                "GROUP BY level"
+            )
+        ).fetchall()
+    return {int(level): int(count) for level, count in rows}
+
+
 def _verify_boundaries(engine: Engine) -> list[str]:
     """Verify the boundaries table carries levels 0-3, one level-0 row, and areas."""
     errors: list[str] = []
+    counts = _boundary_level_counts(engine)
     with engine.connect() as conn:
-        counts = dict(
-            conn.execute(
-                text(
-                    f"SELECT level, COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
-                    f"GROUP BY level ORDER BY level"
-                )
-            ).fetchall()
-        )
         names = conn.execute(
             text(
                 f"SELECT level, name FROM {SERVICE_SCHEMA}.boundaries "
@@ -73,6 +81,37 @@ def _verify_boundaries(engine: Engine) -> list[str]:
             level_names = ", ".join(f"{row[1]}" for row in names.fetchall())
             log.info("Boundaries verified (%s rows; sample names: %s)", levels, level_names)
 
+    return errors
+
+
+def _verify_viz_prep(engine: Engine, outdir: Path) -> list[str]:
+    """Verify the generated boundary GeoJSON files against service.boundaries.
+
+    For every boundary level (1-3) the level's GeoJSON file must exist in
+    OUTDIR and carry exactly as many features as the level has rows in
+    service.boundaries.  Returns a list of error strings, empty on a pass.
+    """
+    errors: list[str] = []
+    levels = _boundary_level_counts(engine)
+
+    for level in sorted(BOUNDARY_GEOJSON_FILES):
+        path = outdir / BOUNDARY_GEOJSON_FILES[level]
+        if not path.is_file():
+            errors.append(f"Missing GeoJSON for level {level}: {path.name}")
+            continue
+        with open(path) as fh:
+            features = json.load(fh).get("features", [])
+        stored = levels.get(level, 0)
+        if len(features) != stored:
+            errors.append(
+                f"Level {level} feature count mismatch: file {len(features)}, "
+                f"service.boundaries {stored}"
+            )
+
+    if not errors:
+        log.info("Boundary GeoJSON verified (%s)", ", ".join(
+            f"level {k}:{levels.get(k, 0)}" for k in sorted(BOUNDARY_GEOJSON_FILES)
+        ))
     return errors
 
 
