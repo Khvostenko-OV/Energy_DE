@@ -189,7 +189,7 @@ def _build_secondary_attributes(df: pandas.DataFrame) -> int:
     return empty
 
 
-def extract_boundaries(manifest: Path) -> BoundariesReport:
+def extract_boundaries(manifest: Path, force: bool = False) -> BoundariesReport:
     """Load the boundary reference files listed in a manifest into service.boundaries.
 
     MANIFEST lists one germany_*.gpkg file per line, resolved against the
@@ -198,51 +198,76 @@ def extract_boundaries(manifest: Path) -> BoundariesReport:
     mapped to country_iso), stamped with its level and written via
     to_postgis: the first file replaces the table, the rest append. Area is
     computed in km² via PostGIS.
+
+    The boundaries table is rebuilt atomically from the whole manifest, so a
+    load only runs when at least one file's signature (filename, filesize,
+    modified_at) is not yet logged in service.loaded_files or force is set;
+    every file written is then logged.  If all files are already logged the
+    entire operation is skipped.
     """
     report = BoundariesReport()
+    start = time.perf_counter()
     try:
         engine = get_engine()
         _ensure_schema(engine, SERVICE_SCHEMA)
+        _create_log_table(engine)
 
         filenames = _read_manifest(manifest)
 
-        first = True
+        all_logged = True
         for filename in filenames:
-            stem = Path(filename).stem
-            level = (
-                BOUNDARY_FILE_LEVELS.get(stem[len("germany_"):])
-                if stem.startswith("germany_") else None
-            )
-            if level is None:
-                log.warning("Skipping %s: cannot map to a boundary level", filename)
-                continue
             f = manifest.parent / filename
-            log.info("Loading %s as level %d", filename, level)
+            stat = f.stat()
+            sig = (f.name, stat.st_size, stat.st_mtime)
+            if not _is_logged(engine, sig) or force:
+                all_logged = False
+                break
 
-            gdf = gpd.read_file(f)
-            if "name" not in gdf.columns:
-                raise ValueError(f"{filename} has no 'name' column")
+        if all_logged:
+            report.skipped = True
+            log.info("Skipping boundaries: all files already loaded")
+        else:
+            first = True
+            for filename in filenames:
+                stem = Path(filename).stem
+                level = (
+                    BOUNDARY_FILE_LEVELS.get(stem[len("germany_"):])
+                    if stem.startswith("germany_") else None
+                )
+                if level is None:
+                    log.warning("Skipping %s: cannot map to a boundary level", filename)
+                    continue
+                f = manifest.parent / filename
+                stat = f.stat()
+                log.info("Loading %s as level %d", filename, level)
 
-            out = gdf.rename(columns=BOUNDARY_COLUMN_MAPPING)
-            drop = [c for c in out.columns if c not in BOUNDARY_COLUMNS]
-            out = out.drop(columns=drop)
-            out["level"] = level
-            out["area"] = 0.0
+                gdf = gpd.read_file(f)
+                if "name" not in gdf.columns:
+                    raise ValueError(f"{filename} has no 'name' column")
 
-            out.to_postgis(
-                "boundaries", engine, schema=SERVICE_SCHEMA,
-                if_exists="replace" if first else "append",
-                index=False,
-            )
-            first = False
-            report.rows_by_level[level] = len(out)
+                out = gdf.rename(columns=BOUNDARY_COLUMN_MAPPING)
+                drop = [c for c in out.columns if c not in BOUNDARY_COLUMNS]
+                out = out.drop(columns=drop)
+                out["level"] = level
+                out["area"] = 0.0
 
-        if report.rows_by_level:
-            _compute_boundary_areas(engine)
-            report.loaded = True
-            report.errors = _verify_boundaries(engine)
+                out.to_postgis(
+                    "boundaries", engine, schema=SERVICE_SCHEMA,
+                    if_exists="replace" if first else "append",
+                    index=False,
+                )
+                first = False
+                report.rows_by_level[level] = len(out)
+
+                _log_load(engine, f.name, stat.st_size, stat.st_mtime, "service.boundaries")
+
+            if report.rows_by_level:
+                _compute_boundary_areas(engine)
+                report.loaded = True
+                report.errors = _verify_boundaries(engine)
     except Exception as e:
         report.errors.append(f"Boundary load failed: {e}")
         log.exception("Boundary load failed")
 
+    report.total_time = time.perf_counter() - start
     return report

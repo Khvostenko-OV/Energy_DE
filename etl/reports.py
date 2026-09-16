@@ -22,6 +22,7 @@ class BoundariesReport(ReportBase):
     """Result of the boundary reference-data load."""
 
     loaded: bool = False
+    skipped: bool = False
     rows_by_level: dict[int, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -29,7 +30,7 @@ class BoundariesReport(ReportBase):
         lines = [
             f"  Loaded           : {'yes' if self.loaded else 'no (already present or error)'}",
             "  Rows by level    : " + (", ".join(f"{k}={v}" for k, v in sorted(self.rows_by_level.items())) or "-"),
-            f"  Status           : {'PASS' if self.passed else 'FAIL'}",
+            f"  Status           : {'SKIPPED (already loaded)' if self.skipped else ('PASS' if self.passed else 'FAIL')}",
         ]
         lines.extend(self._error_lines())
         return "\n".join(lines)

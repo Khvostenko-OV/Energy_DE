@@ -53,18 +53,20 @@ def extract(target: str, force: bool):
 
 @cli.command()
 @click.argument("target")
-def boundaries(target: str):
+@click.option("-f", "--force", is_flag=True, help="Reload boundaries whose load signature is already logged.")
+def boundaries(target: str, force: bool):
     """Load boundary reference files listed in a manifest into service.boundaries.
 
     TARGET is the manifest file path. Each file name on its own line is
     resolved against the manifest's directory; the first file replaces the
-    table and the rest append. Area is then computed in km² via PostGIS.
+    table and the rest append. Files already logged in loaded_files are
+    skipped unless --force is given. Area is then computed in km² via PostGIS.
     """
     manifest = Path(target)
     if not manifest.is_file():
         raise click.BadParameter(f"Manifest not found: {target}")
 
-    report = extract_boundaries(manifest)
+    report = extract_boundaries(manifest, force=force)
 
     click.echo("\nBoundaries report:")
     click.echo(report.summary())
@@ -144,15 +146,16 @@ def marts():
 
 
 @cli.command()
-def run_all():
+@click.option("-f", "--force", is_flag=True, help="Reload files whose load signature is already logged.")
+def run_all(force: bool):
     """Run all ETL stages."""
     ctx = click.get_current_context()
 
     click.echo("Loading boundaries...")
-    ctx.invoke(boundaries, target="data/boundaries/boundaries.txt")
+    ctx.invoke(boundaries, target="data/boundaries/boundaries.txt", force=force)
 
     click.echo("\nRunning extract stage...")
-    ctx.invoke(extract, target="data/sources/sources.txt", force=False)
+    ctx.invoke(extract, target="data/sources/sources.txt", force=force)
 
     click.echo("\nRunning transform stage for all sources...")
     ctx.invoke(transform)
