@@ -19,7 +19,7 @@ and connection settings into a detached volume the pipeline reads.
  ├─ data/sources/*.gpkg, data/boundaries/*.gpkg   (private, git-ignored)
  ├─ scripts/seed_data_volume.sh  ── once per machine ──►  volume: etl_data
  │                                                       (data + docker.env)
- ├─ compose.yaml:  db (postgis/postgis:16-3.4)            ┐ network
+ ├─ compose.yaml:  db (imresamu/postgis)                ┐ network
  └─ compose.yaml:  pipeline (build .; `python -m etl run-all`) → db service
 ```
 
@@ -35,10 +35,11 @@ The image never contains data or connection settings. `etl/config.py` reads
 (`docker/entrypoint.sh`) sources `/app/data/docker.env` from the seeded volume
 before handing control to the CLI. Nothing data- or secret-like is baked in.
 
-> **Platform note:** the official `postgis/postgis` images are built for
-> `linux/amd64` only, so on Apple Silicon the database runs under x86
-> emulation. The pipeline container itself is native `arm64`. Functionally
-> identical; expect the emulated database to be slower than a native install.
+> **Platform note:** the `db` image is a multi-arch build
+> (`imresamu/postgis`, arm64 + amd64), so the database runs natively on both
+> Apple Silicon and x86 servers — the official `postgis/postgis` images are
+> amd64-only and would otherwise run under emulation on ARM. The pipeline
+> container itself is native `arm64`.
 
 ## One-time seed (per machine)
 

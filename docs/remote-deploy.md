@@ -7,9 +7,7 @@ cloned or committed; it is transferred and seeded per machine.
 
 ## 0. Prereqs
 
-- Linux server (x86_64/amd64 recommended — the official `postgis/postgis`
-  image is amd64-only; on ARM it runs under emulation, which works but is
-  slower)
+- Linux server (x86_64/amd64 or arm64 — the `db` image is multi-arch, so no emulation on either)
 - Docker Engine + Compose v2
 - A machine that holds the private raw data set (`data/sources`,
   `data/boundaries`)

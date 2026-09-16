@@ -1,8 +1,13 @@
 # Containerized ETL stack (issue #13).
 #
 #   db        PostGIS server; created fresh from the image on first `up`. The
-#             postgis/postgis entrypoint enables the PostGIS extension in the
-#             default database (POSTGRES_DB), so no extra DDL is needed.
+#             image entrypoint enables the PostGIS extension in the default
+#             database (POSTGRES_DB), so no extra DDL is needed.
+#
+#   imresamu/postgis is a multi-arch (amd64 + arm64) rebuild of the official
+#   postgis/postgis images, so the database runs natively on Apple Silicon
+#   instead of x86 emulation (postgis/postgis is amd64-only). Same PostGIS
+#   behaviour, same postgres entrypoint/env contract.
 #   pipeline  the `python -m etl` CLI in a container. `docker compose up`
 #             (and `run --rm pipeline`) executes the full pass (`run-all`)
 #             against `db`, which verifies every stage and fails loudly on drift.
@@ -21,7 +26,9 @@ name: energy-de-etl
 
 services:
   db:
-    image: postgis/postgis:16-3.4
+    # Multi-arch (arm64 + amd64): native on Apple Silicon, no emulation.
+    # alpine variant keeps the image small.
+    image: imresamu/postgis:16-3.4-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-etl}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-etl}
