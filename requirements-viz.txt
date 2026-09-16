@@ -1,0 +1,6 @@
+# Visualization layer (Dash app, issues #18-#20). Layers on top of the
+# pipeline requirements.txt — the app image installs both files
+# (Dockerfile.viz, issue #21); the pipeline requirements.txt stays unchanged.
+dash
+plotly>=6.1,<7
+gunicorn
