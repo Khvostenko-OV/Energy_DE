@@ -1,16 +1,21 @@
-# Containerized ETL stack (issue #13).
+# Containerized ETL stack (issue #13/#15).
 #
 #   db        PostGIS server; created fresh from the image on first `up`. The
 #             image entrypoint enables the PostGIS extension in the default
 #             database (POSTGRES_DB), so no extra DDL is needed.
+#             imresamu/postgis is a multi-arch (amd64 + arm64) rebuild of the
+#             official postgis/postgis images, so the database runs natively on
+#             Apple Silicon instead of x86 emulation (postgis/postgis is
+#             amd64-only). Same PostGIS behaviour, same postgres entrypoint.
 #
-#   imresamu/postgis is a multi-arch (amd64 + arm64) rebuild of the official
-#   postgis/postgis images, so the database runs natively on Apple Silicon
-#   instead of x86 emulation (postgis/postgis is amd64-only). Same PostGIS
-#   behaviour, same postgres entrypoint/env contract.
 #   pipeline  the `python -m etl` CLI in a container. `docker compose up`
 #             (and `run --rm pipeline`) executes the full pass (`run-all`)
 #             against `db`, which verifies every stage and fails loudly on drift.
+#
+#   metabase  Metabase analytics dashboard, always running alongside the stack.
+#             Uses an embedded H2 app-db in a persistent volume for its own state.
+#             Open at http://localhost:3000. The marts PostGIS is registered
+#             manually or via the #15 bootstrap script.
 #
 # The raw data set + connection settings live in the DETACHED named volume
 # `etl_data` (external: the seed script, scripts/seed_data_volume.sh, creates
@@ -62,8 +67,32 @@ services:
       db:
         condition: service_healthy
 
+  metabase:
+    image: metabase/metabase:latest
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    environment:
+      # Embedded H2 app-db: keeps Metabase state (admin, dashboards, DB
+      # connections) inside a dedicated persistent volume — no extra postgres
+      # required. Swap to MB_DB_TYPE=postgres / MB_DB_DBNAME / MB_DB_USER /
+      # MB_DB_PASS if a real app-db is preferred later.
+      MB_DB_FILE: /metabase.db/metabase.db
+      JAVA_OPTS: -Xmx1g
+    volumes:
+      - metabase_data:/metabase.db
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
 volumes:
   db_data:
   etl_data:
     external: true
     name: ${ETL_DATA_VOLUME:-etl_data}
+  metabase_data:

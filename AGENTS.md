@@ -4,18 +4,20 @@
 Implemented. The ETL pipeline (GeoPandas → PostGIS) runs end-to-end from the CLI
 (`python -m etl <stage>`, incl. `run-all`; Click hyphenates the `run_all` Python
 function name) and is covered by a full integration test suite. Containerized:
-a pipeline image + PostGIS compose stack with a one-time data-volume seed
-(`compose.yaml`, `scripts/seed_data_volume.sh`, `scripts/smoke_etl_container.sh`; see
-`docs/containerization.md`).
+a pipeline image + PostGIS + Metabase compose stack with a one-time data-volume
+seed (`compose.yaml`, `scripts/seed_data_volume.sh`,
+`scripts/smoke_etl_container.sh`; see `docs/containerization.md`).
 Treat `TechnicalSpecification.md` as the single authoritative source for data models, table
 schemas (raw/staging/service/core/marts), and pipeline design.
 
 ## Stack (from spec)
 - Python (Pandas, GeoPandas) for ETL — in use
 - PostgreSQL + PostGIS (PostGIS required for spatial joins) — in use
-- Metabase for dashboard/visualization — planned (marts are Metabase-ready)
-- Docker for the containerized stack — in use (compose + pipeline image, #13)
-- GitHub Actions for CI — planned (#14)
+- Metabase for dashboard/visualization — in use (container in the compose stack,
+  marts are queryable at `<host>:3000`; versioned dashboards/bootstrap planned (#15))
+- Docker for the containerized stack — in use (compose + pipeline image + Metabase, #13/#15)
+
+  - GitHub Actions for CI — planned (#14)
 
 ## Location of your data
 | What | Where |

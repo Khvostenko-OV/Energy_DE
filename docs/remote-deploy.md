@@ -66,9 +66,13 @@ docker compose build pipeline
 ## 6. Start PostGIS and run the pipeline
 
 ```bash
-docker compose up -d --wait db    # waits until the DB really accepts TCP
+docker compose up -d --wait db    # waits until the DB really accepts TCP; also starts metabase
 docker compose run --rm pipeline  # python -m etl run-all; non-zero exit = loud failure
 ```
+
+Metabase (`metabase/metabase:latest`) comes up with the stack automatically and
+is always running; first-run admin setup and marts DB registration are done once
+in the browser at `http://<host>:3000`.
 
 One-shot alternative:
 
@@ -92,13 +96,16 @@ docker compose exec -T db psql -U etl -d energy_de -c \
 
 `db` publishes `5433:5432` on the host by default. Do not leave Postgres open to
 the internet — either add no rule for it, bind it to localhost, or restrict with
-ufw. (Metabase, when it joins the stack in #15, talks to `db` over the compose
-network and needs no host-exposed port.)
+ufw. Metabase publishes `3000` and *does* need to be reachable (it is the entry
+point for dashboards), so it gets a rule; in front of it use HTTPS on a server,
+or open `3000` only to trusted IPs for a private setup:
 
 ```bash
 sudo ufw default deny incoming
 sudo ufw allow 22/tcp
-# no rule for 5433 = DB reachable only from the server
+sudo ufw allow 3000/tcp        # Metabase dashboards
+# no rule for 5433 = DB reachable only from the server (Metabase talks to it
+# over the compose network, so it does not need the host port)
 sudo ufw enable
 ```
 
@@ -106,8 +113,9 @@ sudo ufw enable
 
 - Fresh rebuild: `docker compose down -v`, then remove the data volume
   (`docker volume rm etl_data`), re-seed, and `up`.
-- Backups: the loaded DB lives in the `energy-de-etl_db_data` volume, the seeds
-  in `etl_data`. The simplest durable backup is:
+- Backups: the loaded DB lives in the `energy-de-etl_db_data` volume, Metabase
+  state in `energy-de-etl_metabase_data`, the seeds in `etl_data`. The simplest
+  durable backup is:
 
 ```bash
 docker compose exec -T db pg_dump -U etl energy_de > backup.sql
