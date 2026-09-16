@@ -1,0 +1,62 @@
+# Containerized ETL stack (issue #13).
+#
+#   db        PostGIS server; created fresh from the image on first `up`. The
+#             postgis/postgis entrypoint enables the PostGIS extension in the
+#             default database (POSTGRES_DB), so no extra DDL is needed.
+#   pipeline  the `python -m etl` CLI in a container. `docker compose up`
+#             (and `run --rm pipeline`) executes the full pass (`run-all`)
+#             against `db`, which verifies every stage and fails loudly on drift.
+#
+# The raw data set + connection settings live in the DETACHED named volume
+# `etl_data` (external: the seed script, scripts/seed_data_volume.sh, creates
+# it once per machine). The pipeline mounts it at /app/data and the entrypoint
+# sources /app/data/docker.env for DATABASE_URL — nothing data- or secret-like
+# is baked into the image or this file, and the pipeline code is unchanged.
+#
+# db credentials: POSTGRES_* here and the DATABASE_URL written by the seed
+# script are a coupled pair — change both (and re-seed) if you deviate.
+# See docs/containerization.md.
+
+name: energy-de-etl
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-etl}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-etl}
+      POSTGRES_DB: ${POSTGRES_DB:-energy_de}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      # Force TCP: the postgres image runs a temporary socket-only init server
+      # (listen_addresses='') to apply the PostGIS extension scripts before
+      # restarting as the real server. A socket-checking pg_isready goes green
+      # during init, so the pipeline would start into the restart window; over
+      # TCP it stays unhealthy until the real listener is accepting.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER:-etl} -d ${POSTGRES_DB:-energy_de}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  pipeline:
+    build: .
+    # `run_all` is the Python function name; Click surfaces it as `run-all`
+    # (the same name the host CLI uses — the image behaviour is identical).
+    command: ["python", "-m", "etl", "run-all"]
+    environment:
+      DATA_ENV_FILE: /app/data/docker.env
+    volumes:
+      - etl_data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  db_data:
+  etl_data:
+    external: true
+    name: ${ETL_DATA_VOLUME:-etl_data}

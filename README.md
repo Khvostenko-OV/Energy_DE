@@ -7,7 +7,8 @@ source, region, and commissioning date.
 ## Status
 
 Implemented. The ETL pipeline (extract → staging → core → marts) runs end-to-end via the CLI
-(`python -m etl <stage>`, or `run_all` for the whole pass) and is covered by a full integration
+(`python -m etl <stage>`, or `run-all` for the whole pass; Click hyphenates the `run_all`
+Python function name) and is covered by a full integration
 test suite (pytest, 120+ tests against a PostGIS dev DB). Design work recorded in:
 
 - **Spec** — `TechnicalSpecification.md` (authoritative source of truth for data models and stages)
@@ -21,7 +22,8 @@ test suite (pytest, 120+ tests against a PostGIS dev DB). Design work recorded i
 - Python (Pandas, GeoPandas)
 - PostgreSQL + PostGIS (`energy_de` database)
 - Metabase (planned — marts are Metabase-ready)
-- Docker + GitHub Actions (infra/CI, planned)
+- Docker (containerized stack — `compose.yaml`, pipeline image, data-volume seed; `docs/containerization.md`)
+- GitHub Actions (CI, planned — #14)
 
 ## Data
 

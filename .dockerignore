@@ -1,0 +1,24 @@
+# Build context excludes: keep the image lean and keep the private raw data
+# (data/sources, data/boundaries) out of the build — it is seeded at runtime.
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Data (seeded into the detached volume, never built into the image)
+data/
+
+# Git / tooling
+.git/
+.idea/
+.DS_Store
+
+# Docs are not installed in the image
+*.md
+opencode.json
+skills-lock.json

@@ -2,7 +2,11 @@
 
 ## Project status
 Implemented. The ETL pipeline (GeoPandas → PostGIS) runs end-to-end from the CLI
-(`python -m etl <stage>`, incl. `run_all`) and is covered by a full integration test suite.
+(`python -m etl <stage>`, incl. `run-all`; Click hyphenates the `run_all` Python
+function name) and is covered by a full integration test suite. Containerized:
+a pipeline image + PostGIS compose stack with a one-time data-volume seed
+(`compose.yaml`, `scripts/seed_data_volume.sh`, `scripts/smoke_etl_container.sh`; see
+`docs/containerization.md`).
 Treat `TechnicalSpecification.md` as the single authoritative source for data models, table
 schemas (raw/staging/service/core/marts), and pipeline design.
 
@@ -10,7 +14,8 @@ schemas (raw/staging/service/core/marts), and pipeline design.
 - Python (Pandas, GeoPandas) for ETL — in use
 - PostgreSQL + PostGIS (PostGIS required for spatial joins) — in use
 - Metabase for dashboard/visualization — planned (marts are Metabase-ready)
-- Docker + GitHub Actions for infra/CI — planned (Docker and psql are available on this machine)
+- Docker for the containerized stack — in use (compose + pipeline image, #13)
+- GitHub Actions for CI — planned (#14)
 
 ## Location of your data
 | What | Where |
@@ -38,8 +43,9 @@ Gotchas:
 ## Verification
 pytest is the only test runner (`.venv/bin/python -m pytest`); there are no linters or
 typecheckers. The full integration suite is the verification bar — it needs a PostGIS dev DB
-(`DATABASE_URL` via `.env`) and the raw data files. Docker + CI are planned (tickets #13–#16);
-the raw data and the suite stay private either way.
+(`DATABASE_URL` via `.env`) and the raw data files. The containerized stack has its own smoke
+seam (`scripts/smoke_etl_container.sh`, #13); CI is planned (#14). The raw data and the suite
+stay private either way.
 
 ## Agent skills
 
