@@ -21,7 +21,6 @@ by a later Dash ``Input``.
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping
-from types import MappingProxyType
 
 from etl.db_schema import BOUNDARY_LEVEL_COLUMNS
 
