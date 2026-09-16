@@ -16,6 +16,7 @@
       "set *": "allow",
       "for *": "allow",
       "cat *": "allow",
+      "chmod *": "allow",
       "docker *": "allow",
       "echo *": "allow",
       "export *": "allow",
