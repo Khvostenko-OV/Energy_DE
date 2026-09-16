@@ -28,3 +28,9 @@ DEFAULT_COLOR = "#9e9e9e"
 
 GENERATOR_MARKER_SYMBOL = "circle"
 STORAGE_MARKER_SYMBOL = "diamond"
+
+# Sequential fill color scale for the choropleth drill layer (issue #19).
+# A warm-to-cool single-hue ramp keeps the filled areas legible beneath the
+# energy-source scatter markers; the choropleth trace is shared by both
+# metrics, so this palette is metric-agnostic too.
+CHOROPLETH_COLORSCALE = "YlGnBu"

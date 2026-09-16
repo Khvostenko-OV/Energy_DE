@@ -14,7 +14,9 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 
+from viz.drill import drill_value
 from viz.palette import (
+    CHOROPLETH_COLORSCALE,
     DEFAULT_COLOR,
     ENERGY_COLORS,
     GENERATOR_MARKER_SYMBOL,
@@ -105,6 +107,32 @@ def _scattermap_trace(
         hovertext=_hover_lines(df),
         hoverinfo="text",
     )
+
+
+def add_choropleth_fill(fig: go.Figure, level_geojson: dict, fills: pd.DataFrame, metric: str) -> None:
+    """Insert the active drill level's choropleth fill beneath the scatter.
+
+    ``level_geojson`` is the boundary GeoJSON for the active level;
+    ``fills`` carries one ``name`` row per area with its live ``value`` (the
+    metric-aware value comes pre-aggregated from the data seam — this builder
+    is metric-aware only in the hover unit, via ``drill_value``).  The trace is
+    inserted at index 0 so the scatter markers always render on top.
+    """
+    value = drill_value(metric)
+    layer = go.Choroplethmap(
+        geojson=level_geojson,
+        locations=fills["name"] if not fills.empty else [],
+        featureidkey="properties.name",
+        z=fills["value"] if not fills.empty else [],
+        colorscale=CHOROPLETH_COLORSCALE,
+        zmin=0,
+        hovertemplate=(
+            "<b>%{location}</b><br>%{z:,.1f} " + value.unit + "<extra></extra>"
+        ),
+        name=metric.replace("_", " "),
+    )
+    fig.add_trace(layer)
+    fig.data = fig.data[-1:] + fig.data[:-1]
 
 
 def _add_source_traces(fig: go.Figure, df: pd.DataFrame, symbol: str) -> None:
