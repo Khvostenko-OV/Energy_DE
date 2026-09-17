@@ -11,15 +11,17 @@ import os
 import pytest
 from sqlalchemy import create_engine, text
 
-from etl.db_schema import CORE_SCHEMA
+from etl.db_schema import BOUNDARY_LEVEL_COLUMNS, CORE_SCHEMA, OUTSIDE_REGION
 from etl.load import load_generators, load_storages
 from viz.data import (
     GENERATOR_QUERY_COLUMNS,
     STORAGE_QUERY_COLUMNS,
     fetch_generators,
+    fetch_level_fills,
     fetch_storages,
     get_viz_engine,
 )
+from viz.drill import CAPACITY_MW, UNIT_COUNT
 from viz.palette import ENERGY_COLORS
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
@@ -149,3 +151,74 @@ class TestValues:
             for column in ("region", "district", "municipality"):
                 assert column in frame.columns
                 assert frame[column].notna().mean() > 0.5, f"{column} mostly null"
+
+
+# ------------------------------------------------------------------ #
+#  Live level fills (issue #19)                                       #
+# ------------------------------------------------------------------ #
+
+
+def _direct_fills_sql(level, parent_filters):
+    """One live GROUP BY over core for the drill level + parent chain.
+
+    Mirrors `viz.data.fetch_level_fills` semantics on purpose so the seam is
+    pinned against a fresh, hand-written aggregation of the same core tables
+    (the marts-style reconcile guarantee: stored/live + direct must agree).
+    """
+    column = BOUNDARY_LEVEL_COLUMNS[level]
+    where = []
+    for name, area in parent_filters.items():
+        where.append(f"'{area}' = {name}")
+    scope = " AND ".join(where)
+    scope = f" WHERE {scope}" if scope else ""
+    return f"""
+        SELECT COALESCE({column}, '{OUTSIDE_REGION}') AS name
+        FROM (
+            SELECT {column} FROM {CORE_SCHEMA}.generators{scope}
+            UNION ALL
+            SELECT {column} FROM {CORE_SCHEMA}.storages{scope}
+        ) active
+        GROUP BY COALESCE({column}, '{OUTSIDE_REGION}')
+    """
+
+
+class TestLevelFills:
+    def test_level_1_capacity_fills_reconcile_to_direct_core_sql(self, _core_loaded):
+        fills = fetch_level_fills(1, {}, CAPACITY_MW, ENGINE)
+        expected_sql = _direct_fills_sql(1, {})
+        assert set(fills.columns) == {"name", "value"}
+        assert set(fills["name"]) == set(_scalar_df(expected_sql))
+
+    def test_level_1_unit_count_fills_reconcile_to_direct_core_sql(self, _core_loaded):
+        fills = fetch_level_fills(1, {}, UNIT_COUNT, ENGINE)
+        expected_sql = _direct_fills_sql(1, {})
+        assert set(fills.columns) == {"name", "value"}
+        assert set(fills["name"]) == set(_scalar_df(expected_sql))
+
+    def test_level_2_fills_scoped_by_region_parent(self, _core_loaded):
+        fills = fetch_level_fills(2, {"region": "Hessen"}, CAPACITY_MW, ENGINE)
+        assert not fills.empty
+        assert set(fills["name"]) == set(_scalar_df(_direct_fills_sql(2, {"region": "Hessen"})))
+
+    def test_level_3_fills_scoped_by_region_and_district_parents(self, _core_loaded):
+        fills = fetch_level_fills(
+            3, {"region": "Hessen", "district": "Kassel"}, UNIT_COUNT, ENGINE
+        )
+        assert not fills.empty
+        expected = set(
+            _scalar_df(
+                _direct_fills_sql(3, {"region": "Hessen", "district": "Kassel"})
+            )
+        )
+        assert set(fills["name"]) == expected
+
+    def test_both_metrics_share_the_area_set(self, _core_loaded):
+        cap = fetch_level_fills(2, {"region": "Hessen"}, CAPACITY_MW, ENGINE)
+        count = fetch_level_fills(2, {"region": "Hessen"}, UNIT_COUNT, ENGINE)
+        assert set(cap["name"]) == set(count["name"])
+
+
+def _scalar_df(sql):
+    """Column of a query result as a python list (the direct-SQL oracle)."""
+    with ENGINE.connect() as conn:
+        return [row[0] for row in conn.execute(text(sql)).fetchall()]
