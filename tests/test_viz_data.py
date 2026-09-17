@@ -158,67 +158,78 @@ class TestValues:
 # ------------------------------------------------------------------ #
 
 
-def _direct_fills_sql(level, parent_filters):
+def _direct_fills(level, parent_filters, value_expr):
     """One live GROUP BY over core for the drill level + parent chain.
 
     Mirrors `viz.data.fetch_level_fills` semantics on purpose so the seam is
     pinned against a fresh, hand-written aggregation of the same core tables
-    (the marts-style reconcile guarantee: stored/live + direct must agree).
+    (the marts-style reconcile guarantee: live + direct must agree).
     """
     column = BOUNDARY_LEVEL_COLUMNS[level]
-    where = []
+    where = ["(decommissioning_date IS NULL OR decommissioning_date > CURRENT_DATE)"]
     for name, area in parent_filters.items():
         where.append(f"'{area}' = {name}")
     scope = " AND ".join(where)
-    scope = f" WHERE {scope}" if scope else ""
     return f"""
-        SELECT COALESCE({column}, '{OUTSIDE_REGION}') AS name
+        SELECT COALESCE({column}, '{OUTSIDE_REGION}') AS name,
+               {value_expr} AS value
         FROM (
-            SELECT {column} FROM {CORE_SCHEMA}.generators{scope}
+            SELECT {column}, installed_capacity
+            FROM {CORE_SCHEMA}.generators WHERE {scope}
             UNION ALL
-            SELECT {column} FROM {CORE_SCHEMA}.storages{scope}
+            SELECT {column}, installed_capacity
+            FROM {CORE_SCHEMA}.storages WHERE {scope}
         ) active
         GROUP BY COALESCE({column}, '{OUTSIDE_REGION}')
+        ORDER BY COALESCE({column}, '{OUTSIDE_REGION}')
     """
+
+
+def _fills_map(frame):
+    """The name→value dict a fills DataFrame must reconcile to."""
+    return dict(zip(frame["name"].astype(str), frame["value"]))
+
+
+def _direct_map(sql):
+    with ENGINE.connect() as conn:
+        rows = conn.execute(text(sql)).fetchall()
+    return {str(r[0]): r[1] for r in rows}
+
+
+def _assert_fills_reconcile(fills, sql):
+    """fills (name, value) must reconcile to the direct-SQL map, tolerating
+    float rounding noise from the two aggregation paths."""
+    actual = _fills_map(fills)
+    expected = _direct_map(sql)
+    assert set(actual) == set(expected)
+    for name, value in actual.items():
+        assert value == pytest.approx(expected[name], abs=1e-6), name
 
 
 class TestLevelFills:
     def test_level_1_capacity_fills_reconcile_to_direct_core_sql(self, _core_loaded):
         fills = fetch_level_fills(1, {}, CAPACITY_MW, ENGINE)
-        expected_sql = _direct_fills_sql(1, {})
         assert set(fills.columns) == {"name", "value"}
-        assert set(fills["name"]) == set(_scalar_df(expected_sql))
+        _assert_fills_reconcile(fills, _direct_fills(1, {}, "SUM(installed_capacity) / 1000.0"))
 
     def test_level_1_unit_count_fills_reconcile_to_direct_core_sql(self, _core_loaded):
         fills = fetch_level_fills(1, {}, UNIT_COUNT, ENGINE)
-        expected_sql = _direct_fills_sql(1, {})
         assert set(fills.columns) == {"name", "value"}
-        assert set(fills["name"]) == set(_scalar_df(expected_sql))
+        _assert_fills_reconcile(fills, _direct_fills(1, {}, "COUNT(*)"))
 
     def test_level_2_fills_scoped_by_region_parent(self, _core_loaded):
         fills = fetch_level_fills(2, {"region": "Hessen"}, CAPACITY_MW, ENGINE)
         assert not fills.empty
-        assert set(fills["name"]) == set(_scalar_df(_direct_fills_sql(2, {"region": "Hessen"})))
+        _assert_fills_reconcile(fills, _direct_fills(2, {"region": "Hessen"}, "SUM(installed_capacity) / 1000.0"))
 
     def test_level_3_fills_scoped_by_region_and_district_parents(self, _core_loaded):
         fills = fetch_level_fills(
             3, {"region": "Hessen", "district": "Kassel"}, UNIT_COUNT, ENGINE
         )
         assert not fills.empty
-        expected = set(
-            _scalar_df(
-                _direct_fills_sql(3, {"region": "Hessen", "district": "Kassel"})
-            )
-        )
-        assert set(fills["name"]) == expected
+        _assert_fills_reconcile(fills, _direct_fills(3, {"region": "Hessen", "district": "Kassel"}, "COUNT(*)"))
 
     def test_both_metrics_share_the_area_set(self, _core_loaded):
         cap = fetch_level_fills(2, {"region": "Hessen"}, CAPACITY_MW, ENGINE)
         count = fetch_level_fills(2, {"region": "Hessen"}, UNIT_COUNT, ENGINE)
         assert set(cap["name"]) == set(count["name"])
-
-
-def _scalar_df(sql):
-    """Column of a query result as a python list (the direct-SQL oracle)."""
-    with ENGINE.connect() as conn:
-        return [row[0] for row in conn.execute(text(sql)).fetchall()]
