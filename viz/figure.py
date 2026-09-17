@@ -109,6 +109,45 @@ def _scattermap_trace(
     )
 
 
+def _feature_centroid(coordinates) -> tuple[float, float]:
+    """Bounding-box centre of a GeoJSON geometry (Polygon/LineString nesting).
+
+    Returns ``(lon, lat)`` by averaging the geometry's vertex extremes, so a
+    drill click can re-center the map on the clicked area's children without a
+    geographic library.
+    """
+    points: list[tuple[float, float]] = []
+
+    def walk(ring) -> None:
+        if ring and isinstance(ring[0], (int, float)):
+            points.append((ring[0], ring[1]))
+            return
+        for part in ring:
+            walk(part)
+
+    walk(coordinates)
+    if not points:
+        return None
+    lons = [p[0] for p in points]
+    lats = [p[1] for p in points]
+    return (min(lons) + max(lons)) / 2, (min(lats) + max(lats)) / 2
+
+
+def centroids_by_name(level_geojson: dict) -> dict[str, tuple[float, float]]:
+    """Bounding-box centres for every named feature in the level GeoJSON.
+
+    Keyed by ``properties.name`` (the same key the choropleth fills match),
+    so the drill callback can recenter the map on the clicked area's children.
+    """
+    centres: dict[str, tuple[float, float]] = {}
+    for feature in level_geojson.get("features", []):
+        name = feature.get("properties", {}).get("name")
+        centre = _feature_centroid(feature.get("geometry", {}).get("coordinates"))
+        if name and centre:
+            centres[name] = centre
+    return centres
+
+
 def add_choropleth_fill(fig: go.Figure, level_geojson: dict, fills: pd.DataFrame, metric: str) -> None:
     """Insert the active drill level's choropleth fill beneath the scatter.
 

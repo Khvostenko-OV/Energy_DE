@@ -11,6 +11,7 @@ dev host.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -38,6 +39,38 @@ GENERATOR_QUERY_COLUMNS = (
 )
 
 STORAGE_QUERY_COLUMNS = GENERATOR_QUERY_COLUMNS + ("storage_capacity",)
+
+# Env seam for the boundary GeoJSON asset directory (issue #19/#21).  Under
+# the containerized stack the seed mounts the prep output here; on the dev
+# host it falls back to the pipeline's own prep output directory.
+VIZ_BOUNDARY_ASSET_DIR = os.environ.get(
+    "VIZ_BOUNDARY_ASSET_DIR",
+    str(Path(__file__).resolve().parent.parent / "data" / "viz_assets"),
+)
+
+
+def load_level_geojson(level: int, asset_dir: str | Path | None = None) -> dict:
+    """Load the boundary GeoJSON for a drill level (1..3) as a dict."""
+    directory = Path(asset_dir) if asset_dir else Path(VIZ_BOUNDARY_ASSET_DIR)
+    try:
+        filename = {
+            1: "level_1.geojson",
+            2: "level_2.geojson",
+            3: "level_3.geojson",
+        }[level]
+    except KeyError:
+        raise FileNotFoundError(
+            f"no boundary asset for level {level}; drill levels are 1..3"
+        ) from None
+    try:
+        with (directory / filename).open() as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"boundary asset {directory / filename} missing; "
+            "run 'python -m etl boundaries-geojson <outdir>' (issue #17) or "
+            "point VIZ_BOUNDARY_ASSET_DIR at it"
+        ) from None
 
 
 def get_viz_engine() -> Engine:

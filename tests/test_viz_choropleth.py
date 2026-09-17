@@ -13,7 +13,11 @@ import plotly.graph_objects as go
 import pytest
 
 from viz.drill import CAPACITY_MW, UNIT_COUNT
-from viz.figure import add_choropleth_fill, build_units_map
+from viz.figure import (
+    add_choropleth_fill,
+    build_units_map,
+    centroids_by_name,
+)
 
 HES = "Hessen"
 NDS = "Niedersachsen"
@@ -185,3 +189,34 @@ class TestFillFrameShape:
         layer = _find_trace(fig, "choroplethmap")
         assert isinstance(layer, go.Choroplethmap)
         assert list(layer.z) == []
+
+# ------------------------------------------------------------------ #
+#  Drill re-center (zoom to clicked area's children)                  #
+# ------------------------------------------------------------------ #
+
+
+class TestCentroids:
+    def test_centroids_keyed_by_area_name(self):
+        centres = centroids_by_name(LEVEL_1_GEOJSON)
+        assert set(centres) == {HES, NDS, BAY}
+        assert centres[HES] == (9.0, 50.0)
+        assert centres[BAY] == (12.0, 48.5)
+
+    def test_centroid_of_missing_level_geojson_is_empty(self):
+        assert centroids_by_name({"type": "FeatureCollection", "features": []}) == {}
+
+    def test_centroid_ignores_features_without_name(self):
+        geo = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {},
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]],
+                    },
+                }
+            ],
+        }
+        assert centroids_by_name(geo) == {}
