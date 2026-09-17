@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from etl.db_schema import BOUNDARY_LEVEL_COLUMNS, CORE_SCHEMA, OUTSIDE_REGION
@@ -121,11 +121,19 @@ def fetch_level_fills(
     value: DrillValue = drill_value(metric)
     column = BOUNDARY_LEVEL_COLUMNS[level]
     where = [f"({ACTIVE_UNITS_WHERE})"]
-    for name, area in parent_filters.items():
-        where.append(f"{name} = '{area}'")
+    params = {}
+    for index, (name, area) in enumerate(parent_filters.items()):
+        # Column names are whitelisted against the boundary schema (the chain
+        # is built by plan_drill from BOUNDARY_LEVEL_COLUMNS only); the area
+        # values flow from browser click data, so they are bound parameters.
+        if name not in BOUNDARY_LEVEL_COLUMNS.values():
+            raise ValueError(f"unknown drill filter column: {name!r}")
+        param = f"area_{index}"
+        where.append(f"{name} = :{param}")
+        params[param] = area
     scope = " AND ".join(where) if where else "TRUE"
 
-    sql = f"""
+    sql = text(f"""
         SELECT COALESCE({column}, '{OUTSIDE_REGION}') AS name,
                {value.value_expr} AS value
         FROM (
@@ -139,5 +147,5 @@ def fetch_level_fills(
         ) active_units
         GROUP BY COALESCE({column}, '{OUTSIDE_REGION}')
         ORDER BY name
-    """
-    return pd.read_sql(sql, engine or get_viz_engine())
+    """)
+    return pd.read_sql(sql, engine or get_viz_engine(), params=params)

@@ -2,13 +2,14 @@
 
 Split along the acceptance's own axis:
 
-* ``plan_drill`` — the drill FILTER, metric-agnostic by construction.  Clicking
-  an area at the active boundary level produces the *same* child-level target
-  (target level + accumulated parent-name chain) whether the visible value is
-  the installed-capacity MW sum (default) or the unit count (toggle).  The
-  metric never enters the filter map: it only picks the value expression
-  (``drill_value``).  This is what makes the area→child query correct *for both
-  metrics* — the filter is shared, only the value differs.
+* ``plan_drill`` — the drill FILTER, metric-agnostic by construction (it takes
+  no metric at all).  Clicking an area at the active boundary level produces
+  the child-level target (target level + accumulated parent-name chain)
+  regardless of the visible value — installed-capacity MW sum (default) or
+  unit count (toggle).  The metric never enters the filter map: it only picks
+  the value expression (``drill_value``).  This is what makes the area→child
+  query correct *for both metrics* — the filter is shared, only the value
+  differs.
 
 * ``drill_value`` — the VALUE expression, the only metric-aware seam.  Capacity
   MW (default) is the installed-capacity kilowatt sum scaled to megawatts;
@@ -18,7 +19,7 @@ Split along the acceptance's own axis:
 by a later Dash ``Input``.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
@@ -46,19 +47,12 @@ class DrillFilter:
     ``target_level`` is the boundary level the child query runs at;
     ``parent_filters`` is the FULL accumulated parent-name chain (region →
     region+district) that scopes the child query, so repeated district /
-    municipality names never collide across parents.
+    municipality names never collide across parents.  Immutable, so Dash's
+    ``Input`` can never mutate a chain once planned.
     """
 
     target_level: int
     parent_filters: Mapping
-    parent_chain: tuple = field(default=(), repr=False, compare=False)
-
-    def __post_init__(self):
-        # Freeze the accumulated chain so a Dash ``Input`` can never grow the
-        # filter once planned (names repeat across parents — a mutated filter
-        # would silently re-scope the child-level GROUP BY).
-        frozen = MappingProxyType(dict(self.parent_chain))
-        object.__setattr__(self, "parent_chain", frozen)
 
 
 @dataclass(frozen=True)
@@ -69,18 +63,15 @@ class DrillValue:
     unit: str
 
 
-def plan_drill(active_level, clicked_area_name, metric, parent_chain=()):
+def plan_drill(active_level, clicked_area_name, parent_chain=()):
     """Map a click at ``active_level`` to the next level's query scope.
 
     Returns ``None`` (re-center, no drill) at the max drill level.  The FILTER
-    is metric-agnostic: only ``metric`` insertion builds a value later.
+    is metric-agnostic: the metric only picks a value expression later.
     """
-    if metric not in VALUE_EXPRESSIONS:
-        raise ValueError(f"unknown metric: {metric!r}")
     if active_level >= MAX_DRILL_LEVEL:
         return None
-    parent_filters = MappingProxyType(dict(parent_chain))
-    parent_filters_by_column = dict(parent_filters)
+    parent_filters_by_column = dict(parent_chain)
     parent_filters_by_column[BOUNDARY_LEVEL_COLUMNS[active_level]] = clicked_area_name
     return DrillFilter(
         target_level=active_level + 1,

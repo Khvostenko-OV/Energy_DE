@@ -233,3 +233,10 @@ class TestLevelFills:
         cap = fetch_level_fills(2, {"region": "Hessen"}, CAPACITY_MW, ENGINE)
         count = fetch_level_fills(2, {"region": "Hessen"}, UNIT_COUNT, ENGINE)
         assert set(cap["name"]) == set(count["name"])
+
+    def test_foreign_filter_column_is_rejected_before_db_access(self, _core_loaded):
+        # The area values are bound params, and the column names are
+        # whitelisted against the boundary schema — a filter key from anything
+        # but plan_drill (e.g. baked into a URL) can never reach the SQL text.
+        with pytest.raises(ValueError, match="unknown drill filter column"):
+            fetch_level_fills(2, {"region = 'x' --": "Hessen"}, CAPACITY_MW, ENGINE)

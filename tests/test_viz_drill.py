@@ -44,41 +44,36 @@ UNIT_COUNT = "unit_count"
 
 
 class TestDrillFilterIsMetricAgnostic:
-    def test_region_click_targets_districts_for_both_metrics(self):
-        cap = plan_drill(1, HES, CAPACITY_MW)
-        count = plan_drill(1, HES, UNIT_COUNT)
+    def test_region_click_targets_districts(self):
+        cap = plan_drill(1, HES)
         assert cap == DrillFilter(target_level=2, parent_filters={"region": HES})
-        assert count == cap
 
-    def test_district_click_targets_municipalities_for_both_metrics(self):
-        cap = plan_drill(2, KAS, CAPACITY_MW, parent_chain=(("region", HES),))
-        count = plan_drill(2, KAS, UNIT_COUNT, parent_chain=(("region", HES),))
-        expected = DrillFilter(
+    def test_district_click_targets_municipalities_with_chain(self):
+        drilled = plan_drill(2, KAS, parent_chain=(("region", HES),))
+        assert drilled == DrillFilter(
             target_level=3,
             parent_filters={"region": HES, "district": KAS},
         )
-        assert cap == expected
-        assert count == expected
 
-    def test_municipality_click_never_drills_for_both_metrics(self):
+    def test_municipality_click_never_drills(self):
         chain = (("region", HES), ("district", KAS))
-        assert plan_drill(3, GUD, CAPACITY_MW, parent_chain=chain) is None
-        assert plan_drill(3, GUD, UNIT_COUNT, parent_chain=chain) is None
+        assert plan_drill(3, GUD, parent_chain=chain) is None
 
     def test_no_drill_past_level_three(self):
         chain = (("region", HES), ("district", KAS))
-        assert plan_drill(3, SCHW, CAPACITY_MW, parent_chain=chain) is None
-        assert plan_drill(3, SCHW, UNIT_COUNT, parent_chain=chain) is None
+        assert plan_drill(3, SCHW, parent_chain=chain) is None
 
     def test_metric_never_enters_the_filter_build(self):
-        # The metric only selects a VALUE expression; it can never be a filter
-        # that would accidentally scope the child-level GROUP BY.
-        cap = plan_drill(1, HES, CAPACITY_MW)
-        assert "metric" not in cap.parent_filters
-        assert "installed_capacity_mw" not in cap.parent_filters
+        # The filter carries no metric key: the metric only picks a VALUE
+        # expression, and ``plan_drill`` no longer even takes a metric — so it
+        # can never accidentally scope the child-level GROUP BY.
+        drilled = plan_drill(2, KAS, parent_chain=(("region", HES),))
+        assert "metric" not in drilled.parent_filters
+        assert "installed_capacity_mw" not in drilled.parent_filters
+        assert set(drilled.parent_filters) == {"region", "district"}
 
     def test_parent_filter_is_immutable(self):
-        drilled = plan_drill(2, KAS, CAPACITY_MW, parent_chain=(("region", HES),))
+        drilled = plan_drill(2, KAS, parent_chain=(("region", HES),))
         with pytest.raises(TypeError):
             drilled.parent_filters["district"] = "Marburg"
 
@@ -114,11 +109,11 @@ class TestDrillCeiling:
     def test_max_drill_level_is_three(self):
         assert MAX_DRILL_LEVEL == 3
 
-    def test_drilling_below_three_is_always_allowed_for_both_metrics(self):
-        assert plan_drill(1, HES, CAPACITY_MW) == DrillFilter(
+    def test_drilling_below_three_is_always_allowed(self):
+        assert plan_drill(1, HES) == DrillFilter(
             target_level=2, parent_filters={"region": HES}
         )
-        assert plan_drill(2, KAS, UNIT_COUNT, parent_chain=(("region", HES),)) == (
+        assert plan_drill(2, KAS, parent_chain=(("region", HES),)) == (
             DrillFilter(
                 target_level=3,
                 parent_filters={"region": HES, "district": KAS},

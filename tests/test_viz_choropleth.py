@@ -14,6 +14,7 @@ import pytest
 
 from viz.drill import CAPACITY_MW, UNIT_COUNT
 from viz.figure import (
+    DRILL_ZOOMS,
     add_choropleth_fill,
     build_units_map,
     centroids_by_name,
@@ -220,3 +221,16 @@ class TestCentroids:
             ],
         }
         assert centroids_by_name(geo) == {}
+
+
+# ------------------------------------------------------------------ #
+#  Drill zoom: deeper level frames the viewport tighter               #
+# ------------------------------------------------------------------ #
+
+
+class TestDrillZoom:
+    def test_zoom_steps_up_per_drill_level(self):
+        assert DRILL_ZOOMS[1] < DRILL_ZOOMS[2] < DRILL_ZOOMS[3]
+
+    def test_level_1_keeps_the_country_overview_zoom(self):
+        assert DRILL_ZOOMS[1] == 5.5

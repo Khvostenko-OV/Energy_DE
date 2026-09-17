@@ -27,6 +27,11 @@ from viz.palette import (
 GERMANY_CENTER = {"lat": 51.16, "lon": 10.45}
 INITIAL_ZOOM = 5.5
 
+# Camera zoom per drill level: the deeper the level, the tighter the framing
+# so a drilled-to region/district fills the viewport.  Level 1 keeps the
+# country overview.
+DRILL_ZOOMS = {1: INITIAL_ZOOM, 2: 6.5, 3: 8.5}
+
 # WebGL clustering threshold in pixels: units closer than this cluster into a
 # single marker and un-cluster on zoom, keeping the ~82k-strong unit layer
 # responsive.
@@ -109,7 +114,7 @@ def _scattermap_trace(
     )
 
 
-def _feature_centroid(coordinates) -> tuple[float, float]:
+def _feature_centroid(coordinates) -> tuple[float, float] | None:
     """Bounding-box centre of a GeoJSON geometry (Polygon/LineString nesting).
 
     Returns ``(lon, lat)`` by averaging the geometry's vertex extremes, so a

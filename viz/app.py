@@ -25,7 +25,12 @@ from viz.data import (
     load_level_geojson,
 )
 from viz.drill import CAPACITY_MW, UNIT_COUNT, plan_drill
-from viz.figure import add_choropleth_fill, build_units_map, centroids_by_name
+from viz.figure import (
+    DRILL_ZOOMS,
+    add_choropleth_fill,
+    build_units_map,
+    centroids_by_name,
+)
 
 INITIAL_STATE = {
     "level": 1,
@@ -79,7 +84,7 @@ def next_drill_state(drill_state, clicked_area):
         return dict(state, centre=state.get("centre"))
 
     chain = tuple(state.get("parent_filters", {}).items())
-    target = plan_drill(state.get("level", 1), clicked_area, metric, chain)
+    target = plan_drill(state.get("level", 1), clicked_area, chain)
 
     if target is None:
         return dict(INITIAL_STATE, metric=metric)
@@ -109,6 +114,7 @@ def _build_map(state: dict) -> dict:
     fig = build_units_map(generators, storages)
     add_choropleth_fill(fig, load_level_geojson(level), fills, metric)
     data = fig.to_dict()
+    data["layout"]["map"]["zoom"] = DRILL_ZOOMS[level]
     if state.get("centre"):
         lon, lat = state["centre"]
         data["layout"]["map"]["center"] = {"lat": lat, "lon": lon}
