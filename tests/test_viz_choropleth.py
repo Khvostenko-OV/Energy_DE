@@ -118,6 +118,8 @@ class TestFillLayerIsBeneathTheScatter:
         assert layer.geojson == LEVEL_1_GEOJSON
         assert list(layer.locations) == [HES, NDS, BAY]
         assert layer.featureidkey == "properties.name"
+        assert layer.colorbar.x == 1.02
+        assert layer.colorbar.xanchor == "left"
 
     def test_fill_value_matches_the_fills_frame(self):
         fig = _empty_figure()

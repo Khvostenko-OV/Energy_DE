@@ -178,7 +178,7 @@ def add_choropleth_fill(fig: go.Figure, level_geojson: dict, fills: pd.DataFrame
         showlegend=False,
         colorbar=dict(
             title=value.unit,
-            x=0,
+            x=1.02,
             xanchor="left",
             lenmode="fraction",
             len=0.5,
@@ -221,7 +221,9 @@ def build_units_map(
     fig = go.Figure()
     _add_source_traces(fig, storages)
     _add_source_traces(fig, generators)
-    fig.update_layout(legend=dict(traceorder="reversed"))
+    fig.update_layout(
+        legend=dict(traceorder="reversed", x=0, xanchor="left", y=1, yanchor="top")
+    )
     fig.update_maps(
         style="open-street-map",
         center=GERMANY_CENTER,

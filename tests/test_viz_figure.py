@@ -159,6 +159,8 @@ class TestMarkers:
             _generators("bio", "gas", "hydro", "solar", "wind"), _storages()
         )
         assert fig.layout.legend.traceorder == "reversed"
+        assert fig.layout.legend.x == 0
+        assert fig.layout.legend.xanchor == "left"
         sidebar = list(reversed([t.name for t in fig.data]))
         assert sidebar == ["Bio", "Gas", "Hydro", "Solar", "Wind", "Storage"]
 

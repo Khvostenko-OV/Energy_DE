@@ -32,7 +32,7 @@ UNIT_COUNT = "unit_count"
 
 METRIC_UNITS = {
     CAPACITY_MW: "MW",
-    UNIT_COUNT: "unit",
+    UNIT_COUNT: "Units",
 }
 VALUE_EXPRESSIONS = {
     CAPACITY_MW: "SUM(installed_capacity) / 1000.0",
