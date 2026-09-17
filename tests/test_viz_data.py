@@ -154,6 +154,36 @@ class TestValues:
 
 
 # ------------------------------------------------------------------ #
+#  Scoped unit fetches (drilled scatter)                              #
+# ------------------------------------------------------------------ #
+
+
+class TestScopedUnitFetch:
+    def test_generators_scoped_to_a_region(self, _core_loaded):
+        scoped = fetch_generators(ENGINE, {"region": "Hessen"})
+        assert not scoped.empty
+        assert set(scoped["region"]) == {"Hessen"}
+
+    def test_storages_scoped_to_a_region(self, _core_loaded):
+        scoped = fetch_storages(ENGINE, {"region": "Hessen"})
+        assert not scoped.empty
+        assert set(scoped["region"]) == {"Hessen"}
+
+    def test_generators_scoped_to_a_region_and_district(self, _core_loaded):
+        scoped = fetch_generators(
+            ENGINE, {"region": "Hessen", "district": "Kassel"}
+        )
+        assert not scoped.empty
+        assert set(scoped["region"]) == {"Hessen"}
+        assert set(scoped["district"]) == {"Kassel"}
+
+    def test_unscoped_fetch_returns_more_than_a_region(self, _core_loaded):
+        all_gens = fetch_generators(ENGINE)
+        hessen = fetch_generators(ENGINE, {"region": "Hessen"})
+        assert len(all_gens) > len(hessen)
+
+
+# ------------------------------------------------------------------ #
 #  Live level fills (issue #19)                                       #
 # ------------------------------------------------------------------ #
 

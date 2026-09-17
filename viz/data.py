@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 from etl.db_schema import BOUNDARY_LEVEL_COLUMNS, CORE_SCHEMA, OUTSIDE_REGION
@@ -25,6 +25,30 @@ from viz.drill import DrillValue, drill_value
 
 CORE_DOTENV = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(CORE_DOTENV)
+
+# The core tables the unit map renders; absent tables mean the app shows a
+# standby message instead of raising a 500 from a failed ``FROM core.<table>``
+# (a dev/test run drops core while the app may stay open).
+CORE_VIS_TABLES = ("generators", "storages")
+
+
+class CoreTablesMissing(RuntimeError):
+    """Raised when a core table the map renders is absent from the database."""
+
+    def __init__(self, tables):
+        self.tables = list(tables)
+        super().__init__(f"map core tables missing: {', '.join(self.tables)}")
+
+
+def missing_core_tables(
+    engine: Engine | None = None, tables: tuple[str, ...] = CORE_VIS_TABLES
+) -> list[str]:
+    """Core tables in ``tables`` that are absent from the ``core`` schema."""
+    engine = engine or get_viz_engine()
+    schema = inspect(engine)
+    return [
+        table for table in tables if not schema.has_table(table, schema=CORE_SCHEMA)
+    ]
 
 GENERATOR_QUERY_COLUMNS = (
     "longitude",
@@ -79,24 +103,63 @@ def get_viz_engine() -> Engine:
     return create_engine(url)
 
 
-def _fetch(table: str, columns: tuple[str, ...], engine: Engine | None) -> pd.DataFrame:
-    """Read the named core table's query columns over longitude/latitude order."""
+def _parent_scope(parent_filters: dict) -> tuple[str, dict]:
+    """WHERE fragment + bound params scoping a query to the parent chain.
+
+    ``parent_filters`` maps boundary column → parent area name (region →
+    region+district), built by ``plan_drill`` from ``BOUNDARY_LEVEL_COLUMNS``;
+    the column names are whitelisted against that schema and the area VALUES
+    (which flow from browser click data) are bound parameters, so click data
+    can never reach the SQL text.  Returns ``("", {})`` when there is no chain
+    (the full country scope).
+    """
+    where = []
+    params = {}
+    for index, (name, area) in enumerate(parent_filters.items()):
+        if name not in BOUNDARY_LEVEL_COLUMNS.values():
+            raise ValueError(f"unknown drill filter column: {name!r}")
+        param = f"area_{index}"
+        where.append(f"{name} = :{param}")
+        params[param] = area
+    return " AND ".join(where), params
+
+
+def _fetch(
+    table: str,
+    columns: tuple[str, ...],
+    engine: Engine | None,
+    parent_filters: dict | None = None,
+) -> pd.DataFrame:
+    """Read the named core table's query columns, scoped to the parent chain.
+
+    With no ``parent_filters`` the whole country is returned, so the
+    un-drilled map keeps the pre-#19 behavior exactly.
+    """
+    scope, params = _parent_scope(parent_filters or {})
+    where = f" WHERE {scope}" if scope else ""
     columns_sql = ", ".join(columns)
     return pd.read_sql(
-        f"SELECT {columns_sql} FROM {CORE_SCHEMA}.{table} "
-        "ORDER BY longitude, latitude",
+        text(
+            f"SELECT {columns_sql} FROM {CORE_SCHEMA}.{table}{where} "
+            "ORDER BY longitude, latitude"
+        ),
         engine or get_viz_engine(),
+        params=params,
     )
 
 
-def fetch_generators(engine: Engine | None = None) -> pd.DataFrame:
-    """All core.generators rows with the columns the scatter map renders."""
-    return _fetch("generators", GENERATOR_QUERY_COLUMNS, engine)
+def fetch_generators(
+    engine: Engine | None = None, parent_filters: dict | None = None
+) -> pd.DataFrame:
+    """core.generators rows for the scatter map, scoped by the drill chain."""
+    return _fetch("generators", GENERATOR_QUERY_COLUMNS, engine, parent_filters)
 
 
-def fetch_storages(engine: Engine | None = None) -> pd.DataFrame:
-    """All core.storages rows; adds storage_capacity to the generator column set."""
-    return _fetch("storages", STORAGE_QUERY_COLUMNS, engine)
+def fetch_storages(
+    engine: Engine | None = None, parent_filters: dict | None = None
+) -> pd.DataFrame:
+    """core.storages rows; adds storage_capacity to the generator column set."""
+    return _fetch("storages", STORAGE_QUERY_COLUMNS, engine, parent_filters)
 
 
 ACTIVE_UNITS_WHERE = "decommissioning_date IS NULL OR decommissioning_date > CURRENT_DATE"
@@ -120,18 +183,11 @@ def fetch_level_fills(
     """
     value: DrillValue = drill_value(metric)
     column = BOUNDARY_LEVEL_COLUMNS[level]
-    where = [f"({ACTIVE_UNITS_WHERE})"]
-    params = {}
-    for index, (name, area) in enumerate(parent_filters.items()):
-        # Column names are whitelisted against the boundary schema (the chain
-        # is built by plan_drill from BOUNDARY_LEVEL_COLUMNS only); the area
-        # values flow from browser click data, so they are bound parameters.
-        if name not in BOUNDARY_LEVEL_COLUMNS.values():
-            raise ValueError(f"unknown drill filter column: {name!r}")
-        param = f"area_{index}"
-        where.append(f"{name} = :{param}")
-        params[param] = area
-    scope = " AND ".join(where) if where else "TRUE"
+    parent_scope, params = _parent_scope(parent_filters)
+    scope_parts = [f"({ACTIVE_UNITS_WHERE})"]
+    if parent_scope:
+        scope_parts.append(parent_scope)
+    scope = " AND ".join(scope_parts)
 
     sql = text(f"""
         SELECT COALESCE({column}, '{OUTSIDE_REGION}') AS name,

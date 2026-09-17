@@ -170,7 +170,13 @@ def marts():
 @cli.command()
 @click.option("-f", "--force", is_flag=True, help="Reload files whose load signature is already logged.")
 def run_all(force: bool):
-    """Run all ETL stages."""
+    """Run all ETL stages, including the boundary GeoJSON for the choropleth.
+
+    Besides the full extract → transform → load → marts chain, writes the
+    per-level boundary GeoJSON assets consumed by the Dash choropleth layer
+    (the `data/viz_assets` default the app resolves through
+    ``VIZ_BOUNDARY_ASSET_DIR``).
+    """
     ctx = click.get_current_context()
 
     click.echo("Loading boundaries...")
@@ -187,6 +193,9 @@ def run_all(force: bool):
 
     click.echo("\nRunning marts stage...")
     ctx.invoke(marts)
+
+    click.echo("\nWriting boundary GeoJSON for the choropleth layer...")
+    ctx.invoke(boundaries_geojson, outdir="data/viz_assets")
 
     click.echo("\nAll stages complete.")
 

@@ -10,12 +10,7 @@ import plotly.graph_objects as go
 import pytest
 
 from viz.figure import CLUSTER_STEP, GERMANY_CENTER, INITIAL_ZOOM, build_units_map
-from viz.palette import (
-    DEFAULT_COLOR,
-    ENERGY_COLORS,
-    GENERATOR_MARKER_SYMBOL,
-    STORAGE_MARKER_SYMBOL,
-)
+from viz.palette import DEFAULT_COLOR, ENERGY_COLORS, MARKER_SYMBOL
 
 GENERATOR_COLUMNS = (
     "longitude",
@@ -123,27 +118,49 @@ class TestPalette:
         trace = _trace_by_name(fig, "Geothermal")
         assert trace.marker.color == DEFAULT_COLOR
 
-    def test_unknown_source_keeps_its_kinds_marker(self):
+    def test_unknown_source_keeps_the_shared_circle_marker(self):
         storages = _storages()
         storages["energy_source"] = "geothermal"
         fig = build_units_map(_generators(), storages)
         trace = _trace_by_name(fig, "Geothermal")
-        assert trace.marker.symbol == STORAGE_MARKER_SYMBOL
+        assert trace.marker.symbol == MARKER_SYMBOL
 
 
 # ------------------------------------------------------------------ #
-#  Storage marker                                                     #
+#  Marker symbol                                                      #
 # ------------------------------------------------------------------ #
 
 
 class TestMarkers:
-    def test_storages_use_distinct_marker_shape(self):
+    def test_all_traces_use_the_shared_circle_symbol(self):
+        # MapLibre's scattermap only honors marker.color for "circle", so every
+        # trace renders circles; storages differ by color (#4e342e) instead.
         fig = build_units_map(_generators("bio", "wind"), _storages())
-        symbols = {t.name.lower(): t.marker.symbol for t in fig.data}
-        assert symbols["storage"] == STORAGE_MARKER_SYMBOL
-        assert symbols["bio"] == GENERATOR_MARKER_SYMBOL
-        assert symbols["wind"] == GENERATOR_MARKER_SYMBOL
-        assert STORAGE_MARKER_SYMBOL != GENERATOR_MARKER_SYMBOL
+        assert fig.data
+        for trace in fig.data:
+            assert trace.marker.symbol == MARKER_SYMBOL
+        assert MARKER_SYMBOL == "circle"
+
+    def test_layers_stack_bottom_to_top_storage_then_bio_on_top(self):
+        # Plotly paints later traces over earlier ones, so the trace order IS
+        # the paint stack: storage at the bottom, then wind, solar, hydro, gas,
+        # and bio on the very top.
+        fig = build_units_map(
+            _generators("bio", "gas", "hydro", "solar", "wind"), _storages()
+        )
+        assert [t.name for t in fig.data] == [
+            "Storage", "Wind", "Solar", "Hydro", "Gas", "Bio",
+        ]
+
+    def test_legend_reads_bio_down_to_storage(self):
+        # The map legend renders the paint stack reversed, so the sidebar
+        # starts with bio on top and ends with storage at the bottom.
+        fig = build_units_map(
+            _generators("bio", "gas", "hydro", "solar", "wind"), _storages()
+        )
+        assert fig.layout.legend.traceorder == "reversed"
+        sidebar = list(reversed([t.name for t in fig.data]))
+        assert sidebar == ["Bio", "Gas", "Hydro", "Solar", "Wind", "Storage"]
 
 
 # ------------------------------------------------------------------ #

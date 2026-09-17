@@ -4,9 +4,10 @@ Turns the data layer's query results (pandas DataFrames for generators and
 storages) into a `plotly.graph_objects.Figure` carrying one `scattermap`
 trace per energy source with WebGL point clustering, the open-street-map
 (MapLibre) basemap, and the shared curated palette — colors from
-`viz.palette.ENERGY_COLORS`, storages rendered as diamonds via
-`viz.palette.MARKER_SYMBOLS`.  This module is pure: no database access, so the
-builder is unit-testable on synthetic frames.
+`viz.palette.ENERGY_COLORS`.  All traces render as circle markers (the only
+symbol MapLibre's scattermap tint with `marker.color`); storages are
+distinguished by their dark-brown palette color.  This module is pure: no
+database access, so the builder is unit-testable on synthetic frames.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from viz.palette import (
     CHOROPLETH_COLORSCALE,
     DEFAULT_COLOR,
     ENERGY_COLORS,
-    GENERATOR_MARKER_SYMBOL,
-    STORAGE_MARKER_SYMBOL,
+    MARKER_SYMBOL,
+    SOURCE_LAYER_ORDER,
 )
 
 # Initial camera: center on Germany, zoomed to the country overview.
@@ -92,12 +93,12 @@ def _hover_lines(df: pd.DataFrame) -> list[str]:
 def _scattermap_trace(
     df: pd.DataFrame,
     source: str,
-    symbol: str,
 ) -> go.Scattermap:
     """One marker trace for a single energy source.
 
-    Color and marker shape come from the shared palette; WebGL clustering is
-    always on so the full unit layer stays interactive.
+    Color comes from the shared palette (Circle symbols so marker.color is
+    honored by MapLibre's scattermap); WebGL clustering is always on so the
+    full unit layer stays interactive.
     """
     return go.Scattermap(
         lon=df["longitude"],
@@ -106,7 +107,7 @@ def _scattermap_trace(
         name=source.capitalize(),
         marker=dict(
             color=ENERGY_COLORS.get(source, DEFAULT_COLOR),
-            symbol=symbol,
+            symbol=MARKER_SYMBOL,
         ),
         cluster=dict(enabled=True, step=CLUSTER_STEP),
         hovertext=_hover_lines(df),
@@ -174,25 +175,35 @@ def add_choropleth_fill(fig: go.Figure, level_geojson: dict, fills: pd.DataFrame
             "<b>%{location}</b><br>%{z:,.1f} " + value.unit + "<extra></extra>"
         ),
         name=metric.replace("_", " "),
+        showlegend=False,
+        colorbar=dict(
+            title=value.unit,
+            x=0,
+            xanchor="left",
+            lenmode="fraction",
+            len=0.5,
+        ),
     )
     fig.add_trace(layer)
     fig.data = fig.data[-1:] + fig.data[:-1]
 
 
-def _add_source_traces(fig: go.Figure, df: pd.DataFrame, symbol: str) -> None:
+def _add_source_traces(fig: go.Figure, df: pd.DataFrame) -> None:
     """Append one clustered, palette-colored scattermap trace per energy source.
 
-    Each distinct energy_source gets its own trace so the legend and the
-    shared palette map cleanly; empty frames contribute no traces.
+    Sources follow the shared ``SOURCE_LAYER_ORDER`` (bottom → top paint
+    stack) so the layer and sidebar order stay canonical; a source outside
+    that list is appended last so it still paints above everything.  Empty
+    frames contribute no traces.
     """
-    sources = (
-        sorted(df["energy_source"].unique())
-        if not df.empty and "energy_source" in df.columns
-        else []
-    )
-    for source in sources:
+    if df.empty or "energy_source" not in df.columns:
+        return
+    present = df["energy_source"].unique()
+    ordered = [s for s in SOURCE_LAYER_ORDER if s in present]
+    ordered += sorted(set(present) - set(SOURCE_LAYER_ORDER))
+    for source in ordered:
         subset = df[df["energy_source"] == source]
-        fig.add_trace(_scattermap_trace(subset, source, symbol))
+        fig.add_trace(_scattermap_trace(subset, source))
 
 
 def build_units_map(
@@ -200,15 +211,17 @@ def build_units_map(
 ) -> go.Figure:
     """Build the full unit-layer scatter map figure.
 
-    Generators produce one trace per distinct energy_source; storages likewise,
-    but with the storage marker shape.  The resulting figure carries an
-    open-street-map (MapLibre) basemap, WebGL clustering, and the shared
-    curated color palette.  Empty frames simply contribute no traces; the
-    figure is still valid.
+    Sources paint in shared canonical order (``SOURCE_LAYER_ORDER``), bottom →
+    top: storage, wind, solar, hydro, gas, bio — bio on the very top.  The map
+    legend flips that order, so the sidebar reads bio down to storage.  The
+    resulting figure carries an open-street-map (MapLibre) basemap, WebGL
+    clustering, and the shared curated color palette.  Empty frames simply
+    contribute no traces; the figure is still valid.
     """
     fig = go.Figure()
-    _add_source_traces(fig, generators, GENERATOR_MARKER_SYMBOL)
-    _add_source_traces(fig, storages, STORAGE_MARKER_SYMBOL)
+    _add_source_traces(fig, storages)
+    _add_source_traces(fig, generators)
+    fig.update_layout(legend=dict(traceorder="reversed"))
     fig.update_maps(
         style="open-street-map",
         center=GERMANY_CENTER,
