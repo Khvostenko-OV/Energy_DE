@@ -45,7 +45,7 @@ def unit_tooltip(unit: Mapping[str, Any]) -> str:
 
     Installed capacity (kW) always; storage capacity (kWh) only on storages;
     ISO commissioning/decommissioning dates ("active" when null); and the
-    region · district · municipality address with missing parts dropped.
+    region · municipality address with missing parts dropped.
     Lines join with ``\n``; ``DECK_TOOLTIP`` renders them as line breaks.
     """
     parts = [f"Capacity: {unit['installed_capacity']:,.0f} kW"]
@@ -54,7 +54,7 @@ def unit_tooltip(unit: Mapping[str, Any]) -> str:
     parts.append(f"Commissioning: {_fmt_date(unit['commissioning_date'])}")
     parts.append(f"Decommissioning: {_fmt_date(unit['decommissioning_date'])}")
     location = " · ".join(
-        part for part in (unit["region"], unit["district"], unit["municipality"]) if part
+        part for part in (unit["region"], unit["municipality"]) if part
     )
     if location:
         parts.append(location)

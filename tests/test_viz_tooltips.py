@@ -5,8 +5,8 @@ card for one core unit row — markup lives in the static `DECK_TOOLTIP`
 template, because Streamlit's deckgl frontend escapes interpolated values.
 The generator and storage contracts differ by exactly one line (storage
 capacity).  The tests pin the agreed rendering: titled source, kW/kWh
-formatting, ISO dates ("active" when null), and the region · district ·
-municipality address with missing parts dropped.
+formatting, ISO dates ("active" when null), and the region · municipality
+address with missing parts dropped.
 """
 
 from datetime import date
@@ -74,12 +74,13 @@ class TestGeneratorTooltip:
         text = unit_tooltip(generator_row(decommissioning_date=date(2020, 12, 31)))
         assert "Decommissioning: 2020-12-31" in text
 
-    def test_location_joins_region_district_municipality(self):
+    def test_location_joins_region_and_municipality(self):
         text = unit_tooltip(generator_row())
-        assert "Bavaria · Munich district · Munich" in text
+        assert "Bavaria · Munich" in text
+        assert "district" not in text.lower()
 
     def test_missing_location_parts_are_dropped(self):
-        text = unit_tooltip(generator_row(district=None, municipality=None))
+        text = unit_tooltip(generator_row(municipality=None))
         assert "Bavaria" in text
         assert " · " not in text
 
