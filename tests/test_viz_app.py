@@ -12,10 +12,12 @@ import pytest
 from viz.app import (
     INITIAL_STATE,
     OVERVIEW_CENTRE,
+    breadcrumb_items,
     core_tables_message,
     figure_state,
     next_drill_state,
     overview_state,
+    state_after_breadcrumb,
     state_after_click,
 )
 from viz.data import missing_core_tables
@@ -97,6 +99,62 @@ class TestDrillState:
         assert state["centre"] == (5.5, 49.5)
 
 
+def _buttons(items):
+    return [
+        item
+        for item in items
+        if isinstance(getattr(item, "id", None), dict)
+        and item.id.get("type") == "drill-breadcrumb"
+    ]
+
+
+class TestBreadcrumbs:
+    def test_breadcrumbs_read_germany_region_district(self, _assets):
+        state = next_drill_state(LEVEL_1, "Hessen")
+        state = next_drill_state(state, "Kassel")
+        labels = [item.children for item in _buttons(breadcrumb_items(state))]
+        assert labels == ["Germany", "Hessen", "Kassel"]
+
+    def test_current_level_breadcrumb_is_disabled(self, _assets):
+        state = next_drill_state(LEVEL_1, "Hessen")
+        items = _buttons(breadcrumb_items(state))
+        assert items[0].disabled is False
+        assert items[1].disabled is True
+
+    def test_clicking_region_breadcrumb_drills_up_to_level_one(self, _assets):
+        state = next_drill_state(LEVEL_1, "Hessen")
+        state = next_drill_state(state, "Kassel")
+        state = state_after_breadcrumb(state, 1)
+        assert state == overview_state(CAPACITY_MW)
+
+    def test_clicking_region_breadcrumb_drills_up_to_level_two(self, _assets):
+        state = next_drill_state(LEVEL_1, "Hessen")
+        state = next_drill_state(state, "Kassel")
+        state = state_after_breadcrumb(state, 2)
+        assert state["level"] == 2
+        assert state["parent_filters"] == {"region": "Hessen"}
+        assert state["metric"] == CAPACITY_MW
+
+    def test_breadcrumb_drill_up_recenters_on_parent_centroid(self, _assets):
+        state = next_drill_state(LEVEL_1, "Hessen")
+        state = next_drill_state(state, "Kassel")
+        state = state_after_breadcrumb(state, 2)
+        # Level-1 asset places "Hessen" at x in [5,6], y in [49,50].
+        assert state["centre"] == (5.5, 49.5)
+
+    def test_breadcrumb_click_noop_for_level_below_one_or_current(self, _assets):
+        state = next_drill_state(LEVEL_1, "Hessen")
+        assert state_after_breadcrumb(state, 0) == state
+        assert state_after_breadcrumb(state, 1) != state
+        assert state_after_breadcrumb(state, state["level"]) == state
+
+    def test_breadcrumb_anchors_are_buttons_with_patterned_ids(self):
+        items = breadcrumb_items(dict(LEVEL_1, level=2, parent_filters={"region": "Hessen"}))
+        buttons = _buttons(items)
+        assert buttons[0].id == {"type": "drill-breadcrumb", "level": 1}
+        assert buttons[1].id == {"type": "drill-breadcrumb", "level": 2}
+
+
 class TestEscapeToOverview:
     def test_empty_map_click_resets_way_back_to_level_one(self, _assets):
         # Drilled into an empty region (no units, no districts to click).
@@ -135,16 +193,19 @@ class TestEscapeToOverview:
 
 
 class TestFigureStateSeam:
-    def test_reset_trigger_renders_overview_regardless_of_stale_store(self):
-        drilled = {"level": 2, "parent_filters": {"region": "North Sea"}, "metric": CAPACITY_MW}
-        # Store may still hold the drilled level-2 state when Dash batches the
-        # reset click with the figure rebuild; the trigger, not the store, wins.
-        assert figure_state(drilled, CAPACITY_MW, "reset-button") == overview_state(
-            CAPACITY_MW
-        )
+    def test_breadcrumb_trigger_renders_target_state_regardless_of_stale_store(self, _assets):
+        drilled = {"level": 3, "parent_filters": {"region": "Hessen", "district": "Kassel"}, "metric": CAPACITY_MW}
+        # Store may still hold the drilled level-3 state when Dash batches the
+        # breadcrumb click with the figure rebuild; the trigger, not the store,
+        # wins.
+        state = figure_state(drilled, CAPACITY_MW, {"type": "drill-breadcrumb", "level": 1})
+        assert state == overview_state(CAPACITY_MW)
 
-    def test_reset_trigger_preserves_the_metric(self):
-        assert figure_state(LEVEL_1, UNIT_COUNT, "reset-button")["metric"] == UNIT_COUNT
+    def test_breadcrumb_trigger_preserves_the_metric(self, _assets):
+        drilled = {"level": 3, "parent_filters": {"region": "Hessen", "district": "Kassel"}, "metric": UNIT_COUNT}
+        state = figure_state(drilled, UNIT_COUNT, {"type": "drill-breadcrumb", "level": 2})
+        assert state["metric"] == UNIT_COUNT
+        assert state["level"] == 2
 
     def test_map_click_trigger_uses_the_store(self):
         drilled = {"level": 2, "parent_filters": {"region": "Hessen"}}
@@ -156,6 +217,31 @@ class TestFigureStateSeam:
     def test_initial_render_uses_the_initial_state(self):
         state = figure_state(None, CAPACITY_MW, None)
         assert state == INITIAL_STATE or state["level"] == 1
+
+
+class TestStandbyMap:
+    def test_standby_map_renders_osm_basemap_without_traces(self):
+        from viz.app import _standby_map
+
+        data = _standby_map(dict(LEVEL_1, centre=OVERVIEW_CENTRE))
+        assert data["layout"]["map"]["style"] == "open-street-map"
+        assert data["data"] == []
+        assert data["layout"]["map"]["center"] == {
+            "lat": OVERVIEW_CENTRE[1],
+            "lon": OVERVIEW_CENTRE[0],
+        }
+
+    def test_render_falls_back_to_standby_without_core_tables(self, monkeypatch):
+        import viz.app as viz_app
+        from viz.data import CoreTablesMissing
+
+        def _missing(state):
+            raise CoreTablesMissing(["generators"])
+
+        monkeypatch.setattr(viz_app, "_build_map", _missing)
+        data = viz_app._render_figure(dict(LEVEL_1, centre=OVERVIEW_CENTRE))
+        assert data["layout"]["map"]["style"] == "open-street-map"
+        assert data["data"] == []
 
 
 class TestCoreTablesMessage:

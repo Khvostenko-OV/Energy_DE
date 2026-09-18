@@ -15,8 +15,10 @@ which keeps gunicorn workers and the container healthcheck (issue #21) cheap.
 from __future__ import annotations
 
 import dash
-from dash import Dash, Input, Output, State, dcc, html
+import pandas as pd
+from dash import ALL, Dash, Input, Output, State, dcc, html
 
+from etl.db_schema import BOUNDARY_LEVEL_COLUMNS
 from viz.data import (
     CoreTablesMissing,
     fetch_generators,
@@ -42,17 +44,61 @@ INITIAL_STATE = {
     "centre": None,
 }
 
-# Explicit camera for the whole-country overview.  INITIAL_STATE keeps
-# centre=None so the very first render uses the figure's default (GERMANY_CENTER),
-# but any reset — button, empty-map click, level-3 click — must re-frame the
-# map on Germany explicitly, otherwise plotly leaves the camera parked on the
-# last drilled region.
 OVERVIEW_CENTRE = (GERMANY_CENTER["lon"], GERMANY_CENTER["lat"])
 
 
 def overview_state(metric=CAPACITY_MW) -> dict:
     """The country-overview drill state, recentred on Germany."""
     return dict(INITIAL_STATE, metric=metric, centre=OVERVIEW_CENTRE)
+
+
+def breadcrumb_items(drill_state):
+    state = drill_state or INITIAL_STATE
+    level = state["level"]
+    labels = ["Germany"] + [
+        state["parent_filters"][BOUNDARY_LEVEL_COLUMNS[parent_level]]
+        for parent_level in range(1, level)
+    ]
+    items = []
+    for target_level, label in enumerate(labels, start=1):
+        if items:
+            items.append(html.Span(" › ", **{"aria-hidden": "true"}))
+        current = target_level == level
+        items.append(
+            html.Button(
+                label,
+                id={"type": "drill-breadcrumb", "level": target_level},
+                n_clicks=0,
+                disabled=current,
+                style={
+                    "background": "none",
+                    "border": "none",
+                    "padding": "4px",
+                    "font": "inherit",
+                    "color": "#333" if current else "#1565c0",
+                    "textDecoration": "none" if current else "underline",
+                    "cursor": "default" if current else "pointer",
+                },
+                **{"aria-current": "location" if current else "false"},
+            )
+        )
+    return items
+
+
+def state_after_breadcrumb(drill_state, target_level):
+    state = dict(drill_state or INITIAL_STATE)
+    if target_level < 1 or target_level >= state["level"]:
+        return state
+    if target_level == 1:
+        return overview_state(state["metric"])
+    parents = {
+        BOUNDARY_LEVEL_COLUMNS[level]: state["parent_filters"][BOUNDARY_LEVEL_COLUMNS[level]]
+        for level in range(1, target_level)
+    }
+    area = parents[BOUNDARY_LEVEL_COLUMNS[target_level - 1]]
+    centre = centroids_by_name(load_level_geojson(target_level - 1)).get(area)
+    return dict(state, level=target_level, parent_filters=parents, centre=centre)
+
 
 app = Dash(__name__)
 app.title = "German Energy Units"
@@ -92,19 +138,19 @@ app.layout = html.Div(
             value=CAPACITY_MW,
             style={"position": "absolute", "top": 10, "left": 10, "zIndex": 9},
         ),
-        # Escape hatch from a drilled level back to the country overview.  The
-        # button only shows once the drill is past level 1; clicking it resets
-        # the drill state (keeping the metric toggle).
-        html.Button(
-            "Reset to Germany",
-            id="reset-button",
+        html.Nav(
+            id="drill-breadcrumbs",
+            children=breadcrumb_items(INITIAL_STATE),
             style={
                 "position": "absolute",
                 "top": 10,
                 "right": 10,
                 "zIndex": 9,
-                "display": "none",
+                "background": "rgba(255, 255, 255, 0.9)",
+                "padding": "4px 8px",
+                "borderRadius": "4px",
             },
+            **{"aria-label": "Map drill navigation"},
         ),
         # Drill state: active boundary level + the accumulated parent-name
         # chain that scopes that level's live aggregate.
@@ -187,17 +233,32 @@ def _build_map(state: dict) -> dict:
     return data
 
 
+def _standby_map(state: dict) -> dict:
+    """OSM basemap with no unit/choropleth layers for the missing-tables case.
+
+    When the core tables are absent the map still renders the country
+    overview; the ``core-status`` overlay on top of it explains what to load.
+    """
+    fig = build_units_map(pd.DataFrame(), pd.DataFrame())
+    data = fig.to_dict()
+    data["layout"]["map"]["zoom"] = DRILL_ZOOMS[state["level"]]
+    if state.get("centre"):
+        lon, lat = state["centre"]
+        data["layout"]["map"]["center"] = {"lat": lat, "lon": lon}
+    return data
+
+
 def figure_state(drill_state, metric, trigger):
     """Active state to render for, given who just changed.
 
-    When the reset button triggered the update, return the country overview
-    directly — the reset must not rely on the store having been updated first.
-    In Dash, two callbacks triggered by the same prop can run in one batch, which
-    let the figure rebuild from a stale level-2 store even though the store
-    itself moved to level 1 (issue #19 reset regression).
+    When a breadcrumb navigation triggered the update, return the target
+    state directly — the navigation must not rely on the store having been
+    updated first.  In Dash, two callbacks triggered by the same prop can run
+    in one batch, which let the figure rebuild from a stale level-2 store even
+    though the store itself moved (issue #19 reset regression).
     """
-    if trigger == "reset-button":
-        return overview_state(metric)
+    if isinstance(trigger, dict) and trigger.get("type") == "drill-breadcrumb":
+        return state_after_breadcrumb(drill_state, trigger["level"])
     state = dict(drill_state or INITIAL_STATE)
     state["metric"] = metric
     return state
@@ -229,40 +290,47 @@ def core_status(drill_state, _units_store):
     return []
 
 
+def _render_figure(state: dict) -> dict:
+    """Render the resolved drill state, falling back to the OSM standby map."""
+    try:
+        return _build_map(state)
+    except CoreTablesMissing:
+        return _standby_map(state)
+
+
 @app.callback(
     Output("units-map", "figure"),
     Input("units-store", "data"),
     Input("metric-toggle", "value"),
     Input("drill-state", "data"),
-    Input("reset-button", "n_clicks"),
+    Input({"type": "drill-breadcrumb", "level": ALL}, "n_clicks"),
 )
-def render_units_map(_, metric, drill_state, reset_clicks):
-    try:
-        return _build_map(figure_state(drill_state, metric, dash.callback_context.triggered_id))
-    except CoreTablesMissing:
-        return dash.no_update
+def render_units_map(_, metric, drill_state, _breadcrumb_clicks):
+    state = figure_state(drill_state, metric, dash.callback_context.triggered_id)
+    return _render_figure(state)
 
 
 @app.callback(
     Output("drill-state", "data"),
     Input("units-map", "clickData"),
-    Input("reset-button", "n_clicks"),
+    Input({"type": "drill-breadcrumb", "level": ALL}, "n_clicks"),
     State("drill-state", "data"),
     State("metric-toggle", "value"),
     prevent_initial_call=True,
 )
-def resolve_drill_state(click_data, n_clicks, drill_state, metric):
-    """Single owner of drill-state: a map click drills, the reset button escapes.
+def resolve_drill_state(click_data, breadcrumb_clicks, drill_state, metric):
+    """Single owner of drill-state: a map click drills, a breadcrumb navigates up.
 
     Both inputs can only change one at a time, so the trigger identifies the
-    request — clicking the reset button while drilled never fires the map
-    branch.  (Keeping one output owner matters: with two callbacks writing
-    drill-state, Dash's last-response-wins silently clobbered drills.)
+    request — clicking a breadcrumb while drilled never fires the map branch.
+    (Keeping one output owner matters: with two callbacks writing drill-state,
+    Dash's last-response-wins silently clobbered drills.)
     """
     state = dict(drill_state or INITIAL_STATE)
     state["metric"] = metric
-    if dash.callback_context.triggered_id == "reset-button":
-        return overview_state(metric)
+    trigger = dash.callback_context.triggered_id
+    if isinstance(trigger, dict) and trigger.get("type") == "drill-breadcrumb":
+        return state_after_breadcrumb(state, trigger["level"])
     if not click_data:
         # Page-load callback with no click yet; keep the current drill state.
         return state
@@ -280,21 +348,11 @@ def resolve_drill_state(click_data, n_clicks, drill_state, metric):
 
 
 @app.callback(
-    Output("reset-button", "style"),
+    Output("drill-breadcrumbs", "children"),
     Input("drill-state", "data"),
 )
-def toggle_reset_visibility(drill_state):
-    state = dict(drill_state or INITIAL_STATE)
-    visible = dict(
-        position="absolute",
-        top=10,
-        right=10,
-        zIndex=9,
-        display="block",
-    )
-    if state["level"] == 1:
-        visible["display"] = "none"
-    return visible
+def render_breadcrumbs(drill_state):
+    return breadcrumb_items(drill_state)
 
 
 if __name__ == "__main__":

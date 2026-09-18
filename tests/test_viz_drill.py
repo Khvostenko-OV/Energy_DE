@@ -90,7 +90,7 @@ class TestDrillValue:
 
     def test_unit_count_is_a_row_count(self):
         v = drill_value(UNIT_COUNT)
-        assert v == DrillValue(value_expr="COUNT(*)", unit="unit")
+        assert v == DrillValue(value_expr="COUNT(*)", unit="Units")
 
     def test_metrics_are_not_the_same_expression(self):
         assert drill_value(CAPACITY_MW) != drill_value(UNIT_COUNT)
