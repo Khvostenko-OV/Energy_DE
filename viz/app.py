@@ -60,10 +60,11 @@ except SQLAlchemyError:
 
 if missing:
     missing_names = ", ".join(f"`core.{table}`" for table in missing)
-    st.warning(
-        f"No core tables in the database — {missing_names} are missing. "
-        "Load them with `python -m etl run-all`."
-    )
+    with st.container(height=100):
+        st.warning(
+            f"No core tables in the database — {missing_names} are missing. "
+            "Load them with `python -m etl run-all`."
+        )
     st.pydeck_chart(build_deck(), width="stretch", height=STANDBY_MAP_HEIGHT)
     st.stop()
 
