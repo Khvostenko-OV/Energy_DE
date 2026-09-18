@@ -42,3 +42,7 @@ MAP_STYLES = {"Light": LIGHT_MAP_STYLE}
 # Default viewport for the country overview.
 GERMANY_CENTER = {"lon": 10.4, "lat": 51.1}
 INITIAL_ZOOM = 5.2
+
+# Pixel height of the map window inside the app (streamlit's pydeck_chart
+# height); larger than the 500px default so the map dominates the page.
+MAP_HEIGHT = 800

@@ -13,6 +13,7 @@ from viz.config import (
     INITIAL_LEVEL,
     INITIAL_ZOOM,
     LIGHT_MAP_STYLE,
+    MAP_HEIGHT,
     MAP_LEVELS,
     TIMESCOPE_START,
     default_timescope,
@@ -47,6 +48,9 @@ class TestOverviewDefaults:
 
     def test_initial_zoom_shows_the_whole_country(self):
         assert 4 < INITIAL_ZOOM < 7
+
+    def test_map_window_is_large(self):
+        assert MAP_HEIGHT >= 600
 
 
 class TestBasemapDefaults:

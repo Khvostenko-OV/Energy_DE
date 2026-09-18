@@ -20,12 +20,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
-from viz.config import MAP_STYLES
+from viz.config import MAP_HEIGHT, MAP_STYLES
 from viz.data import CORE_VIS_TABLES, missing_core_tables
 from viz.map_builder import build_deck
 
 st.set_page_config(page_title="German Energy Units", layout="wide")
-st.title("German Energy Units")
+
+# Trim the main-area margins so the map window dominates the page instead of
+# floating in a large padded block.
+st.markdown(
+    "<style>.block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }</style>",
+    unsafe_allow_html=True,
+)
 
 # An unreachable database fails the engine connect; both cases mean the same
 # thing to the user, so both land on the standby map.  Anything else (a
@@ -42,8 +48,10 @@ if missing:
         f"No core tables in the database — {missing_names} are missing. "
         "Load them with `python -m etl run-all`."
     )
-    st.pydeck_chart(build_deck())
+    st.pydeck_chart(build_deck(), width="stretch", height=MAP_HEIGHT)
     st.stop()
 
 map_style = st.sidebar.selectbox("Map style", list(MAP_STYLES))
-st.pydeck_chart(build_deck(map_style=MAP_STYLES[map_style]))
+st.pydeck_chart(
+    build_deck(map_style=MAP_STYLES[map_style]), width="stretch", height=MAP_HEIGHT
+)
