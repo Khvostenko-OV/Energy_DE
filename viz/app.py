@@ -32,19 +32,34 @@ from viz.data import (
     missing_core_tables,
 )
 from viz.map_builder import build_deck, build_source_layers
-from viz.palette import SOURCE_LAYER_ORDER
+from viz.palette import SOURCE_LAYER_ORDER, source_color
 from viz.tooltip import DECK_TOOLTIP, source_header, unit_tooltip
 
 # Sources in sidebar display order: generators top, storage last (bio → storage),
 # mirroring the canonical palette ordering reversed from SOURCE_LAYER_ORDER.
 SOURCE_DISPLAY_ORDER: tuple[str, ...] = tuple(reversed(SOURCE_LAYER_ORDER))
 
+# Colored bullet before each per-source checkbox label.  Label text is
+# sanitized markdown (no inline HTML), so the dots arrive as CSS keyed on the
+# widget's `st-key-<key>` class, painted with the source's palette color.
+SOURCE_BULLET_STYLES = "\n".join(
+    (
+        f"[data-testid='stSidebar'] .st-key-source_{source} "
+        "[data-testid='stWidgetLabel'] p::before "
+        f"{{ content: '● '; color: {source_color(source)}; }}"
+    )
+    for source in SOURCE_DISPLAY_ORDER
+)
+
 st.set_page_config(page_title="German Energy Units", layout="wide")
 
 # Trim the main-area margins so the map window dominates the page instead of
-# floating in a large padded block.
+# floating in a large padded block; then paint the per-source sidebar bullets.
 st.markdown(
-    "<style>.block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }</style>",
+    "<style>"
+    ".block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }"
+    f"{SOURCE_BULLET_STYLES}"
+    "</style>",
     unsafe_allow_html=True,
 )
 
