@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
-from viz.config import MAP_HEIGHT, MAP_STYLES, default_timescope
+from viz.config import MAP_HEIGHT, MAP_STYLES, STANDBY_MAP_HEIGHT, default_timescope
 from viz.data import (
     CORE_VIS_TABLES,
     fetch_active_units,
@@ -64,7 +64,7 @@ if missing:
         f"No core tables in the database — {missing_names} are missing. "
         "Load them with `python -m etl run-all`."
     )
-    st.pydeck_chart(build_deck(), width="stretch", height=MAP_HEIGHT)
+    st.pydeck_chart(build_deck(), width="stretch", height=STANDBY_MAP_HEIGHT)
     st.stop()
 
 # ── Sidebar: source checkboxes + check-all ────────────────────────────── #

@@ -15,6 +15,7 @@ from viz.config import (
     LIGHT_MAP_STYLE,
     MAP_HEIGHT,
     MAP_LEVELS,
+    STANDBY_MAP_HEIGHT,
     TIMESCOPE_START,
     default_timescope,
 )
@@ -51,6 +52,10 @@ class TestOverviewDefaults:
 
     def test_map_window_is_large(self):
         assert MAP_HEIGHT >= 600
+
+    def test_standby_map_is_just_a_hint(self):
+        assert STANDBY_MAP_HEIGHT == 500
+        assert STANDBY_MAP_HEIGHT < MAP_HEIGHT
 
 
 class TestBasemapDefaults:
