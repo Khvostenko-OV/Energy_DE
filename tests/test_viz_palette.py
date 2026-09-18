@@ -14,7 +14,7 @@ class TestSourceColor:
     def test_loaded_sources_get_their_palette_hex(self):
         assert source_color("hydro") == "#1e88e5"
         assert source_color("storage") == "#4e342e"
-        assert source_color("wind") == "#c2185b"
+        assert source_color("wind") == "#9c27b0"
 
     def test_unknown_source_falls_back_to_default_color(self):
         assert source_color("nuclear") == DEFAULT_COLOR

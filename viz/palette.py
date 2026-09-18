@@ -18,7 +18,7 @@ ENERGY_COLORS = {
     "gas": "#ef6c00",
     "hydro": "#1e88e5",
     "solar": "#fdd835",
-    "wind": "#c2185b",
+    "wind": "#9c27b0",
     "diesel": "#6d4c41",
     "storage": "#4e342e",
 }
