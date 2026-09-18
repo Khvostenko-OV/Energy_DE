@@ -20,6 +20,7 @@ the tooltip from `viz.tooltip`, and the header strings from `viz.header`.
 
 from __future__ import annotations
 
+import html
 import sys
 from pathlib import Path
 
@@ -71,10 +72,17 @@ SOURCE_BULLET_STYLES = "\n".join(
 st.set_page_config(page_title="German Energy Units", layout="wide")
 
 # Trim the main-area margins so the map window dominates the page instead of
-# floating in a large padded block; then paint the per-source sidebar bullets.
+# floating in a large padded block; hide the Streamlit status bar / main menu
+# so it doesn't overlap the header; size the compact header strip (labels and
+# values on one line); then paint the per-source sidebar bullets.
 st.markdown(
     "<style>"
     ".block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }"
+    "#MainMenu, header { visibility: hidden; }"
+    ".hdr-row { display: flex; flex-wrap: wrap; gap: 0.3rem 2.5rem; "
+    "align-items: baseline; margin: 0.25rem 0 0.25rem; }"
+    ".hdr-label { color: #5f6368; font-size: 0.8rem; margin-right: 0.4rem; }"
+    ".hdr-value { font-size: 1.05rem; font-weight: 600; }"
     f"{SOURCE_BULLET_STYLES}"
     "</style>",
     unsafe_allow_html=True,
@@ -99,15 +107,6 @@ if missing:
         )
     st.pydeck_chart(build_deck(), width="stretch", height=STANDBY_MAP_HEIGHT)
     st.stop()
-
-# ── Sidebar: drill level ───────────────────────────────────────────────── #
-
-st.sidebar.header("Level")
-level_label = st.sidebar.selectbox(
-    "Drill level",
-    MAP_LEVELS,
-    key="level",
-)
 
 # ── Sidebar: source checkboxes + check-all ────────────────────────────── #
 
@@ -136,6 +135,16 @@ checked_sources: list[str] = [
         key=f"source_{source}",
     )
 ]
+
+# ── Sidebar: scope ─────────────────────────────────────────────────────── #
+
+st.sidebar.header("Scope")
+level_label = st.sidebar.selectbox(
+    "Scope",
+    MAP_LEVELS,
+    key="level",
+    label_visibility="collapsed",
+)
 
 # ── Sidebar: timescope ─────────────────────────────────────────────────── #
 
@@ -167,7 +176,9 @@ for rows in units.values():
 
 # The level drives the displayed-area scope; the metrics share the map's
 # exact timescope predicate and checked-source set, so all four header values
-# track every filter change on the same rows the layers render.
+# track every filter change on the same rows the layers render.  The strip
+# renders label + value on one line each (CSS `.hdr-row`), smaller than
+# st.metric's stacked layout.
 areas = fetch_areas(engine, LEVEL_INDEX[level_label])
 metrics = fetch_header_metrics(
     engine,
@@ -176,13 +187,17 @@ metrics = fetch_header_metrics(
     sources=tuple(checked_sources),
 )
 
-st.subheader(
-    scope_title(level_label, areas["area_count"], areas.get("area_name"))
+header_cells = "".join(
+    f"<span class='hdr-label'>{html.escape(str(label))}</span>"
+    f"<span class='hdr-value'>{html.escape(str(value))}</span>"
+    for label, value in (
+        ("Scope", scope_title(level_label, areas["area_count"], areas.get("area_name"))),
+        ("Installed capacity (MW)", format_mw(metrics["capacity_mw"])),
+        ("Active units", format_unit_count(metrics["unit_count"])),
+        ("Area (km²)", format_area_km2(areas["total_area_km2"])),
+    )
 )
-capacity_col, count_col, area_col = st.columns(3)
-capacity_col.metric("Installed capacity (MW)", format_mw(metrics["capacity_mw"]))
-count_col.metric("Active units", format_unit_count(metrics["unit_count"]))
-area_col.metric("Area (km²)", format_area_km2(areas["total_area_km2"]))
+st.markdown(f"<div class='hdr-row'>{header_cells}</div>", unsafe_allow_html=True)
 
 layers = build_source_layers(units)
 st.pydeck_chart(
