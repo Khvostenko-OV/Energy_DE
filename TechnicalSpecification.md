@@ -94,12 +94,12 @@ add property 'close_to' with reference to close unit
 
 ## Serving
 ### 1. Visualization
-- Metabase dashboard with map
+- Dashboard with map
 - Checkboxes to show units of different type (Bio, Hydro, Wind, Solar, Gas, Storage)
-- Checkbox to show/hide decommissioned units
-- Multiselectors to include different regions, districts, municipalities
-- Calendar to choose time scope 
-- Charts showing the total installed capacity according to the selected unit types
+- Multiselector to include different regions, districts, municipalities
+- Selectbox to choose timescope 
+- Header showing the total installed capacity according to the selected unit types and timescope
+For more details see VisualizationSpec.md
 
 ### 2. Admin panel (auth)
 - Correcting records (CRUD)
