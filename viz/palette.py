@@ -27,6 +27,11 @@ ENERGY_COLORS = {
 # unexpected source still renders instead of crashing the map builder.
 DEFAULT_COLOR = "#9e9e9e"
 
+
+def source_color(source: str) -> str:
+    """Hex color for an energy_source, falling back to ``DEFAULT_COLOR``."""
+    return ENERGY_COLORS.get(source, DEFAULT_COLOR)
+
 # Source paint order, bottom of the layer stack first.  The map's scatter
 # layers paint in this order (storage at the very bottom, bio on the very
 # top); the sidebar's checkboxes read it reversed, so the sidebar lists bio
