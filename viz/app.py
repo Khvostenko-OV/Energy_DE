@@ -9,6 +9,14 @@ deck from `viz.map_builder`, and the standby check from `viz.data`.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Streamlit adds only this script's folder to sys.path, so the repo root
+# wouldn't be importable and `import viz.*` below would fail.  Put it there
+# first (idempotent when launched another way).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
