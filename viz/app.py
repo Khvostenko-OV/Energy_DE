@@ -108,7 +108,6 @@ checked_sources: list[str] = [
         source.title(),
         value=select_all,
         key=f"source_{source}",
-        disabled=not select_all,
     )
 ]
 
