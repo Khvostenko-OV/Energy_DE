@@ -33,7 +33,7 @@ from viz.data import (
 )
 from viz.map_builder import build_deck, build_source_layers
 from viz.palette import SOURCE_LAYER_ORDER
-from viz.tooltip import DECK_TOOLTIP, unit_tooltip
+from viz.tooltip import DECK_TOOLTIP, source_header, unit_tooltip
 
 # Sources in sidebar display order: generators top, storage last (bio → storage),
 # mirroring the canonical palette ordering reversed from SOURCE_LAYER_ORDER.
@@ -120,7 +120,8 @@ units = fetch_active_units(
 )
 for rows in units.values():
     for row in rows:
-        row["tooltip"] = unit_tooltip(row)
+        row["source_header"] = source_header(row)
+        row["unit_body"] = unit_tooltip(row)
 
 layers = build_source_layers(units)
 st.pydeck_chart(

@@ -1,15 +1,17 @@
 """Unit tests for the unit tooltip contract (issue #24).
 
-`unit_tooltip` renders the hover card for one core unit row.  The generator
-and storage contracts differ by exactly one line (storage capacity).  The
-tests pin the agreed rendering: titled source, kW/kWh formatting, ISO dates
-("active" when null), and the region · district · municipality address with
-missing parts dropped.
+`source_header` and `unit_tooltip` render the plain-text fields of the hover
+card for one core unit row — markup lives in the static `DECK_TOOLTIP`
+template, because Streamlit's deckgl frontend escapes interpolated values.
+The generator and storage contracts differ by exactly one line (storage
+capacity).  The tests pin the agreed rendering: titled source, kW/kWh
+formatting, ISO dates ("active" when null), and the region · district ·
+municipality address with missing parts dropped.
 """
 
 from datetime import date
 
-from viz.tooltip import unit_tooltip
+from viz.tooltip import DECK_TOOLTIP, source_header, unit_tooltip
 
 
 def generator_row(**overrides):
@@ -36,9 +38,22 @@ def storage_row(**overrides):
     return row
 
 
+class TestDeckTooltipTemplate:
+    def test_template_references_the_decorated_plain_text_fields(self):
+        assert "{source_header}" in DECK_TOOLTIP["html"]
+        assert "{unit_body}" in DECK_TOOLTIP["html"]
+
+    def test_template_itself_renders_the_markup(self):
+        assert "<b>" in DECK_TOOLTIP["html"]
+        assert "<br/>" in DECK_TOOLTIP["html"]
+
+
 class TestGeneratorTooltip:
     def test_source_is_the_titled_header(self):
-        assert unit_tooltip(generator_row()).startswith("<b>Solar</b>")
+        assert source_header(generator_row()) == "Solar"
+
+    def test_header_never_contains_markup(self):
+        assert "<" not in source_header(generator_row())
 
     def test_installed_capacity_is_formatted_in_kw(self):
         text = unit_tooltip(generator_row(installed_capacity=1500.0))
@@ -78,4 +93,4 @@ class TestStorageTooltip:
         assert "kWh" not in unit_tooltip(generator_row())
 
     def test_storage_source_header_is_titled(self):
-        assert unit_tooltip(storage_row()).startswith("<b>Storage</b>")
+        assert source_header(storage_row()) == "Storage"

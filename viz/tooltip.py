@@ -1,9 +1,14 @@
 """Unit tooltip rendering for the Streamlit viz app (issue #24).
 
-One hover card per fetched unit row.  The rendering is a pure function of the
-row dict: the generator and storage cards differ by exactly one line (storage
-capacity, kWh).  Rows are decorated with their ``tooltip`` string at fetch
-time, and the deck points every layer at that field via ``DECK_TOOLTIP``.
+One hover card per fetched unit row.  The generator and storage cards differ
+by exactly one line (storage capacity, kWh).  Rows are decorated at fetch
+time with two plain-text fields — the titled ``source_header`` and the
+multi-line ``unit_body`` — that ``DECK_TOOLTIP`` interpolates.
+
+The template carries all markup; the interpolated values must stay plain
+text, because Streamlit's deckgl frontend HTML-escapes tooltip values before
+inserting them — any markup in a value would render literally (the bug this
+layout fixes).
 """
 
 from __future__ import annotations
@@ -11,9 +16,16 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Mapping
 
-# Deck-level tooltip template: every layer's rows carry their own pre-rendered
-# ``tooltip`` string, so one template serves generators and storages alike.
-DECK_TOOLTIP: dict[str, str] = {"html": "{tooltip}"}
+# Deck-level tooltip template.  All HTML lives here; the {source_header} and
+# {unit_body} values are escaped by the frontend before interpolation, so the
+# body's newlines need `white-space: pre-line` to render as line breaks.
+DECK_TOOLTIP: dict[str, str] = {
+    "html": (
+        "<b>{source_header}</b>"
+        "<br/>"
+        "<span style='white-space: pre-line;'>{unit_body}</span>"
+    )
+}
 
 
 def _fmt_date(value: Any, *, fallback: str = "active") -> str:
@@ -23,19 +35,20 @@ def _fmt_date(value: Any, *, fallback: str = "active") -> str:
     return fallback
 
 
-def unit_tooltip(unit: Mapping[str, Any]) -> str:
-    """Hover card for one core unit row (generator or storage).
+def source_header(unit: Mapping[str, Any]) -> str:
+    """Titled source label, e.g. ``"solar"`` -> ``"Solar"``."""
+    return unit["energy_source"].title()
 
-    Source and installed capacity (kW) always; storage capacity (kWh) only on
-    storages; ISO commissioning/decommissioning dates ("active" when null);
-    and the region · district · municipality address with missing parts
-    dropped.  Lines join with ``<br/>`` so the card renders in pydeck's html
-    tooltip.
+
+def unit_tooltip(unit: Mapping[str, Any]) -> str:
+    """Multi-line hover-card body for one core unit row (plain text).
+
+    Installed capacity (kW) always; storage capacity (kWh) only on storages;
+    ISO commissioning/decommissioning dates ("active" when null); and the
+    region · district · municipality address with missing parts dropped.
+    Lines join with ``\n``; ``DECK_TOOLTIP`` renders them as line breaks.
     """
-    parts = [
-        f"<b>{unit['energy_source'].title()}</b>",
-        f"Capacity: {unit['installed_capacity']:,.0f} kW",
-    ]
+    parts = [f"Capacity: {unit['installed_capacity']:,.0f} kW"]
     if unit.get("storage_capacity") is not None:
         parts.append(f"Storage: {unit['storage_capacity']:,.0f} kWh")
     parts.append(f"Commissioning: {_fmt_date(unit['commissioning_date'])}")
@@ -45,4 +58,4 @@ def unit_tooltip(unit: Mapping[str, Any]) -> str:
     )
     if location:
         parts.append(location)
-    return "<br/>".join(parts)
+    return "\n".join(parts)
