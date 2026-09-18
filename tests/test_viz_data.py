@@ -1,23 +1,33 @@
-"""Unit tests for the viz data-access seam (issue #23).
+"""Unit tests for the viz data-access seams (issues #23, #25).
 
-Two seams live in `viz.data`: the engine selection (`VIZ_DATABASE_URL` with a
-`DATABASE_URL` fallback) and the standby detection (`missing_core_tables`).
-Neither touches a real database — the engine tests only build engines and the
-standby tests drive a stub engine whose rows mimic `information_schema`.
+Seams live in `viz.data`: the engine selection (`VIZ_DATABASE_URL` with a
+`DATABASE_URL` fallback), the standby detection (`missing_core_tables`), the
+active-unit fetches (issue #24), and the header aggregates (issue #25) — the
+capacity/count union over checked active units plus the displayed-area count
+and km² sum from `service.boundaries`.  None touch a real database: the
+engine tests only build engines, the standby tests drive a stub engine whose
+rows mimic `information_schema`, and the fetch tests drive recording or
+row-returning stub engines.
 """
 
 import os
 from contextlib import nullcontext
 from datetime import date
 
+import pytest
 from sqlalchemy import create_engine
 
 from viz.data import (
     CORE_VIS_TABLES,
     STORAGE_COLUMNS_SQL,
     UNIT_COLUMNS_SQL,
+    area_name_query,
+    areas_query,
     fetch_active_units,
+    fetch_areas,
+    fetch_header_metrics,
     get_viz_engine,
+    header_metrics_query,
     missing_core_tables,
     run_query,
     unit_query,
@@ -217,3 +227,161 @@ class TestRunQuery:
         assert result == [
             {"unit_id": 1, "energy_source": "solar", "installed_capacity": 120.0}
         ]
+
+
+class TestAreasQuery:
+    def test_counts_and_sums_area_at_the_level(self):
+        sql, params = areas_query(1)
+        assert sql == (
+            "SELECT COUNT(*) AS area_count, "
+            "COALESCE(SUM(area), 0.0) AS total_area "
+            "FROM service.boundaries WHERE level = :level"
+        )
+        assert params == {"level": 1}
+
+    def test_offshore_area_is_not_special_cased(self):
+        sql, _ = areas_query(1)
+        assert "area" in sql
+        assert "filter" not in sql
+
+
+class TestAreaNameQuery:
+    def test_selects_the_single_displayed_area_name(self):
+        sql, params = area_name_query(0)
+        assert sql == "SELECT name FROM service.boundaries WHERE level = :level"
+        assert params == {"level": 0}
+
+
+class _AreasStub:
+    """Stub engine whose rows depend on the executed query (count/name)."""
+
+    def __init__(self, count, name):
+        self._count = count
+        self._name = name
+        self.calls = []
+
+    def connect(self):
+        return nullcontext(_AreasConnection(self))
+
+
+class _AreasConnection:
+    def __init__(self, stub):
+        self._stub = stub
+
+    def execute(self, query, params=None):
+        self._stub.calls.append((str(query), params))
+        if "COUNT" in str(query):
+            return [_MappingRow(area_count=self._stub._count, total_area=357588.4)]
+        return [_MappingRow(name=self._stub._name)]
+
+
+class TestFetchAreas:
+    def test_returns_count_and_km2_sum(self):
+        rows = [_MappingRow(area_count=19, total_area=357588.4)]
+        result = fetch_areas(_RowsEngine(rows), 1)
+        assert result["area_count"] == 19
+        assert result["total_area_km2"] == 357588.4
+
+    def test_adds_the_area_name_when_exactly_one_area(self):
+        stub = _AreasStub(count=1, name="Germany")
+        result = fetch_areas(stub, 0)
+        assert result["area_name"] == "Germany"
+
+    def test_exactly_one_area_triggers_the_name_query(self):
+        stub = _AreasStub(count=1, name="Germany")
+        fetch_areas(stub, 0)
+        assert [sql for sql, _ in stub.calls] == [
+            "SELECT COUNT(*) AS area_count, "
+            "COALESCE(SUM(area), 0.0) AS total_area "
+            "FROM service.boundaries WHERE level = :level",
+            "SELECT name FROM service.boundaries WHERE level = :level",
+        ]
+
+    def test_no_name_key_when_many_areas(self):
+        stub = _AreasStub(count=19, name="Germany")
+        result = fetch_areas(stub, 1)
+        assert "area_name" not in result
+        assert len(stub.calls) == 1
+
+
+class TestHeaderMetricsQuery:
+    def test_generator_sources_read_core_generators(self):
+        sql, _ = header_metrics_query(
+            date(1990, 1, 1), date(2010, 1, 1), sources=("solar", "wind")
+        )
+        assert sql == (
+            "SELECT COUNT(*) AS unit_count, "
+            "COALESCE(SUM(installed_capacity), 0.0) / 1000.0 AS capacity_mw "
+            "FROM ("
+            "SELECT installed_capacity FROM core.generators "
+            "WHERE energy_source = :source_0 "
+            "AND commissioning_date <= :to "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
+            " UNION ALL "
+            "SELECT installed_capacity FROM core.generators "
+            "WHERE energy_source = :source_1 "
+            "AND commissioning_date <= :to "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
+            ") AS units"
+        )
+
+    def test_storage_source_reads_core_storages(self):
+        sql, _ = header_metrics_query(
+            date(1990, 1, 1), date(2010, 1, 1), sources=("solar", "storage")
+        )
+        assert (
+            "SELECT installed_capacity FROM core.storages "
+            "WHERE energy_source = :source_1 " in sql
+        )
+        assert "FROM core.generators" in sql
+
+    def test_predicate_matches_the_unit_fetch(self):
+        sql, _ = header_metrics_query(
+            date(1990, 1, 1), date(2010, 1, 1), sources=("wind",)
+        )
+        assert "commissioning_date <= :to" in sql
+        assert "decommissioning_date IS NULL OR decommissioning_date >= :from" in sql
+
+    def test_capacity_is_kw_sum_divided_by_1000(self):
+        sql, _ = header_metrics_query(
+            date(1990, 1, 1), date(2010, 1, 1), sources=("wind",)
+        )
+        assert "COALESCE(SUM(installed_capacity), 0.0) / 1000.0 AS capacity_mw" in sql
+
+    def test_params_are_bound_per_source_plus_timescope(self):
+        sql, params = header_metrics_query(
+            date(1990, 1, 1), date(2010, 1, 1), sources=("solar", "storage")
+        )
+        assert params == {
+            "from": date(1990, 1, 1),
+            "to": date(2010, 1, 1),
+            "source_0": "solar",
+            "source_1": "storage",
+        }
+
+    def test_empty_sources_are_rejected(self):
+        with pytest.raises(ValueError):
+            header_metrics_query(date(1990, 1, 1), date(2010, 1, 1), sources=())
+
+
+class TestFetchHeaderMetrics:
+    def test_returns_capacity_and_unit_count(self):
+        rows = [_MappingRow(unit_count=3, capacity_mw=12.0)]
+        result = fetch_header_metrics(
+            _RowsEngine(rows),
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("wind",),
+        )
+        assert result == {"unit_count": 3, "capacity_mw": 12.0}
+
+    def test_empty_sources_yield_zero_without_a_query(self):
+        engine = _RecordingEngine()
+        result = fetch_header_metrics(
+            engine,
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=(),
+        )
+        assert engine.calls == []
+        assert result == {"unit_count": 0, "capacity_mw": 0.0}

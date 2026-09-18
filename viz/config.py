@@ -18,6 +18,17 @@ MAP_LEVELS = ("Germany", "Regions", "Districts", "Municipalities")
 # The drill level selected on first run.
 INITIAL_LEVEL = "Germany"
 
+# Chooser label → boundary level number, the ``level`` column value in
+# ``service.boundaries`` (0 = country, 1 = regions, 2 = districts,
+# 3 = municipalities).  Every ``MAP_LEVELS`` label has an entry, and the
+# header aggregates (issue #25) filter ``service.boundaries`` through it.
+LEVEL_INDEX = {
+    "Germany": 0,
+    "Regions": 1,
+    "Districts": 2,
+    "Municipalities": 3,
+}
+
 # Per-source sidebar checkboxes in canonical display order — the six loaded
 # sources, generators first (bio → wind) then storage.  All checked by default.
 DEFAULT_SOURCES = ("bio", "gas", "hydro", "solar", "wind", "storage")

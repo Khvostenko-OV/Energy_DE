@@ -12,6 +12,7 @@ from viz.config import (
     GERMANY_CENTER,
     INITIAL_LEVEL,
     INITIAL_ZOOM,
+    LEVEL_INDEX,
     LIGHT_MAP_STYLE,
     MAP_HEIGHT,
     MAP_LEVELS,
@@ -40,6 +41,20 @@ class TestLevelDefaults:
 
     def test_level_chooser_starts_with_germany(self):
         assert MAP_LEVELS[0] == "Germany"
+
+    def test_initial_level_maps_to_the_country_boundary(self):
+        assert LEVEL_INDEX[INITIAL_LEVEL] == 0
+
+    def test_every_chooser_label_maps_to_a_boundary_level(self):
+        assert list(LEVEL_INDEX) == list(MAP_LEVELS)
+
+    def test_levels_index_matches_the_boundary_table(self):
+        assert LEVEL_INDEX == {
+            "Germany": 0,
+            "Regions": 1,
+            "Districts": 2,
+            "Municipalities": 3,
+        }
 
 
 class TestOverviewDefaults:

@@ -1,14 +1,21 @@
-"""Streamlit entrypoint for the German Energy Units map (issues #23, #24).
+"""Streamlit entrypoint for the German Energy Units map (issues #23-#25).
 
 T2 (#24): renders one scatter layer per checked energy source with
 active-units timescope filtering, a sidebar check-all toggle, per-source
 checkboxes, a date-range timescope, and a hover card for every unit.
 
+T3 (#25): a live header above the map.  The header shows the active drill
+level and the count of displayed areas — or the single area's name when
+exactly one area is shown (e.g. "Region Berlin") — plus total installed
+capacity (MW), the active-unit count, and the displayed area in km².  All
+figures recompute on every rerun (source/timescope/level changes) and pull
+from the same predicate the map renders.
+
 T1 tracer (#23): when the core tables are absent — or the database is
 unreachable — the app hides the data widgets and shows only a full-width
 "No core tables" notice plus the empty basemap deck.  Widget defaults come
 from `viz.config`, the deck from `viz.map_builder`, the fetch from `viz.data`,
-and the tooltip from `viz.tooltip`.
+the tooltip from `viz.tooltip`, and the header strings from `viz.header`.
 """
 
 from __future__ import annotations
@@ -24,13 +31,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
-from viz.config import MAP_HEIGHT, MAP_STYLES, STANDBY_MAP_HEIGHT, default_timescope
+from viz.config import (
+    LEVEL_INDEX,
+    MAP_HEIGHT,
+    MAP_LEVELS,
+    MAP_STYLES,
+    STANDBY_MAP_HEIGHT,
+    default_timescope,
+)
 from viz.data import (
     CORE_VIS_TABLES,
     fetch_active_units,
+    fetch_areas,
+    fetch_header_metrics,
     get_viz_engine,
     missing_core_tables,
 )
+from viz.header import format_area_km2, format_mw, format_unit_count, scope_title
 from viz.map_builder import build_deck, build_source_layers
 from viz.palette import SOURCE_LAYER_ORDER, source_color
 from viz.tooltip import DECK_TOOLTIP, source_header, unit_tooltip
@@ -82,6 +99,15 @@ if missing:
         )
     st.pydeck_chart(build_deck(), width="stretch", height=STANDBY_MAP_HEIGHT)
     st.stop()
+
+# ── Sidebar: drill level ───────────────────────────────────────────────── #
+
+st.sidebar.header("Level")
+level_label = st.sidebar.selectbox(
+    "Drill level",
+    MAP_LEVELS,
+    key="level",
+)
 
 # ── Sidebar: source checkboxes + check-all ────────────────────────────── #
 
@@ -136,6 +162,27 @@ for rows in units.values():
     for row in rows:
         row["source_header"] = source_header(row)
         row["unit_body"] = unit_tooltip(row)
+
+# ── Header aggregates (issue #25) ──────────────────────────────────────── #
+
+# The level drives the displayed-area scope; the metrics share the map's
+# exact timescope predicate and checked-source set, so all four header values
+# track every filter change on the same rows the layers render.
+areas = fetch_areas(engine, LEVEL_INDEX[level_label])
+metrics = fetch_header_metrics(
+    engine,
+    active_from=active_from,
+    active_to=active_to,
+    sources=tuple(checked_sources),
+)
+
+st.subheader(
+    scope_title(level_label, areas["area_count"], areas.get("area_name"))
+)
+capacity_col, count_col, area_col = st.columns(3)
+capacity_col.metric("Installed capacity (MW)", format_mw(metrics["capacity_mw"]))
+count_col.metric("Active units", format_unit_count(metrics["unit_count"]))
+area_col.metric("Area (km²)", format_area_km2(areas["total_area_km2"]))
 
 layers = build_source_layers(units)
 st.pydeck_chart(

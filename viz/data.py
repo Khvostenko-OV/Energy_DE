@@ -7,9 +7,13 @@ standby-detection seam: with an unreachable database an engine connect raises
 and the caller treats it like missing tables.
 
 `unit_query` / `fetch_active_units` (issue #24) build and run the active-unit
-queries the scatter layers render.  Both are pure seams — the SQL and its
-bound params are asserted directly, and fetches run through an injectable
-engine so tests never touch a real database.
+queries the scatter layers render, and `header_metrics_query` /
+`fetch_header_metrics` plus `areas_query` / `area_name_query` / `fetch_areas`
+(issue #25) build and run the header aggregate queries — the capacity/count
+union over the checked active units and the displayed-area count / km² sum
+from `service.boundaries`.  All are pure seams: the SQL and its bound params
+are asserted directly, and fetches run through an injectable engine so tests
+never touch a real database.
 """
 
 from __future__ import annotations
@@ -35,6 +39,15 @@ CORE_VIS_TABLES = ("generators", "storages")
 # The single value `core.storages.energy_source` carries; generators carry
 # the five loaded source labels instead.
 STORAGE_SOURCE = "storage"
+
+# The single active-units predicate (issue #24): commissioned by ``:to`` and
+# not decommissioned before ``:from``.  Shared verbatim by the scatter-layer
+# unit fetches and the header aggregates, so both always resolve the same
+# active set — the map and the header can't drift apart.
+ACTIVE_UNIT_PREDICATE = (
+    "commissioning_date <= :to "
+    "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
+)
 
 # Columns every fetched unit row needs for the scatter layer and its tooltip.
 # Generators project UNIT_COLUMNS; storages add storage_capacity (kWh).
@@ -80,6 +93,12 @@ def missing_core_tables(
     return [table for table in tables if table not in present]
 
 
+def _unit_table(source: str) -> str:
+    """Core table carrying ``source``: ``storages`` holds the single storage
+    category, ``generators`` every generator source."""
+    return "storages" if source == STORAGE_SOURCE else "generators"
+
+
 def unit_query(
     table: str,
     columns: str,
@@ -100,8 +119,7 @@ def unit_query(
     sql = (
         f"SELECT {columns} FROM core.{table} "
         "WHERE energy_source = :source "
-        "AND commissioning_date <= :to "
-        "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
+        f"AND {ACTIVE_UNIT_PREDICATE}"
     )
     params = {"source": source, "from": active_from, "to": active_to}
     return sql, params
@@ -129,10 +147,8 @@ def fetch_active_units(
     """
     units: dict[str, list[dict[str, Any]]] = {}
     for source in sources:
-        if source == STORAGE_SOURCE:
-            table, columns = "storages", STORAGE_COLUMNS_SQL
-        else:
-            table, columns = "generators", UNIT_COLUMNS_SQL
+        table = _unit_table(source)
+        columns = STORAGE_COLUMNS_SQL if table == "storages" else UNIT_COLUMNS_SQL
         sql, params = unit_query(
             table,
             columns,
@@ -142,3 +158,95 @@ def fetch_active_units(
         )
         units[source] = run_query(engine, sql, params)
     return units
+
+
+def areas_query(level: int) -> tuple[str, dict]:
+    """SQL + bound params for the displayed-area header: count and km² sum.
+
+    Counts ``service.boundaries`` rows at ``level`` and sums their stored
+    ``area`` column (km²).  Sea/EEZ polygons live at level 1 and count like
+    any other region — documented, not special-cased (issue #25).
+    """
+    sql = (
+        "SELECT COUNT(*) AS area_count, "
+        "COALESCE(SUM(area), 0.0) AS total_area "
+        "FROM service.boundaries WHERE level = :level"
+    )
+    return sql, {"level": level}
+
+
+def area_name_query(level: int) -> tuple[str, dict]:
+    """SQL + bound params for the single displayed area's name."""
+    sql = "SELECT name FROM service.boundaries WHERE level = :level"
+    return sql, {"level": level}
+
+
+def fetch_areas(engine: Engine, level: int) -> dict[str, Any]:
+    """Area figures for the header at ``level``: count, km² sum, and — when
+    exactly one area is displayed — its name.
+
+    The name is fetched only when ``COUNT(*)`` is 1, so the region/district/
+    municipality levels (many rows) never read the name back.
+    """
+    sql, params = areas_query(level)
+    row = run_query(engine, sql, params)[0]
+    areas: dict[str, Any] = {
+        "area_count": row["area_count"],
+        "total_area_km2": row["total_area"],
+    }
+    if areas["area_count"] == 1:
+        name_sql, _ = area_name_query(level)
+        areas["area_name"] = run_query(engine, name_sql, params)[0]["name"]
+    return areas
+
+
+def header_metrics_query(
+    active_from: date,
+    active_to: date,
+    sources: tuple[str, ...],
+) -> tuple[str, dict]:
+    """SQL + bound params for the header's active-unit aggregates.
+
+    One single-column ``installed_capacity`` subquery per checked source,
+    under the issue #24 predicate — the same filter ``unit_query`` applies to
+    the scatter layers — wrapped in an aggregate that counts rows and sums
+    installed capacity (kW) ÷ 1000 → MW.  Storage's single category reads
+    ``core.storages`` like the unit fetches; every other source reads
+    ``core.generators``.
+    """
+    parts: list[str] = []
+    params: dict[str, date | str] = {"from": active_from, "to": active_to}
+    for n, source in enumerate(sources):
+        table = _unit_table(source)
+        parts.append(
+            f"SELECT installed_capacity FROM core.{table} "
+            f"WHERE energy_source = :source_{n} "
+            f"AND {ACTIVE_UNIT_PREDICATE}"
+        )
+        params[f"source_{n}"] = source
+    if not parts:
+        raise ValueError("sources must contain at least one entry")
+    sql = (
+        "SELECT COUNT(*) AS unit_count, "
+        "COALESCE(SUM(installed_capacity), 0.0) / 1000.0 AS capacity_mw "
+        f"FROM ({' UNION ALL '.join(parts)}) AS units"
+    )
+    return sql, params
+
+
+def fetch_header_metrics(
+    engine: Engine,
+    *,
+    active_from: date,
+    active_to: date,
+    sources: tuple[str, ...],
+) -> dict[str, Any]:
+    """Header capacity (MW) and active-unit count for the checked sources.
+
+    With nothing checked the header reads zeros and no query runs — the same
+    contract the empty-unit-fetch satisfies for the scatter layers.
+    """
+    if not sources:
+        return {"unit_count": 0, "capacity_mw": 0.0}
+    sql, params = header_metrics_query(active_from, active_to, sources)
+    return run_query(engine, sql, params)[0]
