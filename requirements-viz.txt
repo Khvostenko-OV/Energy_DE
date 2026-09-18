@@ -1,0 +1,5 @@
+# Visualization layer (Streamlit + PyDeck app, issues #23-...). Layers on top
+# of the pipeline requirements.txt — the viz runtime installs both files; the
+# pipeline requirements.txt stays unchanged.
+streamlit>=1.30
+pydeck>=0.8
