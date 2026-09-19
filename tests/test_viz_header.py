@@ -86,9 +86,9 @@ class TestLevelConfig:
     def test_level_index_matches_the_chooser_labels(self):
         assert LEVEL_INDEX == {
             "Germany": 0,
-            "Regions": 1,
-            "Districts": 2,
-            "Municipalities": 3,
+            "States": 1,
+            "Regions": 2,
+            "Districts": 3,
         }
 
     def test_every_chooser_label_has_a_level(self):

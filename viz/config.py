@@ -13,20 +13,20 @@ from datetime import date
 # Sidebar chooser order, topmost level first.  The drill levels mirror the
 # spatial progression of `etl.db_schema.BOUNDARY_LEVEL_COLUMNS` (region,
 # district, municipality) under the country overview.
-MAP_LEVELS = ("Germany", "Regions", "Districts", "Municipalities")
+MAP_LEVELS = ("Germany", "States", "Regions", "Districts")
 
 # The drill level selected on first run.
 INITIAL_LEVEL = "Germany"
 
 # Chooser label → boundary level number, the ``level`` column value in
-# ``service.boundaries`` (0 = country, 1 = regions, 2 = districts,
-# 3 = municipalities).  Every ``MAP_LEVELS`` label has an entry, and the
+# ``service.boundaries`` (0 = country, 1 = states, 2 = regions,
+# 3 = districts).  Every ``MAP_LEVELS`` label has an entry, and the
 # header aggregates (issue #25) filter ``service.boundaries`` through it.
 LEVEL_INDEX = {
     "Germany": 0,
-    "Regions": 1,
-    "Districts": 2,
-    "Municipalities": 3,
+    "States": 1,
+    "Regions": 2,
+    "Districts": 3,
 }
 
 # Boundary level → the unit-row attribute naming that level's area (issue #26):
@@ -36,9 +36,9 @@ LEVEL_INDEX = {
 # spatial join.  Level 0 (Germany) has no attribute: the whole country is shown.
 LEVEL_UNIT_AREA_COLUMN = {
     "Germany": None,
-    "Regions": "region",
-    "Districts": "district",
-    "Municipalities": "municipality",
+    "States": "region",
+    "Regions": "district",
+    "Districts": "municipality",
 }
 
 # Per-source sidebar checkboxes in canonical display order — the six loaded

@@ -52,9 +52,9 @@ class TestLevelDefaults:
     def test_levels_index_matches_the_boundary_table(self):
         assert LEVEL_INDEX == {
             "Germany": 0,
-            "Regions": 1,
-            "Districts": 2,
-            "Municipalities": 3,
+            "States": 1,
+            "Regions": 2,
+            "Districts": 3,
         }
 
 
@@ -68,9 +68,9 @@ class TestLevelAreaColumns:
     def test_attribute_matches_the_levels_spatial_grain(self):
         assert LEVEL_UNIT_AREA_COLUMN == {
             "Germany": None,
-            "Regions": "region",
-            "Districts": "district",
-            "Municipalities": "municipality",
+            "States": "region",
+            "Regions": "district",
+            "Districts": "municipality",
         }
 
     def test_columns_are_safe_static_attribute_names(self):
