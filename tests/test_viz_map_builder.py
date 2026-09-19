@@ -11,7 +11,12 @@ color, pickable (so hovering works).
 """
 
 from viz.config import GERMANY_CENTER, INITIAL_ZOOM, LIGHT_MAP_STYLE, MAP_STYLES
-from viz.map_builder import build_deck, build_source_layers, hex_to_rgba
+from viz.map_builder import (
+    build_choropleth_layer,
+    build_deck,
+    build_source_layers,
+    hex_to_rgba,
+)
 
 
 class TestEmptyDeck:
@@ -108,3 +113,40 @@ class TestSourceLayers:
             {"bio": [unit_row("bio")], "mystery": [unit_row("mystery")]}
         )
         assert [layer.id for layer in layers] == ["bio-units", "mystery-units"]
+
+
+class TestChoroplethLayer:
+    def feature_collection(self):
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Polygon", "coordinates": []},
+                    "properties": {
+                        "name": "Berlin",
+                        "fill_color": [33, 150, 243, 255],
+                    },
+                }
+            ],
+        }
+
+    def test_is_a_pickable_geojson_layer(self):
+        layer = build_choropleth_layer(self.feature_collection())
+        assert layer.type == "GeoJsonLayer"
+        assert layer.pickable is True
+
+    def test_features_pass_through_as_layer_data(self):
+        features = self.feature_collection()
+        layer = build_choropleth_layer(features)
+        assert layer.data == features
+
+    def test_fill_color_reads_the_injected_property(self):
+        layer = build_choropleth_layer(self.feature_collection())
+        assert "properties.fill_color" in layer.get_fill_color
+
+    def test_polygons_are_filled_and_stroked(self):
+        layer = build_choropleth_layer(self.feature_collection())
+        assert layer.filled is True
+        assert layer.stroked is True
+        assert layer.line_width_min_pixels >= 1

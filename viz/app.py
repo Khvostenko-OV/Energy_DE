@@ -1,4 +1,4 @@
-"""Streamlit entrypoint for the German Energy Units map (issues #23-#25).
+"""Streamlit entrypoint for the German Energy Units map (issues #23-#26).
 
 T2 (#24): renders one scatter layer per checked energy source with
 active-units timescope filtering, a sidebar check-all toggle, per-source
@@ -11,11 +11,20 @@ capacity (MW), the active-unit count, and the displayed area in km².  All
 figures recompute on every rerun (source/timescope/level changes) and pull
 from the same predicate the map renders.
 
+T4 (#26): the administrative-level slice.  An area multiselect below the
+level selectbox picks the displayed areas at the active level (defaults to
+all; empty selection means all), a choropleth GeoJsonLayer colors each area
+by its live capacity (per-area unit count on hover), computed from the same
+source/timescope filters as the scatter and header, and the camera refits to
+the selected areas' bounding box only when the level or area selection
+changes — session-state camera survives every other rerun.
+
 T1 tracer (#23): when the core tables are absent — or the database is
 unreachable — the app hides the data widgets and shows only a full-width
 "No core tables" notice plus the empty basemap deck.  Widget defaults come
 from `viz.config`, the deck from `viz.map_builder`, the fetch from `viz.data`,
 the tooltip from `viz.tooltip`, and the header strings from `viz.header`.
+The choropleth and camera seams live in `viz.choropleth` / `viz.viewport`.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
+from viz.choropleth import areas_feature_collection
 from viz.config import (
     LEVEL_INDEX,
     MAP_HEIGHT,
@@ -43,15 +53,23 @@ from viz.config import (
 from viz.data import (
     CORE_VIS_TABLES,
     fetch_active_units,
+    fetch_area_names,
     fetch_areas,
+    fetch_boundaries,
+    fetch_boundary_fill,
     fetch_header_metrics,
     get_viz_engine,
     missing_core_tables,
 )
 from viz.header import format_area_km2, format_mw, format_unit_count, scope_title
-from viz.map_builder import build_deck, build_source_layers
+from viz.map_builder import (
+    build_choropleth_layer,
+    build_deck,
+    build_source_layers,
+)
 from viz.palette import SOURCE_LAYER_ORDER, source_color
 from viz.tooltip import DECK_TOOLTIP, source_header, unit_tooltip
+from viz.viewport import fit_viewstate, geometry_points, should_refit
 
 # Sources in sidebar display order: generators top, storage last (bio → storage),
 # mirroring the canonical palette ordering reversed from SOURCE_LAYER_ORDER.
@@ -140,11 +158,26 @@ checked_sources: list[str] = [
 
 st.sidebar.header("Scope")
 level_label = st.sidebar.selectbox(
-    "Scope",
+    "Level",
     MAP_LEVELS,
     key="level",
     label_visibility="collapsed",
 )
+level = LEVEL_INDEX[level_label]
+
+# The multiselect options are the area names at the active level, fetched
+# live; it defaults to every area and — per the spec — an empty selection
+# means "all areas" too.  The widget key embeds the level, so switching
+# levels starts from a fresh all-areas selection instead of leaking the
+# previous level's names into the new one.
+area_names = fetch_area_names(engine, level)
+selected_areas = st.sidebar.multiselect(
+    "Areas",
+    options=area_names,
+    default=list(area_names),
+    key=f"areas_{level_label}",
+)
+selected_names: tuple[str, ...] = tuple(selected_areas or area_names)
 
 # ── Sidebar: timescope ─────────────────────────────────────────────────── #
 
@@ -172,14 +205,59 @@ for rows in units.values():
         row["source_header"] = source_header(row)
         row["unit_body"] = unit_tooltip(row)
 
+# ── Choropleth fetch (issue #26) ───────────────────────────────────────── #
+
+# The area fill shares the scatter/header predicate and checked-source set, so
+# the choropleth colors exactly the units the points and header totals count;
+# the boundaries (name + GeoJSON) are fetched over the same displayed scope,
+# and the two are joined by area name.  With nothing checked the fill query is
+# skipped (zero fill everywhere) while the boundaries still render.
+boundary_rows = fetch_boundaries(engine, level=level, names=selected_names)
+fill_rows = fetch_boundary_fill(
+    engine,
+    level=level,
+    names=selected_names,
+    active_from=active_from,
+    active_to=active_to,
+    sources=tuple(checked_sources),
+)
+features = areas_feature_collection(boundary_rows, fill_rows)
+
+# ── Camera (issue #26) ──────────────────────────────────────────────────── #
+
+# The camera is fitted to the selected areas' bounding box and stored in
+# session state.  It is replaced only when the level or area selection changes
+# (or on the first run); every source/timescope rerun over the same scope keeps
+# the stored camera, so the deck's unchanged initial view lets the frontend
+# preserve the user's own framing.
+camera_points = [
+    point
+    for feature in features["features"]
+    for point in geometry_points(feature["geometry"])
+]
+if should_refit(
+    st.session_state.get("camera"),
+    st.session_state.get("camera_scope"),
+    level_label=level_label,
+    area_names=selected_names,
+):
+    st.session_state["camera"] = fit_viewstate(camera_points)
+    st.session_state["camera_scope"] = (
+        level_label,
+        tuple(sorted(selected_names)),
+    )
+camera = st.session_state["camera"]
+
 # ── Header aggregates (issue #25) ──────────────────────────────────────── #
 
-# The level drives the displayed-area scope; the metrics share the map's
-# exact timescope predicate and checked-source set, so all four header values
-# track every filter change on the same rows the layers render.  The strip
-# renders label + value on one line each (CSS `.hdr-row`), smaller than
-# st.metric's stacked layout.
-areas = fetch_areas(engine, LEVEL_INDEX[level_label])
+# The header stays level-wide: the issue #26 spec keeps the full active-unit
+# set in the totals (units with no area at the active level remain in the
+# header), so the multiselect narrows the choropleth only, never these figures.
+# The metrics share the map's exact timescope predicate and checked-source set,
+# so all four header values track every filter change on the same rows the
+# layers render.  The strip renders label + value on one line each (CSS
+# `.hdr-row`), smaller than st.metric's stacked layout.
+areas = fetch_areas(engine, level)
 metrics = fetch_header_metrics(
     engine,
     active_from=active_from,
@@ -199,11 +277,16 @@ header_cells = "".join(
 )
 st.markdown(f"<div class='hdr-row'>{header_cells}</div>", unsafe_allow_html=True)
 
-layers = build_source_layers(units)
+# Area fills paint below the unit points, so points stay legible on top of the
+# choropleth; the camera comes from the session state above.
+layers = [build_choropleth_layer(features), *build_source_layers(units)]
 st.pydeck_chart(
     build_deck(
         layers=layers,
         map_style=MAP_STYLES[map_style_label],
+        lon=camera["lon"],
+        lat=camera["lat"],
+        zoom=camera["zoom"],
         tooltip=DECK_TOOLTIP,
     ),
     width="stretch",

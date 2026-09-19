@@ -11,7 +11,7 @@ address with missing parts dropped.
 
 from datetime import date
 
-from viz.tooltip import DECK_TOOLTIP, source_header, unit_tooltip
+from viz.tooltip import DECK_TOOLTIP, area_card, source_header, unit_tooltip
 
 
 def generator_row(**overrides):
@@ -95,3 +95,22 @@ class TestStorageTooltip:
 
     def test_storage_source_header_is_titled(self):
         assert source_header(storage_row()) == "Storage"
+
+
+class TestAreaCard:
+    def test_header_is_the_area_name(self):
+        assert area_card("Berlin", 1200.0, 40)["source_header"] == "Berlin"
+
+    def test_body_carries_capacity_in_mw(self):
+        body = area_card("Berlin", 12345.6, 40)["unit_body"]
+        assert "Capacity: 12,346 MW" in body
+        assert "kW" not in body
+
+    def test_body_carries_the_unit_count(self):
+        assert "Units: 40" in area_card("Berlin", 1200.0, 40)["unit_body"]
+
+    def test_header_and_body_fit_the_shared_deck_card(self):
+        card = area_card("Berlin", 1200.0, 40)
+        assert "{source_header}" in DECK_TOOLTIP["html"]
+        assert "{unit_body}" in DECK_TOOLTIP["html"]
+        assert card.keys() == {"source_header", "unit_body"}

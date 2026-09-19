@@ -23,8 +23,14 @@ from viz.data import (
     UNIT_COLUMNS_SQL,
     area_name_query,
     areas_query,
+    boundary_fill_query,
+    boundary_names_query,
+    boundaries_query,
     fetch_active_units,
+    fetch_area_names,
     fetch_areas,
+    fetch_boundaries,
+    fetch_boundary_fill,
     fetch_header_metrics,
     get_viz_engine,
     header_metrics_query,
@@ -385,3 +391,168 @@ class TestFetchHeaderMetrics:
         )
         assert engine.calls == []
         assert result == {"unit_count": 0, "capacity_mw": 0.0}
+
+
+class TestBoundaryNamesQuery:
+    def test_selects_the_levels_area_names_in_order(self):
+        sql, params = boundary_names_query(1)
+        assert sql == (
+            "SELECT name FROM service.boundaries "
+            "WHERE level = :level ORDER BY name"
+        )
+        assert params == {"level": 1}
+
+
+class TestBoundariesQuery:
+    def test_selects_name_and_geojson_at_the_level(self):
+        sql, params = boundaries_query(1)
+        assert sql == (
+            "SELECT name, ST_AsGeoJSON(geometry) AS geojson "
+            "FROM service.boundaries WHERE level = :level ORDER BY name"
+        )
+        assert params == {"level": 1}
+
+    def test_name_selection_filters_the_boundaries(self):
+        sql, params = boundaries_query(1, names=("Berlin", "Hamburg"))
+        assert sql == (
+            "SELECT name, ST_AsGeoJSON(geometry) AS geojson "
+            "FROM service.boundaries WHERE level = :level "
+            "AND name = ANY(:names) ORDER BY name"
+        )
+        assert params == {"level": 1, "names": ["Berlin", "Hamburg"]}
+
+
+class TestBoundaryFillQuery:
+    def test_aggregates_active_units_per_area_via_spatial_join(self):
+        sql, params = boundary_fill_query(
+            1,
+            names=None,
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            sources=("solar", "storage"),
+        )
+        assert sql == (
+            "SELECT b.name AS name, "
+            "COALESCE(SUM(u.installed_capacity), 0.0) / 1000.0 AS capacity_mw, "
+            "COUNT(u.unit_id) AS unit_count "
+            "FROM service.boundaries AS b "
+            "LEFT JOIN ("
+            "SELECT unit_id, installed_capacity, geometry FROM core.generators "
+            "WHERE energy_source = :source_0 "
+            "AND commissioning_date <= :to "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
+            " UNION ALL "
+            "SELECT unit_id, installed_capacity, geometry FROM core.storages "
+            "WHERE energy_source = :source_1 "
+            "AND commissioning_date <= :to "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
+            ") AS u ON ST_Intersects(b.geometry, u.geometry) "
+            "WHERE b.level = :level GROUP BY b.name"
+        )
+        assert params == {
+            "level": 1,
+            "from": date(1990, 1, 1),
+            "to": date(2010, 1, 1),
+            "source_0": "solar",
+            "source_1": "storage",
+        }
+
+    def test_name_selection_filters_the_areas(self):
+        sql, params = boundary_fill_query(
+            1,
+            names=("Berlin",),
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            sources=("wind",),
+        )
+        assert "WHERE b.level = :level AND b.name = ANY(:names) GROUP BY b.name" in sql
+        assert params["names"] == ["Berlin"]
+
+    def test_predicate_matches_the_unit_fetch(self):
+        sql, _ = boundary_fill_query(
+            1,
+            names=None,
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            sources=("wind",),
+        )
+        assert "commissioning_date <= :to" in sql
+        assert "decommissioning_date IS NULL OR decommissioning_date >= :from" in sql
+
+    def test_capacity_is_kw_sum_divided_by_1000(self):
+        sql, _ = boundary_fill_query(
+            1,
+            names=None,
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            sources=("wind",),
+        )
+        assert "COALESCE(SUM(u.installed_capacity), 0.0) / 1000.0 AS capacity_mw" in sql
+
+    def test_area_with_no_units_still_counts_zero(self):
+        sql, _ = boundary_fill_query(
+            1,
+            names=None,
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            sources=("wind",),
+        )
+        assert "LEFT JOIN" in sql
+        assert "COUNT(u.unit_id)" in sql
+
+    def test_empty_sources_are_rejected(self):
+        with pytest.raises(ValueError):
+            boundary_fill_query(
+                1,
+                names=None,
+                active_from=date(1990, 1, 1),
+                active_to=date(2010, 1, 1),
+                sources=(),
+            )
+
+
+class TestFetchAreaNames:
+    def test_returns_the_levels_names_in_order(self):
+        rows = [_MappingRow(name="Berlin"), _MappingRow(name="Hamburg")]
+        assert fetch_area_names(_RowsEngine(rows), 1) == ["Berlin", "Hamburg"]
+
+
+class TestFetchBoundaries:
+    def test_returns_the_boundary_rows_untouched(self):
+        rows = [_MappingRow(name="Berlin", geojson='{"type": "Polygon"}')]
+        result = fetch_boundaries(_RowsEngine(rows), level=1, names=("Berlin",))
+        assert result == [{"name": "Berlin", "geojson": '{"type": "Polygon"}'}]
+
+    def test_all_names_pass_no_name_filter(self):
+        engine = _RecordingEngine()
+        fetch_boundaries(engine, level=1, names=None)
+        sql, params = engine.calls[0]
+        assert "ANY(:names)" not in sql
+        assert "names" not in params
+
+
+class TestFetchBoundaryFill:
+    def test_returns_the_fill_rows(self):
+        rows = [_MappingRow(name="Berlin", capacity_mw=12.0, unit_count=3)]
+        result = fetch_boundary_fill(
+            _RowsEngine(rows),
+            level=1,
+            names=("Berlin",),
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("wind",),
+        )
+        assert result == [{"name": "Berlin", "capacity_mw": 12.0, "unit_count": 3}]
+
+    def test_empty_sources_return_empty_without_a_query(self):
+        engine = _RecordingEngine()
+        result = fetch_boundary_fill(
+            engine,
+            level=1,
+            names=None,
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=(),
+        )
+        assert engine.calls == []
+        assert result == []

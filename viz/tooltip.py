@@ -9,12 +9,18 @@ The template carries all markup; the interpolated values must stay plain
 text, because Streamlit's deckgl frontend HTML-escapes tooltip values before
 inserting them — any markup in a value would render literally (the bug this
 layout fixes).
+
+``area_card`` (issue #26) builds a choropleth area's hover card in the same
+two-field shape, so the identical ``DECK_TOOLTIP`` renders area hovers (name
+over capacity/unit-count) with no per-layer tooltip switching.
 """
 
 from __future__ import annotations
 
 from datetime import date
 from typing import Any, Mapping
+
+from viz.header import format_mw, format_unit_count
 
 # Deck-level tooltip template.  All HTML lives here; the {source_header} and
 # {unit_body} values are escaped by the frontend before interpolation, so the
@@ -59,3 +65,21 @@ def unit_tooltip(unit: Mapping[str, Any]) -> str:
     if location:
         parts.append(location)
     return "\n".join(parts)
+
+
+def area_card(name: str, capacity_mw: float, unit_count: int) -> dict[str, str]:
+    """Hover-card fields for one choropleth area, in the unit card shape.
+
+    Streamlit's deckgl interpolates a single ``DECK_TOOLTIP`` template per
+    hovered object, so the area card must speak the same two plain-text fields
+    the unit card uses: ``source_header`` (here the area name) and
+    ``unit_body`` (the capacity in MW — matching the header metric — plus the
+    unit count).  The template stays untouched; only the field values differ.
+    """
+    return {
+        "source_header": name,
+        "unit_body": (
+            f"Capacity: {format_mw(capacity_mw)} MW\n"
+            f"Units: {format_unit_count(unit_count)}"
+        ),
+    }

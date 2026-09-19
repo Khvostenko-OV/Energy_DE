@@ -14,6 +14,16 @@ union over the checked active units and the displayed-area count / km² sum
 from `service.boundaries`.  All are pure seams: the SQL and its bound params
 are asserted directly, and fetches run through an injectable engine so tests
 never touch a real database.
+
+Issue #26 adds the choropleth feeds: `boundary_names_query` /
+`fetch_area_names` supply the area-multiselect options, `boundaries_query` /
+`fetch_boundaries` fetch the selected areas' GeoJSON geometry, and
+`boundary_fill_query` / `fetch_boundary_fill` aggregate the checked active
+units per displayed area via a spatial join (capacity in MW, unit count),
+under the same timescope/source filters as the scatter and header.  The
+`areas_query` / `area_name_query` / `fetch_areas` header seams (issue #25)
+stay level-wide: the spec keeps every active unit in the header totals, so the
+area multiselect narrows the choropleth only, never the headline figures.
 """
 
 from __future__ import annotations
@@ -163,9 +173,11 @@ def fetch_active_units(
 def areas_query(level: int) -> tuple[str, dict]:
     """SQL + bound params for the displayed-area header: count and km² sum.
 
-    Counts ``service.boundaries`` rows at ``level`` and sums their stored
-    ``area`` column (km²).  Sea/EEZ polygons live at level 1 and count like
-    any other region — documented, not special-cased (issue #25).
+    Counts every ``service.boundaries`` row at ``level`` and sums their stored
+    ``area`` column (km²).  The multiselect does not narrow these (issue #26):
+    the header keeps the level-wide figure while the choropleth follows the
+    selection.  Sea/EEZ polygons live at level 1 and count like any other
+    region — documented, not special-cased (issue #25).
     """
     sql = (
         "SELECT COUNT(*) AS area_count, "
@@ -183,10 +195,10 @@ def area_name_query(level: int) -> tuple[str, dict]:
 
 def fetch_areas(engine: Engine, level: int) -> dict[str, Any]:
     """Area figures for the header at ``level``: count, km² sum, and — when
-    exactly one area is displayed — its name.
+    exactly one area exists at ``level`` — its name.
 
-    The name is fetched only when ``COUNT(*)`` is 1, so the region/district/
-    municipality levels (many rows) never read the name back.
+    The name is fetched only when ``COUNT(*)`` is 1, so the
+    region/district/municipality levels (many rows) never read the name back.
     """
     sql, params = areas_query(level)
     row = run_query(engine, sql, params)[0]
@@ -250,3 +262,125 @@ def fetch_header_metrics(
         return {"unit_count": 0, "capacity_mw": 0.0}
     sql, params = header_metrics_query(active_from, active_to, sources)
     return run_query(engine, sql, params)[0]
+
+
+def boundary_names_query(level: int) -> tuple[str, dict]:
+    """SQL + bound params for the area-multiselect options at ``level``.
+
+    Returns the area names of ``service.boundaries`` ordered alphabetically,
+    so the multiselect options (and the fit-view scope signature) stay stable
+    across reruns regardless of storage order.
+    """
+    sql = "SELECT name FROM service.boundaries WHERE level = :level ORDER BY name"
+    return sql, {"level": level}
+
+
+def fetch_area_names(engine: Engine, level: int) -> list[str]:
+    """Area names at ``level`` for the multiselect, in stable order."""
+    sql, params = boundary_names_query(level)
+    return [row["name"] for row in run_query(engine, sql, params)]
+
+
+def boundaries_query(
+    level: int, names: tuple[str, ...] | None = None
+) -> tuple[str, dict]:
+    """SQL + bound params for the choropleth boundary geometry.
+
+    One row per displayed area with its name and GeoJSON geometry
+    (``ST_AsGeoJSON``, WGS-84).  ``names`` narrows the displayed areas
+    (issue #26); None means every area at the level.  The name is the join key
+    the choropleth seam matches fill rows against.
+    """
+    sql = (
+        "SELECT name, ST_AsGeoJSON(geometry) AS geojson "
+        "FROM service.boundaries WHERE level = :level"
+    )
+    params: dict = {"level": level}
+    if names is not None:
+        sql += " AND name = ANY(:names)"
+        params["names"] = list(names)
+    sql += " ORDER BY name"
+    return sql, params
+
+
+def fetch_boundaries(
+    engine: Engine, *, level: int, names: tuple[str, ...] | None = None
+) -> list[dict[str, Any]]:
+    """Boundary rows (name + GeoJSON text) for the displayed scope."""
+    sql, params = boundaries_query(level, names)
+    return run_query(engine, sql, params)
+
+
+def boundary_fill_query(
+    level: int,
+    *,
+    names: tuple[str, ...] | None,
+    active_from: date,
+    active_to: date,
+    sources: tuple[str, ...],
+) -> tuple[str, dict]:
+    """SQL + bound params for the per-area choropleth fill.
+
+    Aggregates the checked active units per displayed area: total installed
+    capacity (kW) ÷ 1000 → MW and the unit count.  The unit rows come from the
+    same per-source union the scatter and header use (`_unit_table` +
+    `ACTIVE_UNIT_PREDICATE`), spatially joined with ``ST_Intersects`` — the
+    pipeline's own spatial-join predicate (transform `sjoin intersects`).  A
+    unit sitting exactly on a shared border intersects both areas and is
+    attributed to each, so the per-area fills do not strictly reconcile with
+    the header total — same semantics as the pipeline's own spatial join.  A
+    ``LEFT JOIN`` keeps every displayed area in the result even when no active
+    unit falls inside it: it reads a zero fill (issue #26).
+    """
+    parts: list[str] = []
+    params: dict = {"level": level, "from": active_from, "to": active_to}
+    for n, source in enumerate(sources):
+        table = _unit_table(source)
+        parts.append(
+            f"SELECT unit_id, installed_capacity, geometry FROM core.{table} "
+            f"WHERE energy_source = :source_{n} "
+            f"AND {ACTIVE_UNIT_PREDICATE}"
+        )
+        params[f"source_{n}"] = source
+    if not parts:
+        raise ValueError("sources must contain at least one entry")
+    if names is not None:
+        params["names"] = list(names)
+    sql = (
+        "SELECT b.name AS name, "
+        "COALESCE(SUM(u.installed_capacity), 0.0) / 1000.0 AS capacity_mw, "
+        "COUNT(u.unit_id) AS unit_count "
+        "FROM service.boundaries AS b "
+        "LEFT JOIN (" + " UNION ALL ".join(parts) + ") AS u "
+        "ON ST_Intersects(b.geometry, u.geometry) "
+        "WHERE b.level = :level"
+        + (" AND b.name = ANY(:names)" if names is not None else "")
+        + " GROUP BY b.name"
+    )
+    return sql, params
+
+
+def fetch_boundary_fill(
+    engine: Engine,
+    *,
+    level: int,
+    names: tuple[str, ...] | None,
+    active_from: date,
+    active_to: date,
+    sources: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    """Per-area capacity (MW) and unit count for the choropleth fill.
+
+    With nothing checked the choropleth reads an empty fill (every displayed
+    area renders the zero fill via the join's default) and no query runs.
+    """
+    if not sources:
+        return []
+    sql, params = boundary_fill_query(
+        level,
+        names=names,
+        active_from=active_from,
+        active_to=active_to,
+        sources=sources,
+    )
+    return run_query(engine, sql, params)
