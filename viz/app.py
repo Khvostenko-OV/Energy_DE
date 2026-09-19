@@ -17,7 +17,12 @@ all; empty selection means all), a choropleth GeoJsonLayer colors each area
 by its live capacity (per-area unit count on hover), computed from the same
 source/timescope filters as the scatter and header, and the camera refits to
 the selected areas' bounding box only when the level or area selection
-changes — session-state camera survives every other rerun.
+changes — session-state camera survives every other rerun.  With a proper
+subset of areas picked, the scatter points narrow to those areas too (units
+whose region/district/municipality names one of them); on the all-areas
+selection every active unit renders, including offshore units that belong to
+no polygon at the active level.  The header strip stays level-wide either
+way.
 
 T1 tracer (#23): when the core tables are absent — or the database is
 unreachable — the app hides the data widgets and shows only a full-width
@@ -44,6 +49,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from viz.choropleth import areas_feature_collection
 from viz.config import (
     LEVEL_INDEX,
+    LEVEL_UNIT_AREA_COLUMN,
     MAP_HEIGHT,
     MAP_LEVELS,
     MAP_STYLES,
@@ -179,6 +185,17 @@ selected_areas = st.sidebar.multiselect(
 )
 selected_names: tuple[str, ...] = tuple(selected_areas or area_names)
 
+# The scatter points follow the selection only when it is a proper subset of
+# the level's areas: a unit's region/district/municipality attribute must name
+# one of the picked areas.  On the all-areas selection no filter applies, so
+# units that belong to no polygon at the active level still render.
+area_column = LEVEL_UNIT_AREA_COLUMN[level_label]
+area_filter_names: tuple[str, ...] | None = (
+    selected_names
+    if area_column is not None and len(selected_names) < len(area_names)
+    else None
+)
+
 # ── Sidebar: timescope ─────────────────────────────────────────────────── #
 
 st.sidebar.header("Timescope")
@@ -199,6 +216,8 @@ units = fetch_active_units(
     active_from=active_from,
     active_to=active_to,
     sources=tuple(checked_sources),
+    area_column=area_column,
+    area_names=area_filter_names or (),
 )
 for rows in units.values():
     for row in rows:

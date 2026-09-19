@@ -13,6 +13,7 @@ from viz.config import (
     INITIAL_LEVEL,
     INITIAL_ZOOM,
     LEVEL_INDEX,
+    LEVEL_UNIT_AREA_COLUMN,
     LIGHT_MAP_STYLE,
     MAP_HEIGHT,
     MAP_LEVELS,
@@ -55,6 +56,28 @@ class TestLevelDefaults:
             "Districts": 2,
             "Municipalities": 3,
         }
+
+
+class TestLevelAreaColumns:
+    def test_every_level_maps_to_a_unit_area_column(self):
+        assert list(LEVEL_UNIT_AREA_COLUMN) == list(MAP_LEVELS)
+
+    def test_country_needs_no_area_column(self):
+        assert LEVEL_UNIT_AREA_COLUMN["Germany"] is None
+
+    def test_attribute_matches_the_levels_spatial_grain(self):
+        assert LEVEL_UNIT_AREA_COLUMN == {
+            "Germany": None,
+            "Regions": "region",
+            "Districts": "district",
+            "Municipalities": "municipality",
+        }
+
+    def test_columns_are_safe_static_attribute_names(self):
+        assert not any(
+            column and (";" in column or " " in column)
+            for column in LEVEL_UNIT_AREA_COLUMN.values()
+        )
 
 
 class TestOverviewDefaults:

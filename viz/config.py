@@ -29,6 +29,18 @@ LEVEL_INDEX = {
     "Municipalities": 3,
 }
 
+# Boundary level → the unit-row attribute naming that level's area (issue #26):
+# a unit's ``region`` / ``district`` / ``municipality`` value names its area at
+# level 1 / 2 / 3 and matches ``service.boundaries.name`` at that level, so the
+# unit fetches can restrict their points to the selected areas without a
+# spatial join.  Level 0 (Germany) has no attribute: the whole country is shown.
+LEVEL_UNIT_AREA_COLUMN = {
+    "Germany": None,
+    "Regions": "region",
+    "Districts": "district",
+    "Municipalities": "municipality",
+}
+
 # Per-source sidebar checkboxes in canonical display order — the six loaded
 # sources, generators first (bio → wind) then storage.  All checked by default.
 DEFAULT_SOURCES = ("bio", "gas", "hydro", "solar", "wind", "storage")

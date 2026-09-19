@@ -24,6 +24,10 @@ under the same timescope/source filters as the scatter and header.  The
 `areas_query` / `area_name_query` / `fetch_areas` header seams (issue #25)
 stay level-wide: the spec keeps every active unit in the header totals, so the
 area multiselect narrows the choropleth only, never the headline figures.
+`unit_query` / `fetch_active_units` also accept an area filter (one of the
+`LEVEL_UNIT_AREA_COLUMN` attributes) so the scatter points, unlike the header,
+follow the multiselect: with a proper subset of areas picked only their units
+render on the map.
 """
 
 from __future__ import annotations
@@ -116,6 +120,8 @@ def unit_query(
     active_from: date,
     active_to: date,
     source: str,
+    area_column: str | None = None,
+    area_names: tuple[str, ...] = (),
 ) -> tuple[str, dict]:
     """SQL + bound params for the active-unit fetch on ``core.<table>``.
 
@@ -125,6 +131,11 @@ def unit_query(
     The timescope predicate is the issue #24 single active-unit filter: units
     commissioned by ``active_to`` that are not decommissioned before
     ``active_from``.
+
+    ``area_column`` narrows the rows to ``area_names`` (``ANY(:area_names)``)
+    when both are given — the unit attribute naming the selected areas from
+    `LEVEL_UNIT_AREA_COLUMN` (issue #26), a config constant like ``table``
+    rather than user input.  Without them every active unit qualifies.
     """
     sql = (
         f"SELECT {columns} FROM core.{table} "
@@ -132,6 +143,9 @@ def unit_query(
         f"AND {ACTIVE_UNIT_PREDICATE}"
     )
     params = {"source": source, "from": active_from, "to": active_to}
+    if area_column and area_names:
+        sql += f" AND {area_column} = ANY(:area_names)"
+        params["area_names"] = list(area_names)
     return sql, params
 
 
@@ -149,11 +163,15 @@ def fetch_active_units(
     active_from: date,
     active_to: date,
     sources: tuple[str, ...],
+    area_column: str | None = None,
+    area_names: tuple[str, ...] = (),
 ) -> dict[str, list[dict[str, Any]]]:
     """energy_source → active unit rows for the checked ``sources``.
 
     Each checked generator source is fetched from ``core.generators``;
     ``storage`` (a single category) is fetched from ``core.storages`` once.
+    ``area_column`` / ``area_names`` narrow every fetch to the selected areas
+    (issue #26); None/empty leaves the points unfiltered.
     """
     units: dict[str, list[dict[str, Any]]] = {}
     for source in sources:
@@ -165,6 +183,8 @@ def fetch_active_units(
             active_from=active_from,
             active_to=active_to,
             source=source,
+            area_column=area_column,
+            area_names=area_names,
         )
         units[source] = run_query(engine, sql, params)
     return units

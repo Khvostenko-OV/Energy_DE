@@ -163,6 +163,36 @@ class TestUnitQuery:
             "to": date(2010, 1, 1),
         }
 
+    def test_area_filter_narrows_rows_to_the_named_areas(self):
+        sql, params = unit_query(
+            "generators",
+            UNIT_COLUMNS_SQL,
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            source="solar",
+            area_column="region",
+            area_names=("Berlin", "Hamburg"),
+        )
+        assert "AND region = ANY(:area_names)" in sql
+        assert params == {
+            "source": "solar",
+            "from": date(1990, 1, 1),
+            "to": date(2010, 1, 1),
+            "area_names": ["Berlin", "Hamburg"],
+        }
+
+    def test_pointless_area_filter_is_omitted(self):
+        sql, params = unit_query(
+            "generators",
+            UNIT_COLUMNS_SQL,
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            source="solar",
+            area_column=None,
+        )
+        assert "ANY(:area_names)" not in sql
+        assert "area_names" not in params
+
 
 class TestFetchActiveUnits:
     def test_queries_storages_once_and_generators_per_checked_source(self):
@@ -199,6 +229,32 @@ class TestFetchActiveUnits:
             {"source": "storage", "from": date(2020, 1, 1), "to": date(2021, 1, 1)},
         ]
         assert list(result) == ["solar", "wind", "storage"]
+
+    def test_area_filter_flows_into_every_source_fetch(self):
+        engine = _RecordingEngine()
+        fetch_active_units(
+            engine,
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("solar", "storage"),
+            area_column="region",
+            area_names=("Berlin",),
+        )
+        assert all("AND region = ANY(:area_names)" in sql for sql, _ in engine.calls)
+        assert [params for _, params in engine.calls] == [
+            {
+                "source": "solar",
+                "from": date(2020, 1, 1),
+                "to": date(2021, 1, 1),
+                "area_names": ["Berlin"],
+            },
+            {
+                "source": "storage",
+                "from": date(2020, 1, 1),
+                "to": date(2021, 1, 1),
+                "area_names": ["Berlin"],
+            },
+        ]
 
 
 class _MappingRow:
