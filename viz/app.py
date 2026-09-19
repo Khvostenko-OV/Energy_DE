@@ -105,12 +105,12 @@ st.set_page_config(page_title="German Energy Units", layout="wide")
 # values on one line); then paint the per-source sidebar bullets.
 st.markdown(
     "<style>"
-    ".block-container { padding-top: 0.5rem; padding-bottom: 0.5rem; }"
+    ".block-container { padding: 0.25rem 2rem 0.5rem 2rem; }"
     "#MainMenu, header { visibility: hidden; }"
-    ".hdr-row { display: flex; flex-wrap: wrap; gap: 0.3rem 2.5rem; "
-    "align-items: baseline; margin: 0.25rem 0 0.25rem; }"
-    ".hdr-label { color: #5f6368; font-size: 0.8rem; margin-right: 0.4rem; }"
-    ".hdr-value { font-size: 1.05rem; font-weight: 600; }"
+    ".hdr-row { display: flex; flex-wrap: wrap; gap: 0.3rem 0.3rem; "
+    "align-items: baseline; margin: 0 0 0.25rem; }"
+    ".hdr-label { color: #5f6368; font-size: 0.9rem; margin-right: 0.2rem; }"
+    ".hdr-value { font-size: 1.2rem; font-weight: 600; margin-right: 1.5rem; }"
     f"{SOURCE_BULLET_STYLES}"
     "</style>",
     unsafe_allow_html=True,
@@ -307,7 +307,7 @@ header_cells = "".join(
     f"<span class='hdr-label'>{html.escape(str(label))}</span>"
     f"<span class='hdr-value'>{html.escape(str(value))}</span>"
     for label, value in (
-        ("Scope", scope_title(level_label, areas["area_count"], areas.get("area_name"))),
+        ("", scope_title(level_label, areas["area_count"], areas.get("area_name"))),
         ("Installed capacity (MW)", format_mw(metrics["capacity_mw"])),
         ("Active units", format_unit_count(metrics["unit_count"])),
         ("Area (km²)", format_area_km2(areas["total_area_km2"])),

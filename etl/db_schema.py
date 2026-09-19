@@ -85,7 +85,7 @@ BOUNDARY_FILE_LEVELS = {
     "boundary": 0,
     "regions": 1,
     "districts": 2,
-    "munis": 3,
+    "kreise": 3,
 }
 
 BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
