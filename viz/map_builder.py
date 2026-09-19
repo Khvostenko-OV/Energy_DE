@@ -8,7 +8,9 @@ exactly what ``build_deck()`` produces by default.  T2 (#24) adds one
 pickable scatter layer per energy source, in the palette's color and paint
 order.  T4 (#26) adds `build_choropleth_layer`, a pickable GeoJsonLayer
 coloring every displayed area by the capacity fill injected into its
-properties.
+properties, and `build_boundary_layer`, the country-scope counterpart that
+strokes the polygon outlines without filling them — the choropleth's
+stand-in when the active level is "Germany".
 """
 
 from __future__ import annotations
@@ -112,5 +114,26 @@ def build_choropleth_layer(features: Mapping[str, Any]) -> pdk.Layer:
         line_width_min_pixels=AREA_LINE_WIDTH_MIN_PX,
         stroked=True,
         filled=True,
+        pickable=True,
+    )
+
+
+def build_boundary_layer(features: Mapping[str, Any]) -> pdk.Layer:
+    """One non-filling GeoJsonLayer stroking each area's outline.
+
+    The country-scope counterpart to `build_choropleth_layer`: no capacity
+    fill, just the polygon borders, so level 0 ("Germany") shows the country
+    boundary on the basemap instead of a choropleth.  The features still carry
+    the hover properties, so the shared tooltip serves the boundary like the
+    filled areas.
+    """
+    return pdk.Layer(
+        "GeoJsonLayer",
+        id="areas-outline",
+        data=features,
+        get_line_color=AREA_LINE_COLOR,
+        line_width_min_pixels=AREA_LINE_WIDTH_MIN_PX,
+        stroked=True,
+        filled=False,
         pickable=True,
     )

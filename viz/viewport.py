@@ -17,11 +17,19 @@ import math
 
 from viz.config import GERMANY_CENTER, INITIAL_ZOOM, MAP_HEIGHT
 
-# Viewport-fit tuning: a nominal map-window size, the padding fraction around
-# the selected areas' bounding box, and the zoom clamp around the fit.
-FIT_WIDTH_PX = 1000.0
+# Viewport-fit tuning: nominal map-window dimensions, the padding fraction
+# around the selected areas' bounding box, the extra zoom-out applied to the
+# fit so the selected areas' scope is visible at twice the fitted scale, and
+# the zoom clamp around the fit.
+# The deck's width is the stretched page column (unknown server-side) while its
+# height is fixed by MAP_HEIGHT, so the assumed width is deliberately smaller
+# than any plausible column: a fitted zoom must never crop the selected areas
+# on the lowest common desktop width.  The cost is extra side margin on wide
+# monitors, not clipping.
+FIT_WIDTH_PX = 800.0
 FIT_HEIGHT_PX = float(MAP_HEIGHT)
 FIT_PADDING = 0.12
+FIT_ZOOM_OUT = 1.0
 MIN_FIT_ZOOM = 3.0
 MAX_FIT_ZOOM = 13.0
 
@@ -67,9 +75,11 @@ def fit_viewstate(
     Empty input falls back to the Germany overview; a single point keeps its
     center and zooms to `MAX_FIT_ZOOM`.  The zoom fits both spans: it takes the
     smaller of the lat/lon-fitted zoom candidates (so neither axis clips),
-    clamped to ``[MIN_FIT_ZOOM, MAX_FIT_ZOOM]``.  A zero-span strip (a row or
-    column of points sharing a latitude or longitude) lets the other axis
-    decide instead of dividing by zero.
+    backs out `FIT_ZOOM_OUT` zoom levels (each level halves the scale) so the
+    selected areas' scope stays visible around the fitted bbox, and clamps to
+    ``[MIN_FIT_ZOOM, MAX_FIT_ZOOM]``.  A zero-span strip (a row or column of
+    points sharing a latitude or longitude) lets the other axis decide instead
+    of dividing by zero.
     """
     if not points:
         return {
@@ -96,7 +106,9 @@ def fit_viewstate(
         )
     zoom = min(zoom_candidates)
     zoom = min(max(zoom, MIN_FIT_ZOOM), MAX_FIT_ZOOM)
-    return {"lon": lon, "lat": lat, "zoom": round(zoom, 1)}
+    zoom = math.floor((zoom - FIT_ZOOM_OUT) * 10.0) / 10.0
+    zoom = min(max(zoom, MIN_FIT_ZOOM), MAX_FIT_ZOOM)
+    return {"lon": lon, "lat": lat, "zoom": zoom}
 
 
 def should_refit(

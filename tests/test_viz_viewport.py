@@ -8,10 +8,15 @@ area selection changed, or nothing stored yet) versus preserved across reruns
 (source/timescope changes).  No database and no deck involved.
 """
 
+import math
+
 from viz.config import GERMANY_CENTER, INITIAL_ZOOM
 from viz.viewport import (
+    FIT_HEIGHT_PX,
+    FIT_WIDTH_PX,
     MAX_FIT_ZOOM,
     MIN_FIT_ZOOM,
+    _mercator_y,
     fit_viewstate,
     geometry_points,
     should_refit,
@@ -103,6 +108,26 @@ class TestFitViewstate:
     def test_single_point_zooms_to_max(self):
         view = fit_viewstate([(10.0, 50.0)])
         assert view == {"lon": 10.0, "lat": 50.0, "zoom": MAX_FIT_ZOOM}
+
+    def test_fitted_bbox_occupies_at_most_half_the_nominal_window(self):
+        # FIT_ZOOM_OUT backs the fitted zoom out by a couple of full zoom
+        # levels, so the whole selected bbox — whose web-mercator pixel extent
+        # halves with each zoom step — ends up well inside (at most a quarter
+        # of) the assumed FIT_WIDTH_PX x FIT_HEIGHT_PX window.  This is the
+        # "zoom out to see the scope" behavior the user asked for.
+        for points in (
+            [(5.0, 47.0), (15.5, 54.0)],  # wide bbox -> width-limited fit
+            [(10.0, 47.0), (11.0, 55.0)],  # tall bbox -> height-limited fit
+            [(10.0, 50.0), (12.0, 52.0)],  # proportioned bbox
+        ):
+            view = fit_viewstate(points)
+            lons = [point[0] for point in points]
+            lats = [point[1] for point in points]
+            x_px = (max(lons) - min(lons)) / 360.0 * 256.0 * (2.0 ** view["zoom"])
+            mercator_span = _mercator_y(max(lats)) - _mercator_y(min(lats))
+            y_px = mercator_span / (2.0 * math.pi) * 256.0 * (2.0 ** view["zoom"])
+            assert x_px <= FIT_WIDTH_PX / 2 + 1e-6
+            assert y_px <= FIT_HEIGHT_PX / 2 + 1e-6
 
 
 class TestShouldRefit:

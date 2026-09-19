@@ -12,8 +12,8 @@ figures recompute on every rerun (source/timescope/level changes) and pull
 from the same predicate the map renders.
 
 T4 (#26): the administrative-level slice.  An area multiselect below the
-level selectbox picks the displayed areas at the active level (defaults to
-all; empty selection means all), a choropleth GeoJsonLayer colors each area
+level selectbox picks the displayed areas at the active level (starts empty;
+empty selection means all areas), a choropleth GeoJsonLayer colors each area
 by its live capacity (per-area unit count on hover), computed from the same
 source/timescope filters as the scatter and header, and the camera refits to
 the selected areas' bounding box only when the level or area selection
@@ -21,7 +21,10 @@ changes — session-state camera survives every other rerun.  With a proper
 subset of areas picked, the scatter points and every header figure narrow to
 those areas (units whose region/district/municipality names one of them); on
 the all-areas selection every active unit renders and counts, including
-offshore units that belong to no polygon at the active level.
+offshore units that belong to no polygon at the active level.  At the country
+level ("Germany") the area multiselect is omitted and the choropleth gives
+way to a plain country-boundary outline — there is nothing to compare by
+color within a single polygon.
 
 T1 tracer (#23): when the core tables are absent — or the database is
 unreachable — the app hides the data widgets and shows only a full-width
@@ -55,6 +58,7 @@ from viz.config import (
     STANDBY_MAP_HEIGHT,
     default_timescope,
 )
+from viz.colorbar import colorbar_html
 from viz.data import (
     CORE_VIS_TABLES,
     fetch_active_units,
@@ -68,6 +72,7 @@ from viz.data import (
 )
 from viz.header import format_area_km2, format_mw, format_unit_count, scope_title
 from viz.map_builder import (
+    build_boundary_layer,
     build_choropleth_layer,
     build_deck,
     build_source_layers,
@@ -171,18 +176,23 @@ level_label = st.sidebar.selectbox(
 level = LEVEL_INDEX[level_label]
 
 # The multiselect options are the area names at the active level, fetched
-# live; it defaults to every area and — per the spec — an empty selection
-# means "all areas" too.  The widget key embeds the level, so switching
-# levels starts from a fresh all-areas selection instead of leaking the
-# previous level's names into the new one.
+# live.  It starts empty on purpose — every level switch lands on a fresh
+# widget with nothing picked, so the user chooses what to display — and, per
+# the spec, an empty selection means "all areas" too.  The widget key embeds
+# the level, so switching levels starts from a fresh no-selection pick
+# instead of leaking the previous level's names into the new one.  At the
+# country level ("Germany", a single polygon) there is no area choice to
+# make, so the widget is omitted and the scope is always the whole country.
 area_names = fetch_area_names(engine, level)
-selected_areas = st.sidebar.multiselect(
-    "Areas",
-    options=area_names,
-    default=list(area_names),
-    key=f"areas_{level_label}",
-)
-selected_names: tuple[str, ...] = tuple(selected_areas or area_names)
+if level_label == "Germany":
+    selected_names: tuple[str, ...] = tuple(area_names)
+else:
+    selected_areas = st.sidebar.multiselect(
+        "Areas",
+        options=area_names,
+        key=f"areas_{level_label}",
+    )
+    selected_names = tuple(selected_areas or area_names)
 
 # The scatter points and header metrics follow the selection only when it is a
 # proper subset of the level's areas: a unit's region/district/municipality
@@ -230,16 +240,21 @@ for rows in units.values():
 # the choropleth colors exactly the units the points and header totals count;
 # the boundaries (name + GeoJSON) are fetched over the same displayed scope,
 # and the two are joined by area name.  With nothing checked the fill query is
-# skipped (zero fill everywhere) while the boundaries still render.
+# skipped (zero fill everywhere) while the boundaries still render; at the
+# country level the fill is skipped too, since the boundary layer paints no
+# choropleth there.
 boundary_rows = fetch_boundaries(engine, level=level, names=selected_names)
-fill_rows = fetch_boundary_fill(
-    engine,
-    level=level,
-    names=selected_names,
-    active_from=active_from,
-    active_to=active_to,
-    sources=tuple(checked_sources),
-)
+if level_label == "Germany":
+    fill_rows = []
+else:
+    fill_rows = fetch_boundary_fill(
+        engine,
+        level=level,
+        names=selected_names,
+        active_from=active_from,
+        active_to=active_to,
+        sources=tuple(checked_sources),
+    )
 features = areas_feature_collection(boundary_rows, fill_rows)
 
 # ── Camera (issue #26) ──────────────────────────────────────────────────── #
@@ -301,8 +316,14 @@ header_cells = "".join(
 st.markdown(f"<div class='hdr-row'>{header_cells}</div>", unsafe_allow_html=True)
 
 # Area fills paint below the unit points, so points stay legible on top of the
-# choropleth; the camera comes from the session state above.
-layers = [build_choropleth_layer(features), *build_source_layers(units)]
+# choropleth; the camera comes from the session state above.  At the country
+# level the choropleth gives way to the plain boundary layer (no fill).
+area_layer = (
+    build_boundary_layer(features)
+    if level_label == "Germany"
+    else build_choropleth_layer(features)
+)
+layers = [area_layer, *build_source_layers(units)]
 st.pydeck_chart(
     build_deck(
         layers=layers,
@@ -315,3 +336,11 @@ st.pydeck_chart(
     width="stretch",
     height=MAP_HEIGHT,
 )
+
+# The colorbar floats over the map's right edge whenever the choropleth paints
+# a real capacity ramp (Germany has no choropleth, and an all-zero or empty
+# fill has nothing to scale) — the top label is the largest area fill across
+# the displayed scope, matching the ramp's high end.
+colorbar_max = max((row["capacity_mw"] for row in fill_rows), default=0.0)
+if level_label != "Germany" and colorbar_max > 0:
+    st.markdown(colorbar_html(colorbar_max), unsafe_allow_html=True)

@@ -12,6 +12,7 @@ color, pickable (so hovering works).
 
 from viz.config import GERMANY_CENTER, INITIAL_ZOOM, LIGHT_MAP_STYLE, MAP_STYLES
 from viz.map_builder import (
+    build_boundary_layer,
     build_choropleth_layer,
     build_deck,
     build_source_layers,
@@ -148,5 +149,38 @@ class TestChoroplethLayer:
     def test_polygons_are_filled_and_stroked(self):
         layer = build_choropleth_layer(self.feature_collection())
         assert layer.filled is True
+        assert layer.stroked is True
+        assert layer.line_width_min_pixels >= 1
+
+
+class TestBoundaryLayer:
+    def feature_collection(self):
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Polygon", "coordinates": []},
+                    "properties": {
+                        "name": "Germany",
+                        "fill_color": [241, 243, 246, 150],
+                    },
+                }
+            ],
+        }
+
+    def test_is_a_pickable_geojson_layer(self):
+        layer = build_boundary_layer(self.feature_collection())
+        assert layer.type == "GeoJsonLayer"
+        assert layer.pickable is True
+
+    def test_features_pass_through_as_layer_data(self):
+        features = self.feature_collection()
+        layer = build_boundary_layer(features)
+        assert layer.data == features
+
+    def test_outline_is_stroked_but_never_filled(self):
+        layer = build_boundary_layer(self.feature_collection())
+        assert layer.filled is False
         assert layer.stroked is True
         assert layer.line_width_min_pixels >= 1

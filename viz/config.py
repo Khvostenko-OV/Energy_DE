@@ -68,7 +68,7 @@ INITIAL_ZOOM = 5.2
 
 # Pixel height of the map window inside the app (streamlit's pydeck_chart
 # height); larger than the 500px default so the map dominates the page.
-MAP_HEIGHT = 800
+MAP_HEIGHT = 700
 
 # Pixel height of the token basemap shown in standby ("No core tables").  The
 # standby ignores MAP_HEIGHT: it is just a notice above a map hint, not the
