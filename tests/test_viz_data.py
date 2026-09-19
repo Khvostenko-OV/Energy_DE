@@ -115,6 +115,26 @@ class _RecordingEngine:
         return nullcontext(_RecordingConnection(self))
 
 
+class _RecordingRowsEngine:
+    """Fake SQLAlchemy engine: records queries and returns one result row."""
+
+    def __init__(self, row_values):
+        self.calls = []
+        self.row = _MappingRow(**row_values)
+
+    def connect(self):
+        return nullcontext(_RecordingRowsConnection(self))
+
+
+class _RecordingRowsConnection:
+    def __init__(self, engine):
+        self.engine = engine
+
+    def execute(self, query, params=None):
+        self.engine.calls.append((str(query), params))
+        return [self.engine.row]
+
+
 class TestUnitQuery:
     def test_generator_query_targets_core_generators_with_unit_columns(self):
         sql, params = unit_query(
@@ -306,12 +326,29 @@ class TestAreasQuery:
         assert "area" in sql
         assert "filter" not in sql
 
+    def test_name_selection_filters_the_displayed_areas(self):
+        sql, params = areas_query(1, names=("Berlin", "Hamburg"))
+        assert sql == (
+            "SELECT COUNT(*) AS area_count, "
+            "COALESCE(SUM(area), 0.0) AS total_area "
+            "FROM service.boundaries WHERE level = :level AND name = ANY(:names)"
+        )
+        assert params == {"level": 1, "names": ["Berlin", "Hamburg"]}
+
 
 class TestAreaNameQuery:
     def test_selects_the_single_displayed_area_name(self):
         sql, params = area_name_query(0)
         assert sql == "SELECT name FROM service.boundaries WHERE level = :level"
         assert params == {"level": 0}
+
+    def test_name_selection_filters_the_single_area(self):
+        sql, params = area_name_query(0, names=("Germany",))
+        assert sql == (
+            "SELECT name FROM service.boundaries WHERE level = :level "
+            "AND name = ANY(:names)"
+        )
+        assert params == {"level": 0, "names": ["Germany"]}
 
 
 class _AreasStub:
@@ -364,6 +401,14 @@ class TestFetchAreas:
         result = fetch_areas(stub, 1)
         assert "area_name" not in result
         assert len(stub.calls) == 1
+
+    def test_name_selection_flows_into_both_queries(self):
+        stub = _AreasStub(count=1, name="Berlin")
+        fetch_areas(stub, 1, names=("Berlin",))
+        assert [params for _, params in stub.calls] == [
+            {"level": 1, "names": ["Berlin"]},
+            {"level": 1, "names": ["Berlin"]},
+        ]
 
 
 class TestHeaderMetricsQuery:
@@ -421,6 +466,29 @@ class TestHeaderMetricsQuery:
             "source_1": "storage",
         }
 
+    def test_area_filter_narrows_every_source_subquery(self):
+        sql, params = header_metrics_query(
+            date(1990, 1, 1),
+            date(2010, 1, 1),
+            sources=("solar", "storage"),
+            area_column="region",
+            area_names=("Berlin",),
+        )
+        assert sql.count("AND region = ANY(:area_names)") == 2
+        assert params["area_names"] == ["Berlin"]
+
+    def test_area_filter_joins_the_same_predicate_as_the_unit_fetch(self):
+        sql, params = header_metrics_query(
+            date(1990, 1, 1),
+            date(2010, 1, 1),
+            sources=("wind",),
+            area_column="region",
+            area_names=("Berlin",),
+        )
+        assert "commissioning_date <= :to" in sql
+        assert "AND region = ANY(:area_names)" in sql
+        assert params["area_names"] == ["Berlin"]
+
     def test_empty_sources_are_rejected(self):
         with pytest.raises(ValueError):
             header_metrics_query(date(1990, 1, 1), date(2010, 1, 1), sources=())
@@ -447,6 +515,26 @@ class TestFetchHeaderMetrics:
         )
         assert engine.calls == []
         assert result == {"unit_count": 0, "capacity_mw": 0.0}
+
+    def test_area_filter_narrows_the_totals(self):
+        engine = _RecordingRowsEngine({"unit_count": 7, "capacity_mw": 3.0})
+        result = fetch_header_metrics(
+            engine,
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("wind",),
+            area_column="district",
+            area_names=("Arnsberg",),
+        )
+        sql, params = engine.calls[0]
+        assert "AND district = ANY(:area_names)" in sql
+        assert params == {
+            "from": date(2020, 1, 1),
+            "to": date(2021, 1, 1),
+            "source_0": "wind",
+            "area_names": ["Arnsberg"],
+        }
+        assert result == {"unit_count": 7, "capacity_mw": 3.0}
 
 
 class TestBoundaryNamesQuery:

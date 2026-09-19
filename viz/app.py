@@ -18,11 +18,10 @@ by its live capacity (per-area unit count on hover), computed from the same
 source/timescope filters as the scatter and header, and the camera refits to
 the selected areas' bounding box only when the level or area selection
 changes — session-state camera survives every other rerun.  With a proper
-subset of areas picked, the scatter points narrow to those areas too (units
-whose region/district/municipality names one of them); on the all-areas
-selection every active unit renders, including offshore units that belong to
-no polygon at the active level.  The header strip stays level-wide either
-way.
+subset of areas picked, the scatter points and every header figure narrow to
+those areas (units whose region/district/municipality names one of them); on
+the all-areas selection every active unit renders and counts, including
+offshore units that belong to no polygon at the active level.
 
 T1 tracer (#23): when the core tables are absent — or the database is
 unreachable — the app hides the data widgets and shows only a full-width
@@ -185,10 +184,11 @@ selected_areas = st.sidebar.multiselect(
 )
 selected_names: tuple[str, ...] = tuple(selected_areas or area_names)
 
-# The scatter points follow the selection only when it is a proper subset of
-# the level's areas: a unit's region/district/municipality attribute must name
-# one of the picked areas.  On the all-areas selection no filter applies, so
-# units that belong to no polygon at the active level still render.
+# The scatter points and header metrics follow the selection only when it is a
+# proper subset of the level's areas: a unit's region/district/municipality
+# attribute must name one of the picked areas.  On the all-areas selection no
+# filter applies, so units that belong to no polygon at the active level still
+# render and count.
 area_column = LEVEL_UNIT_AREA_COLUMN[level_label]
 area_filter_names: tuple[str, ...] | None = (
     selected_names
@@ -269,19 +269,23 @@ camera = st.session_state["camera"]
 
 # ── Header aggregates (issue #25) ──────────────────────────────────────── #
 
-# The header stays level-wide: the issue #26 spec keeps the full active-unit
-# set in the totals (units with no area at the active level remain in the
-# header), so the multiselect narrows the choropleth only, never these figures.
-# The metrics share the map's exact timescope predicate and checked-source set,
-# so all four header values track every filter change on the same rows the
-# layers render.  The strip renders label + value on one line each (CSS
-# `.hdr-row`), smaller than st.metric's stacked layout.
-areas = fetch_areas(engine, level)
+# Every header figure follows the selection like the scatter: the scope/area
+# cells narrow to the picked areas and the metrics to the units whose
+# region/district/municipality names one of them, so a chosen area reads as
+# "Region Berlin" with Berlin's capacity, units and km².  On the all-areas
+# selection the figures are simply the level-wide totals.  The metrics share
+# the map's exact timescope predicate and checked-source set, so all four
+# header values track every filter change on the same rows the layers render.
+# The strip renders label + value on one line each (CSS `.hdr-row`), smaller
+# than st.metric's stacked layout.
+areas = fetch_areas(engine, level, names=selected_names)
 metrics = fetch_header_metrics(
     engine,
     active_from=active_from,
     active_to=active_to,
     sources=tuple(checked_sources),
+    area_column=area_column,
+    area_names=area_filter_names or (),
 )
 
 header_cells = "".join(

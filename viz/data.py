@@ -20,14 +20,18 @@ Issue #26 adds the choropleth feeds: `boundary_names_query` /
 `fetch_boundaries` fetch the selected areas' GeoJSON geometry, and
 `boundary_fill_query` / `fetch_boundary_fill` aggregate the checked active
 units per displayed area via a spatial join (capacity in MW, unit count),
-under the same timescope/source filters as the scatter and header.  The
-`areas_query` / `area_name_query` / `fetch_areas` header seams (issue #25)
-stay level-wide: the spec keeps every active unit in the header totals, so the
-area multiselect narrows the choropleth only, never the headline figures.
-`unit_query` / `fetch_active_units` also accept an area filter (one of the
-`LEVEL_UNIT_AREA_COLUMN` attributes) so the scatter points, unlike the header,
-follow the multiselect: with a proper subset of areas picked only their units
-render on the map.
+under the same timescope/source filters as the scatter and header.
+
+The header follows the selection like the scatter: `fetch_areas` takes the
+optional ``names`` and `header_metrics_query` / `fetch_header_metrics` one of
+the `LEVEL_UNIT_AREA_COLUMN` attributes, so with a proper subset of areas
+picked the scope, area (km²), capacity and unit-count figures all narrow to
+the selected areas (issue #26).  On the all-areas selection no filter applies
+and every active unit counts.  `unit_query` / `fetch_active_units` use the
+same attribute filter, so the scatter points show exactly the units the header
+totals — with one exception: a unit sitting on a shared border is attributed
+to each area it intersects (the spatial fill), while the header counts it in
+its named region once.
 """
 
 from __future__ import annotations
@@ -190,44 +194,57 @@ def fetch_active_units(
     return units
 
 
-def areas_query(level: int) -> tuple[str, dict]:
+def areas_query(level: int, names: tuple[str, ...] | None = None) -> tuple[str, dict]:
     """SQL + bound params for the displayed-area header: count and km² sum.
 
-    Counts every ``service.boundaries`` row at ``level`` and sums their stored
-    ``area`` column (km²).  The multiselect does not narrow these (issue #26):
-    the header keeps the level-wide figure while the choropleth follows the
-    selection.  Sea/EEZ polygons live at level 1 and count like any other
-    region — documented, not special-cased (issue #25).
+    Counts ``service.boundaries`` rows at ``level`` and sums their stored
+    ``area`` column (km²).  ``names`` narrows the displayed areas (issue #26);
+    None means every area at the level.  Sea/EEZ polygons live at level 1 and
+    count like any other region — documented, not special-cased (issue #25).
     """
     sql = (
         "SELECT COUNT(*) AS area_count, "
         "COALESCE(SUM(area), 0.0) AS total_area "
         "FROM service.boundaries WHERE level = :level"
     )
-    return sql, {"level": level}
+    params: dict = {"level": level}
+    if names is not None:
+        sql += " AND name = ANY(:names)"
+        params["names"] = list(names)
+    return sql, params
 
 
-def area_name_query(level: int) -> tuple[str, dict]:
+def area_name_query(
+    level: int, names: tuple[str, ...] | None = None
+) -> tuple[str, dict]:
     """SQL + bound params for the single displayed area's name."""
     sql = "SELECT name FROM service.boundaries WHERE level = :level"
-    return sql, {"level": level}
+    params: dict = {"level": level}
+    if names is not None:
+        sql += " AND name = ANY(:names)"
+        params["names"] = list(names)
+    return sql, params
 
 
-def fetch_areas(engine: Engine, level: int) -> dict[str, Any]:
+def fetch_areas(
+    engine: Engine, level: int, names: tuple[str, ...] | None = None
+) -> dict[str, Any]:
     """Area figures for the header at ``level``: count, km² sum, and — when
-    exactly one area exists at ``level`` — its name.
+    exactly one area is displayed — its name.
 
-    The name is fetched only when ``COUNT(*)`` is 1, so the
-    region/district/municipality levels (many rows) never read the name back.
+    The displayed areas are the optional ``names`` selection (default: every
+    area at the level).  The name is fetched only when ``COUNT(*)`` is 1, so
+    the region/district/municipality levels (many rows) never read the name
+    back.
     """
-    sql, params = areas_query(level)
+    sql, params = areas_query(level, names)
     row = run_query(engine, sql, params)[0]
     areas: dict[str, Any] = {
         "area_count": row["area_count"],
         "total_area_km2": row["total_area"],
     }
     if areas["area_count"] == 1:
-        name_sql, _ = area_name_query(level)
+        name_sql, _ = area_name_query(level, names)
         areas["area_name"] = run_query(engine, name_sql, params)[0]["name"]
     return areas
 
@@ -236,6 +253,8 @@ def header_metrics_query(
     active_from: date,
     active_to: date,
     sources: tuple[str, ...],
+    area_column: str | None = None,
+    area_names: tuple[str, ...] = (),
 ) -> tuple[str, dict]:
     """SQL + bound params for the header's active-unit aggregates.
 
@@ -245,6 +264,10 @@ def header_metrics_query(
     installed capacity (kW) ÷ 1000 → MW.  Storage's single category reads
     ``core.storages`` like the unit fetches; every other source reads
     ``core.generators``.
+
+    ``area_column`` narrows every subquery to ``area_names`` when both are
+    given (a `LEVEL_UNIT_AREA_COLUMN` constant, issue #26), so the header
+    totals follow the selected areas exactly like the scatter points.
     """
     parts: list[str] = []
     params: dict[str, date | str] = {"from": active_from, "to": active_to}
@@ -254,8 +277,11 @@ def header_metrics_query(
             f"SELECT installed_capacity FROM core.{table} "
             f"WHERE energy_source = :source_{n} "
             f"AND {ACTIVE_UNIT_PREDICATE}"
+            + (f" AND {area_column} = ANY(:area_names)" if area_column and area_names else "")
         )
         params[f"source_{n}"] = source
+    if area_column and area_names:
+        params["area_names"] = list(area_names)
     if not parts:
         raise ValueError("sources must contain at least one entry")
     sql = (
@@ -272,15 +298,25 @@ def fetch_header_metrics(
     active_from: date,
     active_to: date,
     sources: tuple[str, ...],
+    area_column: str | None = None,
+    area_names: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Header capacity (MW) and active-unit count for the checked sources.
 
-    With nothing checked the header reads zeros and no query runs — the same
-    contract the empty-unit-fetch satisfies for the scatter layers.
+    ``area_column`` / ``area_names`` narrow the totals to the selected areas
+    (issue #26).  With nothing checked the header reads zeros and no query
+    runs — the same contract the empty-unit-fetch satisfies for the scatter
+    layers.
     """
     if not sources:
         return {"unit_count": 0, "capacity_mw": 0.0}
-    sql, params = header_metrics_query(active_from, active_to, sources)
+    sql, params = header_metrics_query(
+        active_from,
+        active_to,
+        sources,
+        area_column=area_column,
+        area_names=area_names,
+    )
     return run_query(engine, sql, params)[0]
 
 
