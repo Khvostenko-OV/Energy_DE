@@ -8,6 +8,11 @@ with administrative and maritime boundaries. The data is enriched using spatial 
 Aggregation total installed capacity by region (Bundesland / Landkreis / Gemeinde), 
 by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 
+> **Note (issue #28):** the dashboard tooling has since moved on — the implemented
+> visualization is the Streamlit + PyDeck app (`VisualizationSpec.md`, issues #23+),
+> deployed as its own compose container, and the Metabase container was dropped
+> from the stack. The marts and their aggregation contract here are unchanged.
+
 ## Data description
 ### Energy installations. Source https://zenodo.org/records/20716459  
 | Dataset              | Description                                              | Filename                             | Type         |
@@ -292,7 +297,7 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 1. Data Processing: Python (Pandas, GeoPandas)
 2. Database: PostgreSQL + PostGIS 
 3. Orchestration: Python scripts / Airflow (optional)
-4. Visualization: Metabase 
+4. Visualization: Metabase _(superseded by the Streamlit + PyDeck app, issue #28)_
 5. Infrastructure: Docker, GitHub Actions
 
 ## Implementation

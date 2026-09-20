@@ -1,10 +1,12 @@
-# Containerized ETL (issues #13, #15)
+# Containerized ETL + viz (issues #13, #15, #28)
 
-The existing CLI pipeline (`python -m etl`) runs unchanged inside containers —
-**no pipeline code changes**. This is pure packaging: a pipeline image that
-wraps the CLI, a Docker Compose stack that provisions PostGIS plus Metabase,
-and a documented one-time manual seed procedure that puts the private raw data
-set and connection settings into a detached volume the pipeline reads.
+The existing CLI pipeline (`python -m etl`) and the Streamlit viz app (`viz/`)
+run unchanged inside containers — **no pipeline code changes**. This is pure
+packaging: a pipeline image that wraps the CLI, a viz image for the Streamlit
++ PyDeck app, a Docker Compose stack that provisions PostGIS plus the app, a
+read-only `viz_reader` database role the app connects as, and a documented
+one-time manual seed procedure that puts the private raw data set and
+connection settings into a detached volume the containers read.
 
 > **CLI naming:** the pipeline's `run_all` stage is exposed by Click as the
 > command `run-all` (Click verbatim-keeps single-word names and hyphenates
@@ -19,29 +21,41 @@ set and connection settings into a detached volume the pipeline reads.
  ├─ data/sources/*.gpkg, data/boundaries/*.gpkg   (private, git-ignored)
  ├─ scripts/seed_data_volume.sh  ── once per machine ──►  volume: etl_data
  │                                                       (data + docker.env)
- ├─ compose.yaml:  db (imresamu/postgis)                ┐
- ├─ compose.yaml:  pipeline (build .; run-all) ───► db ─┤ network
- └─ compose.yaml:  metabase (metabase/metabase)         ┘
+ ├─ compose.yaml:  db          (imresamu/postgis)      ┐
+ ├─ compose.yaml:  pipeline    (build .; run-all) ──► db ─┤ network
+ └─ compose.yaml:  viz         (Dockerfile.viz)      ───┘
 ```
 
 | What | Where |
 |------|-------|
 | Pipeline image | built from this repo (`Dockerfile`), exposes `python -m etl` unchanged |
-| PostGIS database | `db` service; PostGIS extension enabled by the image on first init |
-| Analytics dashboards | `metabase` service; H2 app-db in a persistent volume for its own state |
+| PostGIS database | `db` service; PostGIS extension enabled by the image on first init; the read-only `viz_reader` role provisioned from `docker/viz_reader.sql` on the same init |
+| Visualization app | `viz` service (Streamlit + PyDeck, `http://localhost:8501`, no auth), built from `Dockerfile.viz`, reads `core`/`service`/`marts` as `viz_reader` |
 | Raw data + connection settings | detached named volume `etl_data`, seeded once per machine |
-| Volume mount | `etl_data` → `/app/data` (so `run-all`'s `data/sources/...`, `data/boundaries/...` resolve) |
+| Volume mount | `etl_data` → `/app/data` (so `run-all`'s `data/sources/...`, `data/boundaries/...` resolve and both containers source `docker.env`) |
 
-The image never contains data or connection settings. `etl/config.py` reads
-`DATABASE_URL` from the environment; the container entrypoint
-(`docker/entrypoint.sh`) sources `/app/data/docker.env` from the seeded volume
-before handing control to the CLI. Nothing data- or secret-like is baked in.
+The images never contain data or real connection settings. `etl/config.py` reads
+`DATABASE_URL` / `viz/data.py` reads `VIZ_DATABASE_URL` from the environment;
+the shared container entrypoint (`docker/entrypoint.sh`) sources
+`/app/data/docker.env` from the seeded volume before handing control to the
+command (an operator-supplied URL wins over the volume). The only credentials
+that live in git are the **documented dev defaults** for a self-contained stack
+(`etl`/`etl`, and the read-only `viz_reader`/`viz` pair in
+`docker/viz_reader.sql`) — the same precedent as the compose `POSTGRES_*`
+defaults; anything real replaces them at seed time and stays in the volume.
+
+> **Read-only scope:** in the container the app always connects as `viz_reader`
+> (the seed always writes `VIZ_DATABASE_URL`). The `DATABASE_URL` fallback in
+> `viz/data.py` exists for the dev host, where the operator usually has no
+> `VIZ_DATABASE_URL` set and the app reads with the dev `DATABASE_URL` role —
+> so on a dev host the read-only guarantee only holds when `VIZ_DATABASE_URL`
+> is set (the dev-host SQL seam makes that easy).
 
 > **Platform note:** the `db` image is a multi-arch build
 > (`imresamu/postgis`, arm64 + amd64), so the database runs natively on both
 > Apple Silicon and x86 servers — the official `postgis/postgis` images are
-> amd64-only and would otherwise run under emulation on ARM. The pipeline
-> container itself is native `arm64`.
+> amd64-only and would otherwise run under emulation on ARM. The pipeline and
+> viz containers are native `arm64`/`amd64` Python images.
 
 ## One-time seed (per machine)
 
@@ -58,21 +72,23 @@ What it does (idempotent, safe to re-run):
 
 1. creates the named volume `etl_data` if absent,
 2. copies `data/sources/` and `data/boundaries/` into it,
-3. writes `/data/docker.env` with `export DATABASE_URL=postgresql://…@db:5432/…`.
+3. writes `/data/docker.env` with `DATABASE_URL` (the pipeline role) and
+   `VIZ_DATABASE_URL` (the read-only `viz_reader` role the app uses).
 
 A fresh machine is then self-contained — the raw data and connection settings
-ride in the volume, not in git or the image.
+ride in the volume, not in git or the images.
 
 ## Run the pipeline
 
-Metabase is **always part of the stack** (it comes up with every `docker compose
-up`). It is long-running, so use the one-shot container for the pipeline pass
-instead of `up`:
+On a **fresh database volume** the `db` service self-provisions the
+`viz_reader` role from `docker/viz_reader.sql` during first init, so the stack
+comes up fully provisioned. (An existing volume from before this change gets
+the role once by running the seam by hand — see below.)
 
 ```bash
-docker compose build pipeline                            # build the image
-docker compose up -d --wait db                           # db + metabase, healthy
-docker compose run --rm pipeline                         # the full pass (run-all)
+docker compose build pipeline viz           # build both images
+docker compose up -d --wait db              # db healthy (role provisioned on fresh db)
+docker compose run --rm pipeline            # the full pass (run-all)
 ```
 
 The full pass runs extract → transform → load → marts against the compose
@@ -91,18 +107,49 @@ docker compose run --rm pipeline python -m etl transform wind
 `DATABASE_URL` comes from the seeded volume. `run-all` is the default command,
 so a bare `docker compose run --rm pipeline` runs the pass too.
 
-## Metabase
+## Visualization app (viz)
 
-`docker compose up` also starts the `metabase` service, reachable at
-<http://localhost:3000>. It uses an **embedded H2 app-db** (`MB_DB_FILE`) in a
-dedicated persistent volume so Metabase state survives `down`/restarts (wiped
-only by `docker compose down -v`).
+`viz` is a long-running service that comes up with `docker compose up`,
+reachable at <http://localhost:8501> with **no auth** (per the visualization
+spec). It reads the live `core`, `service`, and `marts` tables/app via the
+**read-only `viz_reader` role**, so the app can never mutate the database even
+if the app itself were compromised.
 
-First run: Metabase asks for the admin user; then register the marts PostGIS as
-a database (host `db`, db `energy_de`, user/pass `etl`/`etl`, port 5432) and the
-region-grain marts are queryable. The adoption of the marts that ships with the
-versioned dashboards + map card is the #15 follow-up (setup script bootstrapping
-admin + database registration idempotently).
+### Read-only role (viz_reader)
+
+`docker/viz_reader.sql` is a single idempotent SQL seam that provisions the
+role, used by both sides:
+
+- **compose** — mounted into the `db` container at
+  `/docker-entrypoint-initdb.d/99-viz-reader.sql:ro`, so a fresh database
+  volume creates the role on the first `up` (issue #28 acceptance). The
+  single-file mount is deliberate: a directory mount would hide the postgis
+  image's own extension-bootstrap scripts.
+- **dev host** — the same file is the dev-host seam:
+  `psql -U etl -d energy_de -f docker/viz_reader.sql`
+  (run as the role that owns the pipeline schemas).
+
+It creates `viz_reader LOGIN` (password `viz`) iff missing, then grants
+**default** privileges (SELECT on tables/sequences, USAGE on schemas, for the
+running pipeline role) together with equivalent grants on already-existing
+`core`/`service`/`marts` objects. The default privileges are schema-less on
+purpose: they cover the `marts` schema and its materialized views, which only
+appear after the first pipeline pass, without this file pre-creating (and thus
+owning) any schema. Re-running is a no-op and preserves an existing role's
+password.
+
+The app connects with `VIZ_DATABASE_URL` (read from the seeded `docker.env`)
+and falls back to `DATABASE_URL` on the dev host (`viz/data.py`).
+
+> **Coupled pairs:** like the pipeline's `POSTGRES_*`/`DATABASE_URL`, the
+> `viz_reader` password is hard-coded in `docker/viz_reader.sql` and written by
+> the seed script (`scripts/seed_data_volume.sh`, `VIZ_PASSWORD` default
+> `viz`). Change both together. Existing database volumes (created before this
+> issue) provision the role once by hand:
+> ```bash
+> docker compose exec -T db psql -U etl -d energy_de -f \
+>   /docker-entrypoint-initdb.d/99-viz-reader.sql
+> ```
 
 ## Verify the marts
 
@@ -119,7 +166,10 @@ no region fall under the `outside` bucket rather than `NULL`.
 `scripts/smoke_etl_container.sh` proves the acceptance criteria on a genuinely
 fresh stack: teardown → seed → healthy PostGIS → containerized `run-all` →
 mart assertions (three views exist, non-empty, no NULL regions, `outside`
-bucket present). Re-run it any time the packaging changes:
+bucket present) → idempotent `viz_reader` re-provisioning + read checks over
+the app's TCP path → viz up and answering `/_stcore/health` on port 8501. The
+`metabase` service's absence is asserted too. Re-run it any time the packaging
+changes:
 
 ```bash
 scripts/smoke_etl_container.sh
@@ -130,22 +180,24 @@ scripts/smoke_etl_container.sh
 | Env var | Default | Meaning |
 |---------|---------|---------|
 | `ETL_DATA_VOLUME` | `etl_data` | detached volume holding data + `docker.env` (compose + seed) |
-| `POSTGRES_USER` | `etl` | db superuser (compose `db`) |
+| `POSTGRES_USER` | `etl` | db superuser (compose `db`; the role the pipeline runs as and viz_reader's grants are keyed to) |
 | `POSTGRES_PASSWORD` | `etl` | db password (compose `db`) |
 | `POSTGRES_DB` | `energy_de` | default database, PostGIS enabled there |
 | `POSTGRES_PORT` | `5433` | host port for the db (5432 is the in-network/default dev port) |
-| `METABASE_PORT` | `3000` | host port for Metabase |
-| `DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`/`DB_NAME` | `etl`/`etl`/`db`/`5432`/`energy_de` | what the seed script writes into `docker.env` (for the pipeline) |
+| `VIZ_PORT` | `8501` | host port for the viz app |
+| `DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`/`DB_NAME` | `etl`/`etl`/`db`/`5432`/`energy_de` | what the seed script writes into `docker.env` `DATABASE_URL` (for the pipeline) |
+| `VIZ_USER`/`VIZ_PASSWORD` | `viz_reader`/`viz` | what the seed script writes into `docker.env` `VIZ_DATABASE_URL` (for the viz app); must match `docker/viz_reader.sql` |
 
-The compose `POSTGRES_*` credentials and the `DATABASE_URL` the seed writes are
-a coupled pair: if you change `POSTGRES_PASSWORD`, change the seed env
-accordingly and re-run `scripts/seed_data_volume.sh`.
+The compose `POSTGRES_*` credentials and the `DATABASE_URL`/`VIZ_DATABASE_URL`
+the seed writes are coupled pairs: if you change `POSTGRES_PASSWORD` or
+`VIZ_PASSWORD`, change the seed env (and, for the viz password,
+`docker/viz_reader.sql`) accordingly and re-run `scripts/seed_data_volume.sh`.
 
 ## Teardown / start over
 
 ```bash
 docker compose down --remove-orphans   # stop and remove containers + network
-docker compose down -v                 # also delete db + metabase data volumes (fresh stack)
+docker compose down -v                 # also delete the db volume (fresh stack)
 ```
 
 The data volume is deliberately **external to compose** (`external: true`), so it
@@ -165,7 +217,10 @@ seed. Re-running `docker volume create` is idempotent.
 
 - #13 containerization
 - #14 CI smoke gates (compile check + pipeline image build) — blocked by #13
-- #15 Metabase container now joined to this compose stack; remaining scope is the
-  idempotent first-run bootstrap (admin + marts DB registration) + the three
-  versioned dashboards with a map card — blocked by #13
-- #16 full-stack verification seam (one command) — blocked by #13, #15
+- #15 Metabase was joined to this compose stack and from #28 **removed** in
+  favour of the Streamlit viz app; the marts are the still-authoritative
+  analytical layer, surfaced by the app instead of Metabase dashboards.
+- #16 full-stack verification seam (one command) — this smoke now covers
+  db + pipeline + viz.
+- #28 containerize the viz service (read-only `viz_reader`, health probe,
+  Metabase removal)

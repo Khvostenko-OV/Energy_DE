@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Smoke test for the containerized ETL stack (issue #13 acceptance criteria).
+# Smoke test for the containerized ETL + viz stack (issue #13/#28 acceptance).
 #
-# Proves, on a genuinely fresh stack: the pipeline image builds, compose brings
-# up a PostGIS database and the pipeline, the containerized `run_all` completes
-# every stage (failing loudly on any drift), and the three marts are produced
-# at region grain including the `outside` bucket.
+# Proves, on a genuinely fresh stack: the pipeline and viz images build, compose
+# brings up a PostGIS database, the pipeline, and the viz app, the containerized
+# `run_all` completes every stage (failing loudly on any drift), the three
+# marts are produced at region grain including the `outside` bucket, the
+# read-only `viz_reader` role is provisioned and can read core/service/marts,
+# and the viz service passes Streamlit's `/_stcore/health` probe on port 8501.
 #
 # This is the seam the containerization work is verified against; issue #16
-# (full-stack verification incl. Metabase) builds on it. The pipeline's own
-# integration suite still owns pipeline semantics.
+# (full-stack verification) builds on it. The pipeline's own integration suite
+# still owns pipeline semantics.
 #
 # Usage:  scripts/smoke_etl_container.sh
 #
@@ -23,6 +25,9 @@ cd "$REPO_ROOT"
 VOLUME_NAME="${ETL_DATA_VOLUME:-etl_data}"
 DB_USER="${DB_USER:-etl}"
 DB_NAME="${DB_NAME:-energy_de}"
+VIZ_PORT="${VIZ_PORT:-8501}"
+VIZ_USER="${VIZ_USER:-viz_reader}"
+VIZ_PASSWORD="${VIZ_PASSWORD:-viz}"
 
 FAILURES=0
 
@@ -33,11 +38,21 @@ query() {
     docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -tAc "$1"
 }
 
+# The same credentials the seeded VIZ_DATABASE_URL carries: TCP (scram, needs
+# the password) as the read-only role, not the local socket (trust). This is
+# the app's exact connect path, so a pass here proves the pair end to end.
+query_viz() {
+    docker compose exec -T -e PGPASSWORD="$VIZ_PASSWORD" db psql \
+        -h 127.0.0.1 -U "$VIZ_USER" -d "$DB_NAME" -tAc "$1"
+}
+
 # Assert `psql` returns an integer count and that `count OP expected`.
+# `runner` defaults to `query`; a check that must run as the read-only role
+# (its own DB account / connection path) passes `query_viz`.
 expect_count() {
-    local desc="$1" op="$2" expected="$3" sql="$4"
+    local desc="$1" op="$2" expected="$3" sql="$4" runner="${5:-query}"
     local actual
-    actual="$(query "$sql")" || { fail "$desc (query failed)"; return; }
+    actual="$($runner "$sql")" || { fail "$desc (query failed)"; return; }
     case "$actual" in
         '' | *[!0-9-]*)
             fail "$desc (not an integer count: '$actual')"
@@ -52,8 +67,8 @@ expect_count() {
     fi
 }
 
-step "Building the pipeline image"
-docker compose build pipeline
+step "Building the pipeline and viz images"
+docker compose build pipeline viz
 
 step "Fresh start: teardown existing stack and volumes (db + seeded data)"
 docker compose down -v --remove-orphans >/dev/null
@@ -103,10 +118,66 @@ step "Mart sample rows"
 docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT * FROM marts.installation_counts ORDER BY region LIMIT 8"
 docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT * FROM marts.storage_capacity ORDER BY region LIMIT 5"
 
+step "Provisioning: viz_reader role (idempotent SQL seam)"
+# The role was created from /docker-entrypoint-initdb.d when the fresh db
+# volume initialized; re-running the same file proves the seam is idempotent.
+if docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" \
+    -f /docker-entrypoint-initdb.d/99-viz-reader.sql >/dev/null 2>&1; then
+    printf 'PASS: viz_reader provisioning re-run (idempotent)\n'
+else
+    fail "viz_reader provisioning re-run"
+fi
+expect_count "viz_reader role exists" -eq 1 \
+    "SELECT count(*) FROM pg_roles WHERE rolname='viz_reader'"
+
+step "viz_reader can read core/service/marts over the app's TCP path"
+expect_count "viz_reader reads core.generators" -gt 0 \
+    "SELECT count(*) FROM core.generators" query_viz
+expect_count "viz_reader reads core.storages" -gt 0 \
+    "SELECT count(*) FROM core.storages" query_viz
+expect_count "viz_reader reads service.boundaries" -gt 0 \
+    "SELECT count(*) FROM service.boundaries" query_viz
+expect_count "viz_reader reads the marts materialized views" -gt 0 \
+    "SELECT count(*) FROM marts.installation_counts" query_viz
+
+step "metabase service dropped from the compose stack"
+if docker compose config --services | grep -qx metabase; then
+    fail "metabase still present in compose"
+else
+    printf 'PASS: compose has no metabase service\n'
+fi
+
+step "Bringing up the viz service (Streamlit, port ${VIZ_PORT})"
+docker compose up -d --wait viz
+
+step "Viz health probe (Streamlit /_stcore/health)"
+if curl -fsS "http://127.0.0.1:${VIZ_PORT}/_stcore/health" | grep -qx ok; then
+    printf 'PASS: /_stcore/health returned ok (port %s)\n' "$VIZ_PORT"
+else
+    fail "viz health probe on port $VIZ_PORT"
+fi
+
+step "Viz app shell reachable (no auth)"
+if curl -fsS -o /dev/null "http://127.0.0.1:${VIZ_PORT}/"; then
+    printf 'PASS: viz app served at http://localhost:%s\n' "$VIZ_PORT"
+else
+    fail "viz app not served at http://localhost:$VIZ_PORT"
+fi
+
+step "Seeded volume carries VIZ_DATABASE_URL the app reads"
+if docker compose exec -T viz grep -q "^export VIZ_DATABASE_URL=postgresql://$VIZ_USER:" \
+    /app/data/docker.env; then
+    printf 'PASS: VIZ_DATABASE_URL present in docker.env (viz container mount)\n'
+else
+    fail "VIZ_DATABASE_URL missing from /app/data/docker.env"
+fi
+
 if [ "$FAILURES" -gt 0 ]; then
     printf '\nSMOKE FAILED: %d assertion(s) failed.\n' "$FAILURES" >&2
     exit 1
 fi
 
-printf '\nSMOKE PASSED: containerized run_all completed and the three marts\n'
-printf 'are populated at region grain, including the outside bucket.\n'
+printf '\nSMOKE PASSED: containerized run_all completed, the three marts\n'
+printf 'are populated at region grain (incl. the outside bucket), the\n'
+printf 'read-only viz_reader role reads core/service/marts, and the viz\n'
+printf 'service answers its health probe on port %s.\n' "$VIZ_PORT"

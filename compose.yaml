@@ -1,4 +1,4 @@
-# Containerized ETL stack (issue #13/#15).
+# Containerized ETL + viz stack (issues #13/#15/#28).
 #
 #   db        PostGIS server; created fresh from the image on first `up`. The
 #             image entrypoint enables the PostGIS extension in the default
@@ -7,24 +7,30 @@
 #             official postgis/postgis images, so the database runs natively on
 #             Apple Silicon instead of x86 emulation (postgis/postgis is
 #             amd64-only). Same PostGIS behaviour, same postgres entrypoint.
+#             On a fresh db volume, docker/viz_reader.sql runs from
+#             /docker-entrypoint-initdb.d to provision the read-only
+#             `viz_reader` role the viz service connects as.
 #
 #   pipeline  the `python -m etl` CLI in a container. `docker compose up`
 #             (and `run --rm pipeline`) executes the full pass (`run-all`)
 #             against `db`, which verifies every stage and fails loudly on drift.
 #
-#   metabase  Metabase analytics dashboard, always running alongside the stack.
-#             Uses an embedded H2 app-db in a persistent volume for its own state.
-#             Open at http://localhost:3000. The marts PostGIS is registered
-#             manually or via the #15 bootstrap script.
+#   viz       the Streamlit + PyDeck app in its own container, always running
+#             alongside the stack at http://localhost:8501 (no auth). It reads
+#             the marts/core/service tables through the read-only `viz_reader`
+#             role via the VIZ_DATABASE_URL that the data-volume seed writes.
 #
 # The raw data set + connection settings live in the DETACHED named volume
 # `etl_data` (external: the seed script, scripts/seed_data_volume.sh, creates
-# it once per machine). The pipeline mounts it at /app/data and the entrypoint
-# sources /app/data/docker.env for DATABASE_URL — nothing data- or secret-like
-# is baked into the image or this file, and the pipeline code is unchanged.
+# it once per machine). The pipeline and viz containers mount it at /app/data
+# and the shared entrypoint sources /app/data/docker.env for DATABASE_URL /
+# VIZ_DATABASE_URL — nothing data- or secret-like is baked into the images or
+# this file, and the pipeline code is unchanged.
 #
 # db credentials: POSTGRES_* here and the DATABASE_URL written by the seed
 # script are a coupled pair — change both (and re-seed) if you deviate.
+# The viz_reader password follows suit: it is written by the seed script as
+# VIZ_DATABASE_URL and hard-coded in docker/viz_reader.sql — change both.
 # See docs/containerization.md.
 
 name: energy-de-etl
@@ -42,6 +48,11 @@ services:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
+      # Provision the read-only viz_reader role on a fresh db volume. A
+      # single-file mount (not a directory) keeps the image's own
+      # /docker-entrypoint-initdb.d PostGIS bootstrap scripts visible; the
+      # `99-` prefix runs this after them. Idempotent (docker/viz_reader.sql).
+      - ./docker/viz_reader.sql:/docker-entrypoint-initdb.d/99-viz-reader.sql:ro
     healthcheck:
       # Force TCP: the postgres image runs a temporary socket-only init server
       # (listen_addresses='') to apply the PostGIS extension scripts before
@@ -67,32 +78,34 @@ services:
       db:
         condition: service_healthy
 
-  metabase:
-    image: metabase/metabase:latest
-    ports:
-      - "${METABASE_PORT:-3000}:3000"
+  viz:
+    build:
+      context: .
+      dockerfile: Dockerfile.viz
+    # "streamlit run viz/app.py --server.headless --server.address
+    # 0.0.0.0 --server.port 8501" is the image's default command; nothing to
+    # override here. The entrypoint sources VIZ_DATABASE_URL from the seeded
+    # volume (the app reads it with a DATABASE_URL fallback, viz/data.py).
     environment:
-      # Embedded H2 app-db: keeps Metabase state (admin, dashboards, DB
-      # connections) inside a dedicated persistent volume — no extra postgres
-      # required. Swap to MB_DB_TYPE=postgres / MB_DB_DBNAME / MB_DB_USER /
-      # MB_DB_PASS if a real app-db is preferred later.
-      MB_DB_FILE: /metabase.db/metabase.db
-      JAVA_OPTS: -Xmx1g
+      DATA_ENV_FILE: /app/data/docker.env
+    ports:
+      - "${VIZ_PORT:-8501}:8501"
     volumes:
-      - metabase_data:/metabase.db
+      - etl_data:/app/data
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
-      interval: 10s
+      # Streamlit's own health probe; python supplies urllib out of the box
+      # (the slim image ships no curl). GET /_stcore/health -> 200 "ok".
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=5)"]
+      interval: 5s
       timeout: 5s
       retries: 30
-      start_period: 60s
+      start_period: 20s
 
 volumes:
   db_data:
   etl_data:
     external: true
     name: ${ETL_DATA_VOLUME:-etl_data}
-  metabase_data:

@@ -1,15 +1,17 @@
 # Renewable Energy Installations in Germany
 
 Geospatial registry of renewable energy installations in Germany, with an ETL pipeline
-(GeoPandas → PostGIS → Metabase-ready marts) for analyzing installed capacity by energy
-source, region, and commissioning date.
+(GeoPandas → PostGIS marts) for analyzing installed capacity by energy source, region,
+and commissioning date, and a Streamlit + PyDeck map app that visualises the marts.
 
 ## Status
 
 Implemented. The ETL pipeline (extract → staging → core → marts) runs end-to-end via the CLI
 (`python -m etl <stage>`, or `run-all` for the whole pass; Click hyphenates the `run_all`
 Python function name) and is covered by a full integration
-test suite (pytest, 120+ tests against a PostGIS dev DB). Design work recorded in:
+test suite (pytest, 120+ tests against a PostGIS dev DB), and the Streamlit viz app
+(`viz/`, T1–T4, no-auth map with per-source scatter layers, area choropleth and header
+aggregates) runs in the containerized stack. Design work recorded in:
 
 - **Spec** — `TechnicalSpecification.md` (authoritative source of truth for data models and stages)
 - **Domain glossary** — `CONTEXT.md`
@@ -21,8 +23,10 @@ test suite (pytest, 120+ tests against a PostGIS dev DB). Design work recorded i
 
 - Python (Pandas, GeoPandas)
 - PostgreSQL + PostGIS (`energy_de` database)
-- Metabase (planned — marts are Metabase-ready)
-- Docker (containerized stack — `compose.yaml`, pipeline image, data-volume seed; `docs/containerization.md`)
+- Streamlit + PyDeck (`viz/` — the deployed visualization app, reads the marts through a
+  read-only `viz_reader` role)
+- Docker (containerized stack — `compose.yaml`: db + pipeline + viz images, data-volume
+  seed, read-only role provisioning; `docs/containerization.md`)
 - GitHub Actions (CI, planned — #14)
 
 ## Data

@@ -4,22 +4,22 @@
 Implemented. The ETL pipeline (GeoPandas → PostGIS) runs end-to-end from the CLI
 (`python -m etl <stage>`, incl. `run-all`; Click hyphenates the `run_all` Python
 function name) and is covered by a full integration test suite. Containerized:
-a pipeline image + PostGIS + Metabase compose stack with a one-time data-volume
-seed (`compose.yaml`, `scripts/seed_data_volume.sh`,
-`scripts/smoke_etl_container.sh`; see `docs/containerization.md`).
+a pipeline image + PostGIS + Streamlit-viz compose stack with a one-time data-volume
+seed, read-only `viz_reader` role provisioning (dev-host SQL seam in
+`docker/viz_reader.sql`), and a smoke seam (`compose.yaml`,
+`scripts/seed_data_volume.sh`, `scripts/smoke_etl_container.sh`; see
+`docs/containerization.md`).
 Treat `TechnicalSpecification.md` as the single authoritative source for data models, table
 schemas (raw/staging/service/core/marts), and pipeline design.
 
 ## Stack (from spec)
 - Python (Pandas, GeoPandas) for ETL — in use
 - PostgreSQL + PostGIS (PostGIS required for spatial joins) — in use
-- Metabase for dashboard/visualization — in use (container in the compose stack,
-  marts are queryable at `<host>:3000`; versioned dashboards/bootstrap planned (#15))
-- Docker for the containerized stack — in use (compose + pipeline image + Metabase, #13/#15)
-
-  - Streamlit + PyDeck for the visualization app — in use (T1 tracer of the Streamlit
-  `viz/` package, issues #23+; the aborted Dash approach was dropped with the `dash-viz-service`
-  branch)
+- Docker for the containerized stack — in use (compose: db + pipeline + viz, #13/#15/#28)
+- Streamlit + PyDeck for the visualization app — in use (the `viz/` package, issues #23+,
+  shipped as its own compose `viz` service behind the read-only `viz_reader` role, #28;
+  the aborted Dash/Metabase approaches were dropped with the `dash-viz-service` branch
+  and #28)
 
 ## Location of your data
 | What | Where |
@@ -51,7 +51,8 @@ typecheckers. The full integration suite is the verification bar — it needs a 
 (`DATABASE_URL` via `.env`) and the raw data files. The viz unit seams
 (`tests/test_viz_*.py`) take no database but do need `requirements-viz.txt` installed.
 The containerized stack has its own smoke
-seam (`scripts/smoke_etl_container.sh`, #13); CI is planned (#14). The raw data and the suite
+seam (`scripts/smoke_etl_container.sh`, #13; extended by #28 for db + pipeline + viz);
+CI is planned (#14). The raw data and the suite
 stay private either way.
 
 ## Agent skills
