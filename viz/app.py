@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import html
 import sys
+import time
 from pathlib import Path
 
 # Streamlit adds only this script's folder to sys.path, so the repo root
@@ -221,6 +222,10 @@ map_style_label = st.sidebar.selectbox("Map style", list(MAP_STYLES))
 
 # ── Fetch + render ─────────────────────────────────────────────────────── #
 
+print("Rendering", level_label)
+_timing_start = time.perf_counter()
+_checkpoint_start = _timing_start
+
 units = fetch_active_units(
     engine,
     active_from=active_from,
@@ -229,10 +234,14 @@ units = fetch_active_units(
     area_column=area_column,
     area_names=area_filter_names or (),
 )
+print(f"[timing] fetch_active_units: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 for rows in units.values():
     for row in rows:
         row["source_header"] = source_header(row)
         row["unit_body"] = unit_tooltip(row)
+print(f"[timing] tooltips: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 
 # ── Choropleth fetch (issue #26) ───────────────────────────────────────── #
 
@@ -244,6 +253,8 @@ for rows in units.values():
 # country level the fill is skipped too, since the boundary layer paints no
 # choropleth there.
 boundary_rows = fetch_boundaries(engine, level=level, names=selected_names)
+print(f"[timing] fetch_boundaries: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 if level_label == "Germany":
     fill_rows = []
 else:
@@ -255,7 +266,11 @@ else:
         active_to=active_to,
         sources=tuple(checked_sources),
     )
+print(f"[timing] fetch_boundary_fill: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 features = areas_feature_collection(boundary_rows, fill_rows)
+print(f"[timing] areas_feature_collection: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 
 # ── Camera (issue #26) ──────────────────────────────────────────────────── #
 
@@ -281,6 +296,8 @@ if should_refit(
         tuple(sorted(selected_names)),
     )
 camera = st.session_state["camera"]
+print(f"[timing] camera fit: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 
 # ── Header aggregates (issue #25) ──────────────────────────────────────── #
 
@@ -314,6 +331,8 @@ header_cells = "".join(
     )
 )
 st.markdown(f"<div class='hdr-row'>{header_cells}</div>", unsafe_allow_html=True)
+print(f"[timing] fetch_areas + fetch_header_metrics + header: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 
 # Area fills paint below the unit points, so points stay legible on top of the
 # choropleth; the camera comes from the session state above.  At the country
@@ -324,6 +343,8 @@ area_layer = (
     else build_choropleth_layer(features)
 )
 layers = [area_layer, *build_source_layers(units)]
+print(f"[timing] build layers: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 st.pydeck_chart(
     build_deck(
         layers=layers,
@@ -336,6 +357,8 @@ st.pydeck_chart(
     width="stretch",
     height=MAP_HEIGHT,
 )
+print(f"[timing] pydeck_chart: {time.perf_counter() - _checkpoint_start:.2f}s")
+_checkpoint_start = time.perf_counter()
 
 # The colorbar floats over the map's right edge whenever the choropleth paints
 # a real capacity ramp (Germany has no choropleth, and an all-zero or empty
@@ -344,3 +367,7 @@ st.pydeck_chart(
 colorbar_max = max((row["capacity_mw"] for row in fill_rows), default=0.0)
 if level_label != "Germany" and colorbar_max > 0:
     st.markdown(colorbar_html(colorbar_max), unsafe_allow_html=True)
+
+print(f"[timing] colorbar: {time.perf_counter() - _checkpoint_start:.2f}s")
+print(f"[timing] TOTAL: {time.perf_counter() - _timing_start:.2f}s")
+print()
