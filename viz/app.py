@@ -181,12 +181,13 @@ checked_sources: list[str] = [
 # ── Sidebar: scope ─────────────────────────────────────────────────────── #
 
 st.sidebar.header("Scope")
-level_label = st.sidebar.selectbox(
+level_lab = st.sidebar.selectbox(
     "Level",
     MAP_LEVELS,
     key="level",
     label_visibility="collapsed",
 )
+level_label = level_lab.split(' ')[0]
 level = LEVEL_INDEX[level_label]
 
 # The multiselect options are the area names at the active level, fetched
@@ -227,6 +228,7 @@ active_from, active_to = st.sidebar.date_input(
     "Active from / to",
     value=default_timescope(),
     key="timescope",
+    label_visibility="collapsed",
 )
 
 # ── Map style ──────────────────────────────────────────────────────────── #
@@ -235,7 +237,7 @@ map_style_label = st.sidebar.selectbox("Map style", list(MAP_STYLES))
 
 # ── Fetch + render ─────────────────────────────────────────────────────── #
 
-print("Rendering", level_label)
+print("Rendering", len(area_filter_names or []), level_label)
 _timing_start = time.perf_counter()
 _checkpoint_start = _timing_start
 

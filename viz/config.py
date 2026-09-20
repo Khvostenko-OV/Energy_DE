@@ -13,7 +13,7 @@ from datetime import date
 # Sidebar chooser order, topmost level first.  The drill levels mirror the
 # spatial progression of `etl.db_schema.BOUNDARY_LEVEL_COLUMNS` (region,
 # district, municipality) under the country overview.
-MAP_LEVELS = ("Germany", "States", "Regions", "Districts")
+MAP_LEVELS = ("Germany", "States (Bundesländer + EEZ)", "Regions (Regirungsbezirke)", "Districts (Landkreise)")
 
 # The drill level selected on first run.
 INITIAL_LEVEL = "Germany"
