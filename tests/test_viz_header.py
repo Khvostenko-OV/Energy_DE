@@ -1,24 +1,17 @@
-"""Unit tests for the header aggregate formatting seam (issue #25).
+"""Unit tests for the header aggregate seams (issue #25, render-opt).
 
 `viz.header` formats the four live figures of the header above the map: the
 scope title (level + displayed-area count, or the single area's name) and the
-capacity (MW) / active-unit-count / area (km²) numbers.  Pure formatting on
-plain numbers, mirroring the `viz.tooltip` seam split, so no database is
-needed.
+capacity (MW) / active-unit-count / area (km²) numbers, and `areas_summary`
+derives the scope figures (count, km² sum, single name) from the boundary
+rows the choropleth already fetched — no extra queries.  Pure formatting and
+summarization on plain rows/numbers, so no database is needed.
 """
 
-from datetime import date
-
 from viz.config import INITIAL_LEVEL, LEVEL_INDEX, MAP_LEVELS
-from viz.data import (
-    area_name_query,
-    areas_query,
-    fetch_areas,
-    fetch_header_metrics,
-    header_metrics_query,
-)
 from viz.header import (
     SINGULAR_LEVEL_PREFIX,
+    areas_summary,
     format_area_km2,
     format_mw,
     format_unit_count,
@@ -108,3 +101,34 @@ class TestSingularPrefixMap:
             "Districts": "District",
             "Municipalities": "Municipality",
         }
+
+
+def _boundary_row(name, area=100.0):
+    return {"name": name, "area": area, "geojson": "{}"}
+
+
+class TestAreasSummary:
+    def test_counts_and_sums_every_level_area(self):
+        rows = [_boundary_row("Berlin", 891.0), _boundary_row("Hamburg", 755.0)]
+        assert areas_summary(rows) == {
+            "area_count": 2,
+            "total_area_km2": 1646.0,
+        }
+
+    def test_name_selection_narrows_the_displayed_areas(self):
+        rows = [_boundary_row("Berlin", 891.0), _boundary_row("Hamburg", 755.0)]
+        assert areas_summary(rows, names=("Berlin",)) == {
+            "area_count": 1,
+            "total_area_km2": 891.0,
+            "area_name": "Berlin",
+        }
+
+    def test_single_displayed_area_attaches_its_name(self):
+        assert areas_summary([_boundary_row("Germany")])["area_name"] == "Germany"
+
+    def test_many_areas_omit_the_name(self):
+        rows = [_boundary_row("Berlin"), _boundary_row("Hamburg")]
+        assert "area_name" not in areas_summary(rows)
+
+    def test_empty_boundaries_sum_to_zero(self):
+        assert areas_summary([]) == {"area_count": 0, "total_area_km2": 0}

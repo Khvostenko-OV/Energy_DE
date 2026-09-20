@@ -1,4 +1,4 @@
-"""Read-only data access for the Streamlit viz app (issue #23).
+"""Read-only data access for the Streamlit viz app (issues #23, render-opt).
 
 The app queries PostGIS directly.  Under the seeded stack it connects through
 the read-only `viz_reader` role via `VIZ_DATABASE_URL`, falling back to the
@@ -6,32 +6,32 @@ pipeline `DATABASE_URL` on the dev host.  `missing_core_tables` is the
 standby-detection seam: with an unreachable database an engine connect raises
 and the caller treats it like missing tables.
 
-`unit_query` / `fetch_active_units` (issue #24) build and run the active-unit
-queries the scatter layers render, and `header_metrics_query` /
-`fetch_header_metrics` plus `areas_query` / `area_name_query` / `fetch_areas`
-(issue #25) build and run the header aggregate queries — the capacity/count
-union over the checked active units and the displayed-area count / km² sum
-from `service.boundaries`.  All are pure seams: the SQL and its bound params
-are asserted directly, and fetches run through an injectable engine so tests
-never touch a real database.
+The render-opt redesign (docs/Viz_optimazation.md) moves the unit fetches to
+pandas and caps the query count:
 
-Issue #26 adds the choropleth feeds: `boundary_names_query` /
-`fetch_area_names` supply the area-multiselect options, `boundaries_query` /
-`fetch_boundaries` fetch the selected areas' GeoJSON geometry, and
-`boundary_fill_query` / `fetch_boundary_fill` aggregate the checked active
-units per displayed area via a spatial join (capacity in MW, unit count),
-under the same timescope/source filters as the scatter and header.
+- `units_query` / `fetch_units` fetch every checked active unit in **at most
+  two queries** — one against `core.generators` with
+  `energy_source = ANY(:sources)` for all generator sources, one against
+  `core.storages` (whose `energy_source` is the single ``"storage"`` value)
+  for the storage category.  The projection broadcasts the active-level area
+  attribute as ``name`` (`area_column AS name`) so the same frame feeds the
+  scatter layers, the per-area choropleth fill and the header totals.
+- `boundaries_query` / `fetch_boundaries` return **every** area at the level
+  (name, km² `area`, simplified GeoJSON geometry) in one query — the
+  choropleth outlines all areas and fills only the displayed selection, and
+  the header's scope figures (count, km² sum, single name) derive from the
+  same rows.
+- The former spatial-join per-area fill (`ST_Intersects`), the header-metrics
+  union and the separate areas/count queries are gone: the fill is the name
+  groupby in `viz.choropleth.area_fills`, the header totals the frame's
+  own sum/count, and the scope figures `viz.header.areas_summary`.
 
-The header follows the selection like the scatter: `fetch_areas` takes the
-optional ``names`` and `header_metrics_query` / `fetch_header_metrics` one of
-the `LEVEL_UNIT_AREA_COLUMN` attributes, so with a proper subset of areas
-picked the scope, area (km²), capacity and unit-count figures all narrow to
-the selected areas (issue #26).  On the all-areas selection no filter applies
-and every active unit counts.  `unit_query` / `fetch_active_units` use the
-same attribute filter, so the scatter points show exactly the units the header
-totals — with one exception: a unit sitting on a shared border is attributed
-to each area it intersects (the spatial fill), while the header counts it in
-its named region once.
+`AREA_NAME_ALIAS` (`name`) is the join key between units and boundaries at
+every level.  A unit whose area attribute doesn't match a boundary name (or
+is NULL — offshore units) renders and counts in the header but fills no
+polygon, which reconciles the choropleth with the header by construction;
+the old spatial join silently folded such units into the polygon their
+(possibly imprecise) geometry fell in.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -58,19 +59,19 @@ CORE_VIS_TABLES = ("generators", "storages")
 # the five loaded source labels instead.
 STORAGE_SOURCE = "storage"
 
-# The single active-units predicate (issue #24): commissioned by ``:to`` and
-# not decommissioned before ``:from``.  Shared verbatim by the scatter-layer
-# unit fetches and the header aggregates, so both always resolve the same
-# active set — the map and the header can't drift apart.
+# The single active-units predicate (issue #24): commissioned on/after ``:from``
+# that is still running at ``:to`` (not decommissioned before ``:to``).  Used
+# verbatim by the unit fetch, so map and header always resolve the same set.
 ACTIVE_UNIT_PREDICATE = (
     "commissioning_date >= :from "
     "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
 )
 
-# Columns every fetched unit row needs for the scatter layer and its tooltip.
-# Generators project UNIT_COLUMNS; storages add storage_capacity (kWh).
+# Columns every fetched unit row needs for the scatter layer and its hover
+# card.  The location address reads region · municipality (district left the
+# card in #24) and storages add storage_capacity (kWh).  ``unit_id`` is
+# dropped: it only keyed the retired spatial fill's COUNT.
 UNIT_COLUMNS = (
-    "unit_id",
     "energy_source",
     "installed_capacity",
     "commissioning_date",
@@ -78,12 +79,22 @@ UNIT_COLUMNS = (
     "longitude",
     "latitude",
     "region",
-    "district",
     "municipality",
 )
 UNIT_COLUMNS_SQL = ", ".join(UNIT_COLUMNS)
 STORAGE_COLUMNS = UNIT_COLUMNS + ("storage_capacity",)
 STORAGE_COLUMNS_SQL = ", ".join(STORAGE_COLUMNS)
+
+# The column every unit row carries for the choropleth fill and header
+# drill-down: the unit attribute naming its area at the active level, aliased
+# ``name`` (e.g. ``region`` at the States level).  ``name`` joins units to the
+# ``service.boundaries.name`` rows; dropped when the level (Germany) has none.
+AREA_NAME_ALIAS = "name"
+
+# Boundary-geometry simplification before ``ST_AsGeoJSON`` (tolerance in
+# degrees).  Cuts the district-level payload ≈3.5× (≈14 MB → ≈4 MB) at a
+# fidelity cost well under a pixel at the app's zoom range.
+BOUNDARY_SIMPLIFY_TOLERANCE = 0.001
 
 
 def get_viz_engine() -> Engine:
@@ -117,36 +128,60 @@ def _unit_table(source: str) -> str:
     return "storages" if source == STORAGE_SOURCE else "generators"
 
 
-def unit_query(
+def _needed_tables(sources: tuple[str, ...]) -> tuple[str, ...]:
+    """Distinct core tables a source set touches, in render order.
+
+    ``energy_source`` filters collapse per table — all generator sources read
+    ``core.generators`` once (``ANY(:sources)``), the storage category reads
+    ``core.storages`` once — so any checked set resolves in at most two
+    queries (render-opt).
+    """
+    tables: list[str] = []
+    if any(source != STORAGE_SOURCE for source in sources):
+        tables.append("generators")
+    if STORAGE_SOURCE in sources:
+        tables.append("storages")
+    return tuple(tables)
+
+
+def _projection(columns: str, area_column: str | None) -> str:
+    """``columns`` plus ``{area_column} AS name`` when the level has an area
+    attribute; generators/storages projection constants otherwise."""
+    if area_column is None:
+        return columns
+    return f"{columns}, {area_column} AS {AREA_NAME_ALIAS}"
+
+
+def units_query(
     table: str,
     columns: str,
     *,
+    sources: tuple[str, ...],
     active_from: date,
     active_to: date,
-    source: str,
     area_column: str | None = None,
     area_names: tuple[str, ...] = (),
 ) -> tuple[str, dict]:
     """SQL + bound params for the active-unit fetch on ``core.<table>``.
 
-    ``table`` is ``"generators"`` or ``"storages"`` and ``columns`` their
-    projection; both are module constants, never user input.  ``source``
-    filters ``energy_source`` (storages carry the single ``"storage"`` value).
-    The timescope predicate is the issue #24 single active-unit filter: units
-    commissioned by ``active_to`` that are not decommissioned before
-    ``active_from``.
+    ``table`` is ``"generators"`` or ``"storages"`` and ``columns`` its
+    projection; both are module constants, never user input.  One query covers
+    every checked ``sources`` entry on the table via
+    ``energy_source = ANY(:sources)`` (at most two tables total, render-opt),
+    under the issue #24 timescope predicate.
 
-    ``area_column`` narrows the rows to ``area_names`` (``ANY(:area_names)``)
-    when both are given — the unit attribute naming the selected areas from
-    `LEVEL_UNIT_AREA_COLUMN` (issue #26), a config constant like ``table``
-    rather than user input.  Without them every active unit qualifies.
+    ``area_column`` (a `LEVEL_UNIT_AREA_COLUMN` constant) broadcasts the
+    unit's area attribute as ``name`` — the join key to `service.boundaries`
+    — and, with ``area_names`` given, narrows the rows to the selected areas
+    (``ANY(:area_names)``).  Without ``area_column`` (country level) every
+    active unit qualifies and no ``name`` column is projected.
     """
     sql = (
-        f"SELECT {columns} FROM core.{table} "
-        "WHERE energy_source = :source "
+        f"SELECT {_projection(columns, area_column)} FROM core.{table} "
+        "WHERE energy_source = ANY(:sources) "
         f"AND {ACTIVE_UNIT_PREDICATE}"
     )
-    params = {"source": source, "from": active_from, "to": active_to}
+    params: dict = {"sources": list(sources), "from": active_from, "to": active_to}
     if area_column and area_names:
         sql += f" AND {area_column} = ANY(:area_names)"
         params["area_names"] = list(area_names)
@@ -161,7 +196,21 @@ def run_query(engine: Engine, sql: str, params: dict) -> list[dict[str, Any]]:
         return [dict(row._mapping) for row in conn.execute(text(sql), params)]
 
 
-def fetch_active_units(
+def run_frame(engine: Engine, sql: str, params: dict) -> pd.DataFrame:
+    """Execute ``sql`` with bound ``params``; return rows as a DataFrame."""
+    with engine.connect() as conn:
+        return pd.read_sql(text(sql), conn, params=params)
+
+
+def _empty_units(area_column: str | None) -> pd.DataFrame:
+    """Empty unit frame with the projected columns, for the no-sources case."""
+    columns = list(UNIT_COLUMNS)
+    if area_column is not None:
+        columns.append(AREA_NAME_ALIAS)
+    return pd.DataFrame(columns=columns)
+
+
+def fetch_units(
     engine: Engine,
     *,
     active_from: date,
@@ -169,155 +218,94 @@ def fetch_active_units(
     sources: tuple[str, ...],
     area_column: str | None = None,
     area_names: tuple[str, ...] = (),
-) -> dict[str, list[dict[str, Any]]]:
-    """energy_source → active unit rows for the checked ``sources``.
+) -> pd.DataFrame:
+    """Active unit rows for the checked ``sources`` as one DataFrame.
 
-    Each checked generator source is fetched from ``core.generators``;
-    ``storage`` (a single category) is fetched from ``core.storages`` once.
-    ``area_column`` / ``area_names`` narrow every fetch to the selected areas
-    (issue #26); None/empty leaves the points unfiltered.
-    """
-    units: dict[str, list[dict[str, Any]]] = {}
-    for source in sources:
-        table = _unit_table(source)
-        columns = STORAGE_COLUMNS_SQL if table == "storages" else UNIT_COLUMNS_SQL
-        sql, params = unit_query(
-            table,
-            columns,
-            active_from=active_from,
-            active_to=active_to,
-            source=source,
-            area_column=area_column,
-            area_names=area_names,
-        )
-        units[source] = run_query(engine, sql, params)
-    return units
+    One query per distinct core table (render-opt): `_needed_tables` collapses
+    the checked sources into generators and/or storages, so any source set
+    costs at most two queries instead of one per source.  Concatenated with
+    ``ignore_index``; generators rows lack ``storage_capacity`` (storages
+    always have it), and ``area_column AS name`` appears when the level has
+    one.  ``area_column`` / ``area_names`` narrow every fetch to the selected
+    areas (issue #26); None/empty leaves the points unfiltered.
 
-
-def areas_query(level: int, names: tuple[str, ...] | None = None) -> tuple[str, dict]:
-    """SQL + bound params for the displayed-area header: count and km² sum.
-
-    Counts ``service.boundaries`` rows at ``level`` and sums their stored
-    ``area`` column (km²).  ``names`` narrows the displayed areas (issue #26);
-    None means every area at the level.  Sea/EEZ polygons live at level 1 and
-    count like any other region — documented, not special-cased (issue #25).
-    """
-    sql = (
-        "SELECT COUNT(*) AS area_count, "
-        "COALESCE(SUM(area), 0.0) AS total_area "
-        "FROM service.boundaries WHERE level = :level"
-    )
-    params: dict = {"level": level}
-    if names is not None:
-        sql += " AND name = ANY(:names)"
-        params["names"] = list(names)
-    return sql, params
-
-
-def area_name_query(
-    level: int, names: tuple[str, ...] | None = None
-) -> tuple[str, dict]:
-    """SQL + bound params for the single displayed area's name."""
-    sql = "SELECT name FROM service.boundaries WHERE level = :level"
-    params: dict = {"level": level}
-    if names is not None:
-        sql += " AND name = ANY(:names)"
-        params["names"] = list(names)
-    return sql, params
-
-
-def fetch_areas(
-    engine: Engine, level: int, names: tuple[str, ...] | None = None
-) -> dict[str, Any]:
-    """Area figures for the header at ``level``: count, km² sum, and — when
-    exactly one area is displayed — its name.
-
-    The displayed areas are the optional ``names`` selection (default: every
-    area at the level).  The name is fetched only when ``COUNT(*)`` is 1, so
-    the region/district/municipality levels (many rows) never read the name
-    back.
-    """
-    sql, params = areas_query(level, names)
-    row = run_query(engine, sql, params)[0]
-    areas: dict[str, Any] = {
-        "area_count": row["area_count"],
-        "total_area_km2": row["total_area"],
-    }
-    if areas["area_count"] == 1:
-        name_sql, _ = area_name_query(level, names)
-        areas["area_name"] = run_query(engine, name_sql, params)[0]["name"]
-    return areas
-
-
-def header_metrics_query(
-    active_from: date,
-    active_to: date,
-    sources: tuple[str, ...],
-    area_column: str | None = None,
-    area_names: tuple[str, ...] = (),
-) -> tuple[str, dict]:
-    """SQL + bound params for the header's active-unit aggregates.
-
-    One single-column ``installed_capacity`` subquery per checked source,
-    under the issue #24 predicate — the same filter ``unit_query`` applies to
-    the scatter layers — wrapped in an aggregate that counts rows and sums
-    installed capacity (kW) ÷ 1000 → MW.  Storage's single category reads
-    ``core.storages`` like the unit fetches; every other source reads
-    ``core.generators``.
-
-    ``area_column`` narrows every subquery to ``area_names`` when both are
-    given (a `LEVEL_UNIT_AREA_COLUMN` constant, issue #26), so the header
-    totals follow the selected areas exactly like the scatter points.
-    """
-    parts: list[str] = []
-    params: dict[str, date | str] = {"from": active_from, "to": active_to}
-    for n, source in enumerate(sources):
-        table = _unit_table(source)
-        parts.append(
-            f"SELECT installed_capacity FROM core.{table} "
-            f"WHERE energy_source = :source_{n} "
-            f"AND {ACTIVE_UNIT_PREDICATE}"
-            + (f" AND {area_column} = ANY(:area_names)" if area_column and area_names else "")
-        )
-        params[f"source_{n}"] = source
-    if area_column and area_names:
-        params["area_names"] = list(area_names)
-    if not parts:
-        raise ValueError("sources must contain at least one entry")
-    sql = (
-        "SELECT COUNT(*) AS unit_count, "
-        "COALESCE(SUM(installed_capacity), 0.0) / 1000.0 AS capacity_mw "
-        f"FROM ({' UNION ALL '.join(parts)}) AS units"
-    )
-    return sql, params
-
-
-def fetch_header_metrics(
-    engine: Engine,
-    *,
-    active_from: date,
-    active_to: date,
-    sources: tuple[str, ...],
-    area_column: str | None = None,
-    area_names: tuple[str, ...] = (),
-) -> dict[str, Any]:
-    """Header capacity (MW) and active-unit count for the checked sources.
-
-    ``area_column`` / ``area_names`` narrow the totals to the selected areas
-    (issue #26).  With nothing checked the header reads zeros and no query
-    runs — the same contract the empty-unit-fetch satisfies for the scatter
-    layers.
+    With nothing checked an empty frame returns and no query runs — the same
+    contract the old per-source fetch satisfied for an empty checkbox set.
     """
     if not sources:
-        return {"unit_count": 0, "capacity_mw": 0.0}
-    sql, params = header_metrics_query(
-        active_from,
-        active_to,
-        sources,
-        area_column=area_column,
-        area_names=area_names,
+        return _empty_units(area_column)
+    frames = [
+        run_frame(
+            engine,
+            *units_query(
+                table,
+                STORAGE_COLUMNS_SQL if table == "storages" else UNIT_COLUMNS_SQL,
+                sources=sources,
+                active_from=active_from,
+                active_to=active_to,
+                area_column=area_column,
+                area_names=area_names,
+            ),
+        )
+        for table in _needed_tables(sources)
+    ]
+    return pd.concat(frames, ignore_index=True)
+
+
+def _scalar_or_none(value: Any) -> Any:
+    """``None`` for missing (NaN/NaT/None) scalars, the value otherwise."""
+    if value is None or pd.isna(value):
+        return None
+    return value
+
+
+def _serializable_units(units: pd.DataFrame) -> pd.DataFrame:
+    """JSON-ready copy of ``units``: dates as ISO strings, missing → ``None``.
+
+    PyDeck's JSON serialization passes raw values to ``json.dumps``, which
+    rejects ``datetime64``/``NaT`` and emits bare ``NaN`` tokens for floats — so
+    every projected value is normalized before the frames reach the scatter
+    layers.
+    """
+    out = units.copy()
+    for column in out.columns:
+        series = out[column]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            out[column] = series.map(
+                lambda v: None if _scalar_or_none(v) is None else v.strftime("%Y-%m-%d")
+            )
+        else:
+            out[column] = series.map(_scalar_or_none)
+    return out
+
+
+def unit_records(units: pd.DataFrame) -> list[dict[str, Any]]:
+    """JSON-ready unit dicts for one scatter layer (dates ISO, NaN → null)."""
+    return _serializable_units(units).to_dict("records")
+
+
+def boundaries_query(level: int) -> tuple[str, dict]:
+    """SQL + bound params for the choropleth boundary geometry.
+
+    One row per area at ``level`` — every area, since the layer outlines the
+    whole level and fills only the displayed selection (render-opt/drop family)
+    — with its name, stored ``area`` (km², for the header scope figures) and
+    WGS-84 GeoJSON geometry, simplified to `BOUNDARY_SIMPLIFY_TOLERANCE` so the
+    district-level payload stays in the low bytes.  ``name`` is the join key
+    the choropleth and header seams match fill rows against.
+    """
+    sql = (
+        "SELECT name, area, ST_AsGeoJSON("
+        "ST_SimplifyPreserveTopology(geometry, :tolerance)) AS geojson "
+        "FROM service.boundaries WHERE level = :level ORDER BY name"
     )
-    return run_query(engine, sql, params)[0]
+    return sql, {"level": level, "tolerance": BOUNDARY_SIMPLIFY_TOLERANCE}
+
+
+def fetch_boundaries(engine: Engine, *, level: int) -> list[dict[str, Any]]:
+    """Boundary rows (name, km² area, simplified GeoJSON text) for a level."""
+    sql, params = boundaries_query(level)
+    return run_query(engine, sql, params)
 
 
 def boundary_names_query(level: int) -> tuple[str, dict]:
@@ -335,108 +323,3 @@ def fetch_area_names(engine: Engine, level: int) -> list[str]:
     """Area names at ``level`` for the multiselect, in stable order."""
     sql, params = boundary_names_query(level)
     return [row["name"] for row in run_query(engine, sql, params)]
-
-
-def boundaries_query(
-    level: int, names: tuple[str, ...] | None = None
-) -> tuple[str, dict]:
-    """SQL + bound params for the choropleth boundary geometry.
-
-    One row per displayed area with its name and GeoJSON geometry
-    (``ST_AsGeoJSON``, WGS-84).  ``names`` narrows the displayed areas
-    (issue #26); None means every area at the level.  The name is the join key
-    the choropleth seam matches fill rows against.
-    """
-    sql = (
-        "SELECT name, ST_AsGeoJSON(geometry) AS geojson "
-        "FROM service.boundaries WHERE level = :level"
-    )
-    params: dict = {"level": level}
-    if names is not None:
-        sql += " AND name = ANY(:names)"
-        params["names"] = list(names)
-    sql += " ORDER BY name"
-    return sql, params
-
-
-def fetch_boundaries(
-    engine: Engine, *, level: int, names: tuple[str, ...] | None = None
-) -> list[dict[str, Any]]:
-    """Boundary rows (name + GeoJSON text) for the displayed scope."""
-    sql, params = boundaries_query(level, names)
-    return run_query(engine, sql, params)
-
-
-def boundary_fill_query(
-    level: int,
-    *,
-    names: tuple[str, ...] | None,
-    active_from: date,
-    active_to: date,
-    sources: tuple[str, ...],
-) -> tuple[str, dict]:
-    """SQL + bound params for the per-area choropleth fill.
-
-    Aggregates the checked active units per displayed area: total installed
-    capacity (kW) ÷ 1000 → MW and the unit count.  The unit rows come from the
-    same per-source union the scatter and header use (`_unit_table` +
-    `ACTIVE_UNIT_PREDICATE`), spatially joined with ``ST_Intersects`` — the
-    pipeline's own spatial-join predicate (transform `sjoin intersects`).  A
-    unit sitting exactly on a shared border intersects both areas and is
-    attributed to each, so the per-area fills do not strictly reconcile with
-    the header total — same semantics as the pipeline's own spatial join.  A
-    ``LEFT JOIN`` keeps every displayed area in the result even when no active
-    unit falls inside it: it reads a zero fill (issue #26).
-    """
-    parts: list[str] = []
-    params: dict = {"level": level, "from": active_from, "to": active_to}
-    for n, source in enumerate(sources):
-        table = _unit_table(source)
-        parts.append(
-            f"SELECT unit_id, installed_capacity, geometry FROM core.{table} "
-            f"WHERE energy_source = :source_{n} "
-            f"AND {ACTIVE_UNIT_PREDICATE}"
-        )
-        params[f"source_{n}"] = source
-    if not parts:
-        raise ValueError("sources must contain at least one entry")
-    if names is not None:
-        params["names"] = list(names)
-    sql = (
-        "SELECT b.name AS name, "
-        "COALESCE(SUM(u.installed_capacity), 0.0) / 1000.0 AS capacity_mw, "
-        "COUNT(u.unit_id) AS unit_count "
-        "FROM service.boundaries AS b "
-        "LEFT JOIN (" + " UNION ALL ".join(parts) + ") AS u "
-        "ON ST_Intersects(b.geometry, u.geometry) "
-        "WHERE b.level = :level"
-        + (" AND b.name = ANY(:names)" if names is not None else "")
-        + " GROUP BY b.name"
-    )
-    return sql, params
-
-
-def fetch_boundary_fill(
-    engine: Engine,
-    *,
-    level: int,
-    names: tuple[str, ...] | None,
-    active_from: date,
-    active_to: date,
-    sources: tuple[str, ...],
-) -> list[dict[str, Any]]:
-    """Per-area capacity (MW) and unit count for the choropleth fill.
-
-    With nothing checked the choropleth reads an empty fill (every displayed
-    area renders the zero fill via the join's default) and no query runs.
-    """
-    if not sources:
-        return []
-    sql, params = boundary_fill_query(
-        level,
-        names=names,
-        active_from=active_from,
-        active_to=active_to,
-        sources=sources,
-    )
-    return run_query(engine, sql, params)

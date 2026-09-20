@@ -1,24 +1,31 @@
-"""Unit tests for the choropleth seam (issue #26).
+"""Unit tests for the choropleth seam (issue #26, render-opt).
 
-`viz.choropleth` turns the boundary/fill rows the app fetches into what the
-GeoJsonLayer renders: a capacity-based rgba fill per area (`fill_color`) and
-a GeoJSON FeatureCollection whose features carry that fill plus the hover
-fields (`areas_feature_collection`).  Both are pure: synthetic boundary rows
-carry raw `ST_AsGeoJSON` text, synthetic fill rows carry per-area capacity
-(MW) and unit counts, and the join happens by area name.
+`viz.choropleth` turns the unit frame and boundary rows into what the
+GeoJsonLayer renders: a capacity-based rgba fill per area (`fill_color`), the
+render-opt per-area aggregates (`area_fills` — a pandas groupby over the
+unit frame's ``name`` column instead of a spatial join), and a GeoJSON
+FeatureCollection whose features carry the fill plus the hover fields
+(`areas_feature_collection`, outlining every boundary while filling only the
+``selected_names`` display scope).  All pure: synthetic boundary rows carry
+raw ``ST_AsGeoJSON`` text, synthetic fill rows carry per-area capacity (MW)
+and unit counts, and the join happens by area name.
 """
 
 import json
 
-from viz.choropleth import ZERO_FILL, areas_feature_collection, fill_color
+import pandas as pd
+
+from viz.choropleth import (
+    TRANSPARENT_FILL,
+    ZERO_FILL,
+    area_fills,
+    areas_feature_collection,
+    fill_color,
+)
 
 
 def boundary_row(name, geojson):
-    return {"name": name, "geojson": json.dumps(geojson)}
-
-
-def polygon_feature(geometry):
-    return {"type": "Feature", "geometry": geometry, "properties": {"name": "Berlin"}}
+    return {"name": name, "area": 100.0, "geojson": json.dumps(geojson)}
 
 
 # A 2x2 degree square around (10, 50), as a GeoJSON MultiPolygon.
@@ -60,6 +67,42 @@ class TestFillColor:
 
     def test_capacity_beyond_the_max_is_clamped(self):
         assert fill_color(900.0, 500.0) == fill_color(500.0, 500.0)
+
+
+def _units_frame():
+    return pd.DataFrame(
+        [
+            {"name": "Berlin", "installed_capacity": 1200.0},
+            {"name": "Berlin", "installed_capacity": 800.0},
+            {"name": "Hamburg", "installed_capacity": 500.0},
+            {"name": None, "installed_capacity": 9999.0},
+        ]
+    )
+
+
+class TestAreaFills:
+    def test_aggregates_capacity_and_count_per_area_name(self):
+        fills = area_fills(_units_frame())
+        assert fills == [
+            {"name": "Berlin", "capacity_mw": 2.0, "unit_count": 2},
+            {"name": "Hamburg", "capacity_mw": 0.5, "unit_count": 1},
+        ]
+
+    def test_areas_sort_alphabetically(self):
+        names = [row["name"] for row in area_fills(_units_frame())]
+        assert names == ["Berlin", "Hamburg"]
+
+    def test_units_without_an_area_attribute_fall_out(self):
+        fills = area_fills(_units_frame())
+        assert all(row["capacity_mw"] < 9.0 for row in fills)
+        total_capacity = sum(row["capacity_mw"] for row in fills)
+        assert total_capacity == 2.5  # the 9999 kW (offshore) row is dropped
+
+    def test_frame_without_name_column_yields_no_fills(self):
+        assert area_fills(pd.DataFrame([{"energy_source": "solar"}])) == []
+
+    def test_empty_frame_yields_no_fills(self):
+        assert area_fills(pd.DataFrame(columns=["name"])) == []
 
 
 class TestAreasFeatureCollection:
@@ -135,3 +178,46 @@ class TestAreasFeatureCollection:
             "type": "FeatureCollection",
             "features": [],
         }
+
+
+class TestDisplaySelection:
+    def test_all_areas_fill_when_no_selection_given(self):
+        rows = [
+            boundary_row("Berlin", BERLIN_GEOMETRY),
+            boundary_row("Hamburg", HAMBURG_GEOMETRY),
+        ]
+        fills = [
+            {"name": "Berlin", "capacity_mw": 500.0, "unit_count": 40},
+            {"name": "Hamburg", "capacity_mw": 50.0, "unit_count": 3},
+        ]
+        collection = areas_feature_collection(rows, fills)
+        props = {f["properties"]["name"]: f["properties"] for f in collection["features"]}
+        assert props["Berlin"]["fill_color"] != TRANSPARENT_FILL
+        assert props["Hamburg"]["fill_color"] != TRANSPARENT_FILL
+        assert props["Hamburg"]["unit_body"] != ""
+
+    def test_unselected_areas_paint_transparent_and_carry_no_card(self):
+        rows = [
+            boundary_row("Berlin", BERLIN_GEOMETRY),
+            boundary_row("Hamburg", HAMBURG_GEOMETRY),
+        ]
+        fills = [{"name": "Berlin", "capacity_mw": 500.0, "unit_count": 40}]
+        collection = areas_feature_collection(rows, fills, selected_names=("Berlin",))
+        props = {f["properties"]["name"]: f["properties"] for f in collection["features"]}
+        assert props["Berlin"]["fill_color"] != TRANSPARENT_FILL
+        assert props["Berlin"]["unit_body"] != ""
+        assert props["Hamburg"]["fill_color"] == TRANSPARENT_FILL
+        assert props["Hamburg"]["unit_body"] == ""
+
+    def test_every_outline_survives_the_selection(self):
+        rows = [
+            boundary_row("Berlin", BERLIN_GEOMETRY),
+            boundary_row("Hamburg", HAMBURG_GEOMETRY),
+        ]
+        collection = areas_feature_collection(rows, [], selected_names=("Berlin",))
+        assert len(collection["features"]) == 2
+
+    def test_selected_names_can_be_passed_as_a_set(self):
+        rows = [boundary_row("Berlin", BERLIN_GEOMETRY)]
+        collection = areas_feature_collection(rows, [], selected_names=("Berlin",))
+        assert collection["features"][0]["properties"]["fill_color"] == ZERO_FILL

@@ -1,42 +1,42 @@
-"""Unit tests for the viz data-access seams (issues #23, #25).
+"""Unit tests for the viz data-access seams (issues #23, #25, render-opt).
 
 Seams live in `viz.data`: the engine selection (`VIZ_DATABASE_URL` with a
 `DATABASE_URL` fallback), the standby detection (`missing_core_tables`), the
-active-unit fetches (issue #24), and the header aggregates (issue #25) — the
-capacity/count union over checked active units plus the displayed-area count
-and km² sum from `service.boundaries`.  None touch a real database: the
-engine tests only build engines, the standby tests drive a stub engine whose
-rows mimic `information_schema`, and the fetch tests drive recording or
-row-returning stub engines.
+render-optimized unit fetch (`units_query`/`fetch_units` — one query per
+distinct core table via `energy_source = ANY(:sources)` into a pandas frame),
+the boundary fetch (`boundaries_query`/`fetch_boundaries` — all areas at a
+level, simplified geometry + km² area), and the JSON-readiness seam
+(`unit_records`).  None touch a real database: the engine tests only build
+engines, the standby tests drive a stub engine whose rows mimic
+`information_schema`, and the fetch tests drive recording or row-returning
+stub engines.  `fetch_units`'s pandas orchestration stubs the `run_frame`
+seam, so no rows ever hit a real reader.
 """
 
 import os
 from contextlib import nullcontext
 from datetime import date
 
+import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 
+from viz import data as data_module
 from viz.data import (
     CORE_VIS_TABLES,
     STORAGE_COLUMNS_SQL,
+    UNIT_COLUMNS,
     UNIT_COLUMNS_SQL,
-    area_name_query,
-    areas_query,
-    boundary_fill_query,
-    boundary_names_query,
     boundaries_query,
-    fetch_active_units,
+    boundary_names_query,
     fetch_area_names,
-    fetch_areas,
     fetch_boundaries,
-    fetch_boundary_fill,
-    fetch_header_metrics,
+    fetch_units,
     get_viz_engine,
-    header_metrics_query,
     missing_core_tables,
     run_query,
-    unit_query,
+    unit_records,
+    units_query,
 )
 
 
@@ -115,168 +115,6 @@ class _RecordingEngine:
         return nullcontext(_RecordingConnection(self))
 
 
-class _RecordingRowsEngine:
-    """Fake SQLAlchemy engine: records queries and returns one result row."""
-
-    def __init__(self, row_values):
-        self.calls = []
-        self.row = _MappingRow(**row_values)
-
-    def connect(self):
-        return nullcontext(_RecordingRowsConnection(self))
-
-
-class _RecordingRowsConnection:
-    def __init__(self, engine):
-        self.engine = engine
-
-    def execute(self, query, params=None):
-        self.engine.calls.append((str(query), params))
-        return [self.engine.row]
-
-
-class TestUnitQuery:
-    def test_generator_query_targets_core_generators_with_unit_columns(self):
-        sql, params = unit_query(
-            "generators",
-            UNIT_COLUMNS_SQL,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            source="solar",
-        )
-        assert sql == (
-            "SELECT unit_id, energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, district, municipality "
-            "FROM core.generators "
-            "WHERE energy_source = :source "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
-        )
-
-    def test_storage_query_adds_storage_capacity(self):
-        sql, _ = unit_query(
-            "storages",
-            STORAGE_COLUMNS_SQL,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            source="storage",
-        )
-        assert sql.startswith(
-            "SELECT unit_id, energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, district, municipality, "
-            "storage_capacity FROM core.storages "
-        )
-
-    def test_timescope_is_the_single_active_predicate_with_bound_params(self):
-        sql, params = unit_query(
-            "generators",
-            UNIT_COLUMNS_SQL,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            source="solar",
-        )
-        assert "commissioning_date <= :to" in sql
-        assert "decommissioning_date IS NULL OR decommissioning_date >= :from" in sql
-        assert params == {
-            "source": "solar",
-            "from": date(1990, 1, 1),
-            "to": date(2010, 1, 1),
-        }
-
-    def test_area_filter_narrows_rows_to_the_named_areas(self):
-        sql, params = unit_query(
-            "generators",
-            UNIT_COLUMNS_SQL,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            source="solar",
-            area_column="region",
-            area_names=("Berlin", "Hamburg"),
-        )
-        assert "AND region = ANY(:area_names)" in sql
-        assert params == {
-            "source": "solar",
-            "from": date(1990, 1, 1),
-            "to": date(2010, 1, 1),
-            "area_names": ["Berlin", "Hamburg"],
-        }
-
-    def test_pointless_area_filter_is_omitted(self):
-        sql, params = unit_query(
-            "generators",
-            UNIT_COLUMNS_SQL,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            source="solar",
-            area_column=None,
-        )
-        assert "ANY(:area_names)" not in sql
-        assert "area_names" not in params
-
-
-class TestFetchActiveUnits:
-    def test_queries_storages_once_and_generators_per_checked_source(self):
-        engine = _RecordingEngine()
-        result = fetch_active_units(
-            engine,
-            active_from=date(2020, 1, 1),
-            active_to=date(2021, 1, 1),
-            sources=("solar", "wind", "storage"),
-        )
-        assert [sql for sql, _ in engine.calls] == [
-            "SELECT unit_id, energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, district, municipality "
-            "FROM core.generators "
-            "WHERE energy_source = :source "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)",
-            "SELECT unit_id, energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, district, municipality "
-            "FROM core.generators "
-            "WHERE energy_source = :source "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)",
-            "SELECT unit_id, energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, district, municipality, "
-            "storage_capacity FROM core.storages "
-            "WHERE energy_source = :source "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)",
-        ]
-        assert [params for _, params in engine.calls] == [
-            {"source": "solar", "from": date(2020, 1, 1), "to": date(2021, 1, 1)},
-            {"source": "wind", "from": date(2020, 1, 1), "to": date(2021, 1, 1)},
-            {"source": "storage", "from": date(2020, 1, 1), "to": date(2021, 1, 1)},
-        ]
-        assert list(result) == ["solar", "wind", "storage"]
-
-    def test_area_filter_flows_into_every_source_fetch(self):
-        engine = _RecordingEngine()
-        fetch_active_units(
-            engine,
-            active_from=date(2020, 1, 1),
-            active_to=date(2021, 1, 1),
-            sources=("solar", "storage"),
-            area_column="region",
-            area_names=("Berlin",),
-        )
-        assert all("AND region = ANY(:area_names)" in sql for sql, _ in engine.calls)
-        assert [params for _, params in engine.calls] == [
-            {
-                "source": "solar",
-                "from": date(2020, 1, 1),
-                "to": date(2021, 1, 1),
-                "area_names": ["Berlin"],
-            },
-            {
-                "source": "storage",
-                "from": date(2020, 1, 1),
-                "to": date(2021, 1, 1),
-                "area_names": ["Berlin"],
-            },
-        ]
-
-
 class _MappingRow:
     def __init__(self, **values):
         self._mapping = values
@@ -298,6 +136,260 @@ class _RowsEngine:
         return nullcontext(_RowsConnection(self.rows))
 
 
+class TestUnitsQuery:
+    def test_generator_query_matches_all_sources_in_one_pass(self):
+        sql, params = units_query(
+            "generators",
+            UNIT_COLUMNS_SQL,
+            sources=("solar", "wind"),
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            area_column=None,
+        )
+        assert sql == (
+            "SELECT energy_source, installed_capacity, commissioning_date, "
+            "decommissioning_date, longitude, latitude, region, municipality "
+            "FROM core.generators "
+            "WHERE energy_source = ANY(:sources) "
+            "AND commissioning_date >= :from "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
+        )
+        assert params == {
+            "sources": ["solar", "wind"],
+            "from": date(1990, 1, 1),
+            "to": date(2010, 1, 1),
+        }
+
+    def test_storage_query_adds_storage_capacity(self):
+        sql, _ = units_query(
+            "storages",
+            STORAGE_COLUMNS_SQL,
+            sources=("storage",),
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+        )
+        assert sql.startswith(
+            "SELECT energy_source, installed_capacity, commissioning_date, "
+            "decommissioning_date, longitude, latitude, region, municipality, "
+            "storage_capacity FROM core.storages "
+        )
+
+    def test_timescope_is_the_single_active_predicate_with_bound_params(self):
+        sql, params = units_query(
+            "generators",
+            UNIT_COLUMNS_SQL,
+            sources=("solar",),
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+        )
+        assert "commissioning_date >= :from" in sql
+        assert "decommissioning_date IS NULL OR decommissioning_date >= :to" in sql
+        assert params == {
+            "sources": ["solar"],
+            "from": date(1990, 1, 1),
+            "to": date(2010, 1, 1),
+        }
+
+    def test_area_column_broadcasts_the_area_attribute_as_name(self):
+        sql, params = units_query(
+            "generators",
+            UNIT_COLUMNS_SQL,
+            sources=("solar",),
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            area_column="region",
+            area_names=("Berlin", "Hamburg"),
+        )
+        assert "region AS name" in sql
+        assert "AND region = ANY(:area_names)" in sql
+        assert params["area_names"] == ["Berlin", "Hamburg"]
+
+    def test_country_level_projects_no_area_alias_or_filter(self):
+        sql, params = units_query(
+            "generators",
+            UNIT_COLUMNS_SQL,
+            sources=("solar",),
+            active_from=date(1990, 1, 1),
+            active_to=date(2010, 1, 1),
+            area_column=None,
+            area_names=("Berlin",),
+        )
+        assert " AS name" not in sql
+        assert "ANY(:area_names)" not in sql
+        assert "area_names" not in params
+
+
+class _RecordingFrameEngine:
+    """Stub that hands units_query/run_frame calls back as recorded calls."""
+
+    def __init__(self):
+        self.calls = []
+
+    @staticmethod
+    def stub_run_frame(calls):
+        def run_frame(engine, sql, params):
+            calls.append((sql, params))
+            return pd.DataFrame()
+        return run_frame
+
+
+class TestFetchUnits:
+    def test_generators_once_and_storages_once(self, monkeypatch):
+        engine = object()
+        calls = []
+        monkeypatch.setattr(
+            data_module, "run_frame", _RecordingFrameEngine.stub_run_frame(calls)
+        )
+        fetch_units(
+            engine,
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("solar", "wind", "storage"),
+            area_column="region",
+        )
+        assert [sql for sql, _ in calls] == [
+            "SELECT energy_source, installed_capacity, commissioning_date, "
+            "decommissioning_date, longitude, latitude, region, municipality, "
+            "region AS name FROM core.generators "
+            "WHERE energy_source = ANY(:sources) "
+            "AND commissioning_date >= :from "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)",
+            "SELECT energy_source, installed_capacity, commissioning_date, "
+            "decommissioning_date, longitude, latitude, region, municipality, "
+            "storage_capacity, region AS name FROM core.storages "
+            "WHERE energy_source = ANY(:sources) "
+            "AND commissioning_date >= :from "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)",
+        ]
+        assert [params for _, params in calls] == [
+            {
+                "sources": ["solar", "wind", "storage"],
+                "from": date(2020, 1, 1),
+                "to": date(2021, 1, 1),
+            },
+            {
+                "sources": ["solar", "wind", "storage"],
+                "from": date(2020, 1, 1),
+                "to": date(2021, 1, 1),
+            },
+        ]
+
+    def test_generator_only_sources_skip_storages(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            data_module, "run_frame", _RecordingFrameEngine.stub_run_frame(calls)
+        )
+        fetch_units(
+            object(),
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("bio",),
+            area_column=None,
+        )
+        assert [sql for sql, _ in calls] == [
+            "SELECT energy_source, installed_capacity, commissioning_date, "
+            "decommissioning_date, longitude, latitude, region, municipality "
+            "FROM core.generators "
+            "WHERE energy_source = ANY(:sources) "
+            "AND commissioning_date >= :from "
+            "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
+        ]
+
+    def test_area_filter_flows_into_every_table_query(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            data_module, "run_frame", _RecordingFrameEngine.stub_run_frame(calls)
+        )
+        fetch_units(
+            object(),
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("solar", "storage"),
+            area_column="region",
+            area_names=("Berlin",),
+        )
+        assert all(
+            "AND region = ANY(:area_names)" in sql for sql, _ in calls
+        )
+        assert [params for _, params in calls] == [
+            {
+                "sources": ["solar", "storage"],
+                "from": date(2020, 1, 1),
+                "to": date(2021, 1, 1),
+                "area_names": ["Berlin"],
+            },
+            {
+                "sources": ["solar", "storage"],
+                "from": date(2020, 1, 1),
+                "to": date(2021, 1, 1),
+                "area_names": ["Berlin"],
+            },
+        ]
+
+    def test_empty_sources_run_no_queries(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            data_module, "run_frame", _RecordingFrameEngine.stub_run_frame(calls)
+        )
+        units = fetch_units(
+            object(),
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=(),
+            area_column="region",
+        )
+        assert calls == []
+        assert units.empty
+        assert set(units.columns) == set(UNIT_COLUMNS) | {"name"}
+
+    def test_concatenates_both_table_frames(self, monkeypatch):
+        frames = [
+            pd.DataFrame(
+                [{
+                    "energy_source": "solar",
+                    "installed_capacity": 120.0,
+                    "commissioning_date": pd.Timestamp("2015-03-01"),
+                    "decommissioning_date": None,
+                    "longitude": 10.5,
+                    "latitude": 50.5,
+                    "region": "Bavaria",
+                    "municipality": None,
+                    "name": "Bavaria",
+                }]
+            ),
+            pd.DataFrame(
+                [{
+                    "energy_source": "storage",
+                    "installed_capacity": 300.0,
+                    "commissioning_date": pd.Timestamp("2010-01-01"),
+                    "decommissioning_date": None,
+                    "longitude": 11.5,
+                    "latitude": 51.5,
+                    "region": "Berlin",
+                    "municipality": "Berlin",
+                    "name": "Berlin",
+                    "storage_capacity": 800.0,
+                }]
+            ),
+        ]
+        monkeypatch.setattr(
+            data_module,
+            "run_frame",
+            lambda engine, sql, params: frames.pop(0),
+        )
+        units = fetch_units(
+            object(),
+            active_from=date(2020, 1, 1),
+            active_to=date(2021, 1, 1),
+            sources=("solar", "storage"),
+            area_column="region",
+        )
+        assert list(units["energy_source"]) == ["solar", "storage"]
+        assert list(units["name"]) == ["Bavaria", "Berlin"]
+        assert "storage_capacity" in units.columns
+        assert pd.isna(units.loc[0, "storage_capacity"])
+
+
 class TestRunQuery:
     def test_rows_come_back_as_dicts(self):
         rows = [_MappingRow(unit_id=1, energy_source="solar", installed_capacity=120.0)]
@@ -311,230 +403,62 @@ class TestRunQuery:
         ]
 
 
-class TestAreasQuery:
-    def test_counts_and_sums_area_at_the_level(self):
-        sql, params = areas_query(1)
-        assert sql == (
-            "SELECT COUNT(*) AS area_count, "
-            "COALESCE(SUM(area), 0.0) AS total_area "
-            "FROM service.boundaries WHERE level = :level"
+class TestUnitRecords:
+    def test_dates_become_iso_strings_and_missing_becomes_none(self):
+        frame = pd.DataFrame(
+            [{
+                "energy_source": "solar",
+                "installed_capacity": 120.0,
+                "commissioning_date": pd.Timestamp("2015-03-01"),
+                "decommissioning_date": None,
+                "longitude": 10.5,
+                "latitude": 50.5,
+                "region": None,
+                "municipality": None,
+                "name": None,
+                "storage_capacity": float("nan"),
+            }]
         )
-        assert params == {"level": 1}
+        record = unit_records(frame)[0]
+        assert record["commissioning_date"] == "2015-03-01"
+        assert record["decommissioning_date"] is None
+        assert record["name"] is None
+        assert record["storage_capacity"] is None
+        assert record["region"] is None
 
-    def test_offshore_area_is_not_special_cased(self):
-        sql, _ = areas_query(1)
-        assert "area" in sql
-        assert "filter" not in sql
-
-    def test_name_selection_filters_the_displayed_areas(self):
-        sql, params = areas_query(1, names=("Berlin", "Hamburg"))
-        assert sql == (
-            "SELECT COUNT(*) AS area_count, "
-            "COALESCE(SUM(area), 0.0) AS total_area "
-            "FROM service.boundaries WHERE level = :level AND name = ANY(:names)"
+    def test_missing_dates_normalize_to_none(self):
+        frame = pd.DataFrame(
+            [{"commissioning_date": pd.NaT, "installed_capacity": 1.0}]
         )
-        assert params == {"level": 1, "names": ["Berlin", "Hamburg"]}
+        assert unit_records(frame)[0]["commissioning_date"] is None
 
 
-class TestAreaNameQuery:
-    def test_selects_the_single_displayed_area_name(self):
-        sql, params = area_name_query(0)
-        assert sql == "SELECT name FROM service.boundaries WHERE level = :level"
-        assert params == {"level": 0}
-
-    def test_name_selection_filters_the_single_area(self):
-        sql, params = area_name_query(0, names=("Germany",))
+class TestBoundariesQuery:
+    def test_selects_name_area_and_simplified_geojson_at_the_level(self):
+        sql, params = boundaries_query(1)
         assert sql == (
-            "SELECT name FROM service.boundaries WHERE level = :level "
-            "AND name = ANY(:names)"
+            "SELECT name, area, ST_AsGeoJSON("
+            "ST_SimplifyPreserveTopology(geometry, :tolerance)) AS geojson "
+            "FROM service.boundaries WHERE level = :level ORDER BY name"
         )
-        assert params == {"level": 0, "names": ["Germany"]}
+        assert params == {"level": 1, "tolerance": 0.001}
+
+    def test_simplification_tolerance_is_applied(self):
+        _, params = boundaries_query(3)
+        assert params["tolerance"] == 0.001
 
 
-class _AreasStub:
-    """Stub engine whose rows depend on the executed query (count/name)."""
-
-    def __init__(self, count, name):
-        self._count = count
-        self._name = name
-        self.calls = []
-
-    def connect(self):
-        return nullcontext(_AreasConnection(self))
-
-
-class _AreasConnection:
-    def __init__(self, stub):
-        self._stub = stub
-
-    def execute(self, query, params=None):
-        self._stub.calls.append((str(query), params))
-        if "COUNT" in str(query):
-            return [_MappingRow(area_count=self._stub._count, total_area=357588.4)]
-        return [_MappingRow(name=self._stub._name)]
-
-
-class TestFetchAreas:
-    def test_returns_count_and_km2_sum(self):
-        rows = [_MappingRow(area_count=19, total_area=357588.4)]
-        result = fetch_areas(_RowsEngine(rows), 1)
-        assert result["area_count"] == 19
-        assert result["total_area_km2"] == 357588.4
-
-    def test_adds_the_area_name_when_exactly_one_area(self):
-        stub = _AreasStub(count=1, name="Germany")
-        result = fetch_areas(stub, 0)
-        assert result["area_name"] == "Germany"
-
-    def test_exactly_one_area_triggers_the_name_query(self):
-        stub = _AreasStub(count=1, name="Germany")
-        fetch_areas(stub, 0)
-        assert [sql for sql, _ in stub.calls] == [
-            "SELECT COUNT(*) AS area_count, "
-            "COALESCE(SUM(area), 0.0) AS total_area "
-            "FROM service.boundaries WHERE level = :level",
-            "SELECT name FROM service.boundaries WHERE level = :level",
+class TestFetchBoundaries:
+    def test_returns_the_boundary_rows_untouched(self):
+        rows = [
+            _MappingRow(
+                name="Berlin",
+                area=891.0,
+                geojson='{"type": "Polygon"}',
+            )
         ]
-
-    def test_no_name_key_when_many_areas(self):
-        stub = _AreasStub(count=19, name="Germany")
-        result = fetch_areas(stub, 1)
-        assert "area_name" not in result
-        assert len(stub.calls) == 1
-
-    def test_name_selection_flows_into_both_queries(self):
-        stub = _AreasStub(count=1, name="Berlin")
-        fetch_areas(stub, 1, names=("Berlin",))
-        assert [params for _, params in stub.calls] == [
-            {"level": 1, "names": ["Berlin"]},
-            {"level": 1, "names": ["Berlin"]},
-        ]
-
-
-class TestHeaderMetricsQuery:
-    def test_generator_sources_read_core_generators(self):
-        sql, _ = header_metrics_query(
-            date(1990, 1, 1), date(2010, 1, 1), sources=("solar", "wind")
-        )
-        assert sql == (
-            "SELECT COUNT(*) AS unit_count, "
-            "COALESCE(SUM(installed_capacity), 0.0) / 1000.0 AS capacity_mw "
-            "FROM ("
-            "SELECT installed_capacity FROM core.generators "
-            "WHERE energy_source = :source_0 "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
-            " UNION ALL "
-            "SELECT installed_capacity FROM core.generators "
-            "WHERE energy_source = :source_1 "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
-            ") AS units"
-        )
-
-    def test_storage_source_reads_core_storages(self):
-        sql, _ = header_metrics_query(
-            date(1990, 1, 1), date(2010, 1, 1), sources=("solar", "storage")
-        )
-        assert (
-            "SELECT installed_capacity FROM core.storages "
-            "WHERE energy_source = :source_1 " in sql
-        )
-        assert "FROM core.generators" in sql
-
-    def test_predicate_matches_the_unit_fetch(self):
-        sql, _ = header_metrics_query(
-            date(1990, 1, 1), date(2010, 1, 1), sources=("wind",)
-        )
-        assert "commissioning_date <= :to" in sql
-        assert "decommissioning_date IS NULL OR decommissioning_date >= :from" in sql
-
-    def test_capacity_is_kw_sum_divided_by_1000(self):
-        sql, _ = header_metrics_query(
-            date(1990, 1, 1), date(2010, 1, 1), sources=("wind",)
-        )
-        assert "COALESCE(SUM(installed_capacity), 0.0) / 1000.0 AS capacity_mw" in sql
-
-    def test_params_are_bound_per_source_plus_timescope(self):
-        sql, params = header_metrics_query(
-            date(1990, 1, 1), date(2010, 1, 1), sources=("solar", "storage")
-        )
-        assert params == {
-            "from": date(1990, 1, 1),
-            "to": date(2010, 1, 1),
-            "source_0": "solar",
-            "source_1": "storage",
-        }
-
-    def test_area_filter_narrows_every_source_subquery(self):
-        sql, params = header_metrics_query(
-            date(1990, 1, 1),
-            date(2010, 1, 1),
-            sources=("solar", "storage"),
-            area_column="region",
-            area_names=("Berlin",),
-        )
-        assert sql.count("AND region = ANY(:area_names)") == 2
-        assert params["area_names"] == ["Berlin"]
-
-    def test_area_filter_joins_the_same_predicate_as_the_unit_fetch(self):
-        sql, params = header_metrics_query(
-            date(1990, 1, 1),
-            date(2010, 1, 1),
-            sources=("wind",),
-            area_column="region",
-            area_names=("Berlin",),
-        )
-        assert "commissioning_date <= :to" in sql
-        assert "AND region = ANY(:area_names)" in sql
-        assert params["area_names"] == ["Berlin"]
-
-    def test_empty_sources_are_rejected(self):
-        with pytest.raises(ValueError):
-            header_metrics_query(date(1990, 1, 1), date(2010, 1, 1), sources=())
-
-
-class TestFetchHeaderMetrics:
-    def test_returns_capacity_and_unit_count(self):
-        rows = [_MappingRow(unit_count=3, capacity_mw=12.0)]
-        result = fetch_header_metrics(
-            _RowsEngine(rows),
-            active_from=date(2020, 1, 1),
-            active_to=date(2021, 1, 1),
-            sources=("wind",),
-        )
-        assert result == {"unit_count": 3, "capacity_mw": 12.0}
-
-    def test_empty_sources_yield_zero_without_a_query(self):
-        engine = _RecordingEngine()
-        result = fetch_header_metrics(
-            engine,
-            active_from=date(2020, 1, 1),
-            active_to=date(2021, 1, 1),
-            sources=(),
-        )
-        assert engine.calls == []
-        assert result == {"unit_count": 0, "capacity_mw": 0.0}
-
-    def test_area_filter_narrows_the_totals(self):
-        engine = _RecordingRowsEngine({"unit_count": 7, "capacity_mw": 3.0})
-        result = fetch_header_metrics(
-            engine,
-            active_from=date(2020, 1, 1),
-            active_to=date(2021, 1, 1),
-            sources=("wind",),
-            area_column="district",
-            area_names=("Arnsberg",),
-        )
-        sql, params = engine.calls[0]
-        assert "AND district = ANY(:area_names)" in sql
-        assert params == {
-            "from": date(2020, 1, 1),
-            "to": date(2021, 1, 1),
-            "source_0": "wind",
-            "area_names": ["Arnsberg"],
-        }
-        assert result == {"unit_count": 7, "capacity_mw": 3.0}
+        result = fetch_boundaries(_RowsEngine(rows), level=1)
+        assert result == [{"name": "Berlin", "area": 891.0, "geojson": '{"type": "Polygon"}'}]
 
 
 class TestBoundaryNamesQuery:
@@ -547,156 +471,7 @@ class TestBoundaryNamesQuery:
         assert params == {"level": 1}
 
 
-class TestBoundariesQuery:
-    def test_selects_name_and_geojson_at_the_level(self):
-        sql, params = boundaries_query(1)
-        assert sql == (
-            "SELECT name, ST_AsGeoJSON(geometry) AS geojson "
-            "FROM service.boundaries WHERE level = :level ORDER BY name"
-        )
-        assert params == {"level": 1}
-
-    def test_name_selection_filters_the_boundaries(self):
-        sql, params = boundaries_query(1, names=("Berlin", "Hamburg"))
-        assert sql == (
-            "SELECT name, ST_AsGeoJSON(geometry) AS geojson "
-            "FROM service.boundaries WHERE level = :level "
-            "AND name = ANY(:names) ORDER BY name"
-        )
-        assert params == {"level": 1, "names": ["Berlin", "Hamburg"]}
-
-
-class TestBoundaryFillQuery:
-    def test_aggregates_active_units_per_area_via_spatial_join(self):
-        sql, params = boundary_fill_query(
-            1,
-            names=None,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            sources=("solar", "storage"),
-        )
-        assert sql == (
-            "SELECT b.name AS name, "
-            "COALESCE(SUM(u.installed_capacity), 0.0) / 1000.0 AS capacity_mw, "
-            "COUNT(u.unit_id) AS unit_count "
-            "FROM service.boundaries AS b "
-            "LEFT JOIN ("
-            "SELECT unit_id, installed_capacity, geometry FROM core.generators "
-            "WHERE energy_source = :source_0 "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
-            " UNION ALL "
-            "SELECT unit_id, installed_capacity, geometry FROM core.storages "
-            "WHERE energy_source = :source_1 "
-            "AND commissioning_date <= :to "
-            "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
-            ") AS u ON ST_Intersects(b.geometry, u.geometry) "
-            "WHERE b.level = :level GROUP BY b.name"
-        )
-        assert params == {
-            "level": 1,
-            "from": date(1990, 1, 1),
-            "to": date(2010, 1, 1),
-            "source_0": "solar",
-            "source_1": "storage",
-        }
-
-    def test_name_selection_filters_the_areas(self):
-        sql, params = boundary_fill_query(
-            1,
-            names=("Berlin",),
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            sources=("wind",),
-        )
-        assert "WHERE b.level = :level AND b.name = ANY(:names) GROUP BY b.name" in sql
-        assert params["names"] == ["Berlin"]
-
-    def test_predicate_matches_the_unit_fetch(self):
-        sql, _ = boundary_fill_query(
-            1,
-            names=None,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            sources=("wind",),
-        )
-        assert "commissioning_date <= :to" in sql
-        assert "decommissioning_date IS NULL OR decommissioning_date >= :from" in sql
-
-    def test_capacity_is_kw_sum_divided_by_1000(self):
-        sql, _ = boundary_fill_query(
-            1,
-            names=None,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            sources=("wind",),
-        )
-        assert "COALESCE(SUM(u.installed_capacity), 0.0) / 1000.0 AS capacity_mw" in sql
-
-    def test_area_with_no_units_still_counts_zero(self):
-        sql, _ = boundary_fill_query(
-            1,
-            names=None,
-            active_from=date(1990, 1, 1),
-            active_to=date(2010, 1, 1),
-            sources=("wind",),
-        )
-        assert "LEFT JOIN" in sql
-        assert "COUNT(u.unit_id)" in sql
-
-    def test_empty_sources_are_rejected(self):
-        with pytest.raises(ValueError):
-            boundary_fill_query(
-                1,
-                names=None,
-                active_from=date(1990, 1, 1),
-                active_to=date(2010, 1, 1),
-                sources=(),
-            )
-
-
 class TestFetchAreaNames:
     def test_returns_the_levels_names_in_order(self):
         rows = [_MappingRow(name="Berlin"), _MappingRow(name="Hamburg")]
         assert fetch_area_names(_RowsEngine(rows), 1) == ["Berlin", "Hamburg"]
-
-
-class TestFetchBoundaries:
-    def test_returns_the_boundary_rows_untouched(self):
-        rows = [_MappingRow(name="Berlin", geojson='{"type": "Polygon"}')]
-        result = fetch_boundaries(_RowsEngine(rows), level=1, names=("Berlin",))
-        assert result == [{"name": "Berlin", "geojson": '{"type": "Polygon"}'}]
-
-    def test_all_names_pass_no_name_filter(self):
-        engine = _RecordingEngine()
-        fetch_boundaries(engine, level=1, names=None)
-        sql, params = engine.calls[0]
-        assert "ANY(:names)" not in sql
-        assert "names" not in params
-
-
-class TestFetchBoundaryFill:
-    def test_returns_the_fill_rows(self):
-        rows = [_MappingRow(name="Berlin", capacity_mw=12.0, unit_count=3)]
-        result = fetch_boundary_fill(
-            _RowsEngine(rows),
-            level=1,
-            names=("Berlin",),
-            active_from=date(2020, 1, 1),
-            active_to=date(2021, 1, 1),
-            sources=("wind",),
-        )
-        assert result == [{"name": "Berlin", "capacity_mw": 12.0, "unit_count": 3}]
-
-    def test_empty_sources_return_empty_without_a_query(self):
-        engine = _RecordingEngine()
-        result = fetch_boundary_fill(
-            engine,
-            level=1,
-            names=None,
-            active_from=date(2020, 1, 1),
-            active_to=date(2021, 1, 1),
-            sources=(),
-        )
-        assert engine.calls == []
-        assert result == []

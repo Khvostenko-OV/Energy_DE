@@ -1,17 +1,26 @@
-"""Unit tests for the unit tooltip contract (issue #24).
+"""Unit tests for the unit tooltip contract (issue #24, render-opt).
 
 `source_header` and `unit_tooltip` render the plain-text fields of the hover
 card for one core unit row — markup lives in the static `DECK_TOOLTIP`
 template, because Streamlit's deckgl frontend escapes interpolated values.
-The generator and storage contracts differ by exactly one line (storage
-capacity).  The tests pin the agreed rendering: titled source, kW/kWh
-formatting, ISO dates ("active" when null), and the region · municipality
-address with missing parts dropped.
+`attach_tooltips` decorates the render-opt pandas unit frame with those two
+columns in one pass.  The generator and storage contracts differ by exactly
+one line (storage capacity).  The tests pin the agreed rendering: titled
+source, kW/kWh formatting, ISO dates ("active" when null), and the
+region · municipality address with missing parts dropped.
 """
 
 from datetime import date
 
-from viz.tooltip import DECK_TOOLTIP, area_card, source_header, unit_tooltip
+import pandas as pd
+
+from viz.tooltip import (
+    DECK_TOOLTIP,
+    area_card,
+    attach_tooltips,
+    source_header,
+    unit_tooltip,
+)
 
 
 def generator_row(**overrides):
@@ -97,6 +106,66 @@ class TestStorageTooltip:
         assert source_header(storage_row()) == "Storage"
 
 
+class TestTimestampTooltip:
+    def test_timestamp_commissioning_renders_a_plain_iso_date(self):
+        text = unit_tooltip(
+            generator_row(commissioning_date=pd.Timestamp("2015-03-01"))
+        )
+        assert "Commissioning: 2015-03-01" in text
+        assert "T00:00:00" not in text
+
+    def test_nat_decommissioning_reads_active(self):
+        text = unit_tooltip(generator_row(decommissioning_date=pd.NaT))
+        assert "Decommissioning: active" in text
+
+    def test_iso_string_dates_pass_through(self):
+        text = unit_tooltip(generator_row(commissioning_date="2015-03-01"))
+        assert "Commissioning: 2015-03-01" in text
+
+
+class TestAttachTooltips:
+    def test_adds_source_and_body_columns(self):
+        frame = pd.DataFrame(
+            [
+                generator_row(),
+                storage_row(energy_source="storage", storage_capacity=8000.0),
+            ]
+        )
+        decorated = attach_tooltips(frame)
+        assert list(decorated["source_header"]) == ["Solar", "Storage"]
+        assert "Capacity: 120 kW" in decorated.loc[0, "unit_body"]
+        assert "Storage: 8,000 kWh" in decorated.loc[1, "unit_body"]
+
+    def test_leaves_the_original_columns_untouched(self):
+        frame = pd.DataFrame([generator_row()])
+        decorated = attach_tooltips(frame)
+        assert "energy_source" in decorated.columns
+        assert "installed_capacity" in decorated.columns
+        assert "unit_id" in decorated.columns
+
+    def test_missing_storage_column_skips_the_storage_line(self):
+        frame = pd.DataFrame([generator_row()])
+        assert "kWh" not in attach_tooltips(frame).loc[0, "unit_body"]
+
+    def test_nan_storage_capacity_skips_the_storage_line(self):
+        frame = pd.DataFrame(
+            [storage_row(storage_capacity=float("nan"), energy_source="storage")]
+        )
+        assert "kWh" not in attach_tooltips(frame).loc[0, "unit_body"]
+
+    def test_render_path_matches_the_row_contract(self):
+        row = generator_row(decommissioning_date=date(2020, 12, 31))
+        decorated = attach_tooltips(pd.DataFrame([row]))
+        assert decorated.loc[0, "source_header"] == source_header(row)
+        assert decorated.loc[0, "unit_body"] == unit_tooltip(row)
+
+    def test_missing_dates_still_read_active_on_the_render_path(self):
+        frame = pd.DataFrame([generator_row()])
+        body = attach_tooltips(frame).loc[0, "unit_body"]
+        assert "Commissioning: active" not in body  # commissioning date set
+        assert "Decommissioning: active" in body
+
+
 class TestAreaCard:
     def test_header_is_the_area_name(self):
         assert area_card("Berlin", 1200.0, 40)["source_header"] == "Berlin"
@@ -114,3 +183,7 @@ class TestAreaCard:
         assert "{source_header}" in DECK_TOOLTIP["html"]
         assert "{unit_body}" in DECK_TOOLTIP["html"]
         assert card.keys() == {"source_header", "unit_body"}
+
+    def test_unselected_area_carries_the_bare_name(self):
+        card = area_card("Berlin", 1200.0, 40, selected=False)
+        assert card == {"source_header": "Berlin", "unit_body": ""}

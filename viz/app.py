@@ -26,6 +26,15 @@ level ("Germany") the area multiselect is omitted and the choropleth gives
 way to a plain country-boundary outline — there is nothing to compare by
 color within a single polygon.
 
+The T4 fetch path is the render-optimized one (docs/Viz_optimazation.md):
+units come back in **one pandas frame via at most two queries** (generators
+once with `energy_source = ANY(:sources)`, storages once), the per-area
+choropleth fill is a pandas groupby over that frame's `name` column — no
+spatial join — and the boundary layer outlines **every** area at the level
+while filling only the selected ones.  The header's scope/capacity/unit-count
+figures derive from the same frame and boundary rows, so a rerun issues the
+two unit queries plus one boundaries query.
+
 T1 tracer (#23): when the core tables are absent — or the database is
 unreachable — the app hides the data widgets and shows only a full-width
 "No core tables" notice plus the empty basemap deck.  Widget defaults come
@@ -49,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import streamlit as st
 from sqlalchemy.exc import SQLAlchemyError
 
-from viz.choropleth import areas_feature_collection
+from viz.choropleth import area_fills, areas_feature_collection
 from viz.config import (
     LEVEL_INDEX,
     LEVEL_UNIT_AREA_COLUMN,
@@ -62,16 +71,20 @@ from viz.config import (
 from viz.colorbar import colorbar_html
 from viz.data import (
     CORE_VIS_TABLES,
-    fetch_active_units,
     fetch_area_names,
-    fetch_areas,
     fetch_boundaries,
-    fetch_boundary_fill,
-    fetch_header_metrics,
+    fetch_units,
     get_viz_engine,
     missing_core_tables,
+    unit_records,
 )
-from viz.header import format_area_km2, format_mw, format_unit_count, scope_title
+from viz.header import (
+    areas_summary,
+    format_area_km2,
+    format_mw,
+    format_unit_count,
+    scope_title,
+)
 from viz.map_builder import (
     build_boundary_layer,
     build_choropleth_layer,
@@ -79,7 +92,7 @@ from viz.map_builder import (
     build_source_layers,
 )
 from viz.palette import SOURCE_LAYER_ORDER, source_color
-from viz.tooltip import DECK_TOOLTIP, source_header, unit_tooltip
+from viz.tooltip import DECK_TOOLTIP, attach_tooltips
 from viz.viewport import fit_viewstate, geometry_points, should_refit
 
 # Sources in sidebar display order: generators top, storage last (bio → storage),
@@ -226,7 +239,12 @@ print("Rendering", level_label)
 _timing_start = time.perf_counter()
 _checkpoint_start = _timing_start
 
-units = fetch_active_units(
+# ── Units: one DataFrame, ≤2 queries (render-opt) ───────────────────────── #
+# Every checked source resolves in at most two queries (core.generators once
+# for all generator sources, core.storages once for storage) and the frame
+# carries the active level's area attribute as `name`, so the same rows feed
+# the scatter layers, the per-area choropleth fill and the header totals.
+units = fetch_units(
     engine,
     active_from=active_from,
     active_to=active_to,
@@ -234,42 +252,25 @@ units = fetch_active_units(
     area_column=area_column,
     area_names=area_filter_names or (),
 )
-print(f"[timing] fetch_active_units: {time.perf_counter() - _checkpoint_start:.2f}s")
+print(f"[timing] fetch_units: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
-for rows in units.values():
-    for row in rows:
-        row["source_header"] = source_header(row)
-        row["unit_body"] = unit_tooltip(row)
+
+units = attach_tooltips(units)
 print(f"[timing] tooltips: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
 
-# ── Choropleth fetch (issue #26) ───────────────────────────────────────── #
-
-# The area fill shares the scatter/header predicate and checked-source set, so
-# the choropleth colors exactly the units the points and header totals count;
-# the boundaries (name + GeoJSON) are fetched over the same displayed scope,
-# and the two are joined by area name.  With nothing checked the fill query is
-# skipped (zero fill everywhere) while the boundaries still render; at the
-# country level the fill is skipped too, since the boundary layer paints no
-# choropleth there.
-boundary_rows = fetch_boundaries(engine, level=level, names=selected_names)
-print(f"[timing] fetch_boundaries: {time.perf_counter() - _checkpoint_start:.2f}s")
-_checkpoint_start = time.perf_counter()
-if level_label == "Germany":
-    fill_rows = []
-else:
-    fill_rows = fetch_boundary_fill(
-        engine,
-        level=level,
-        names=selected_names,
-        active_from=active_from,
-        active_to=active_to,
-        sources=tuple(checked_sources),
-    )
-print(f"[timing] fetch_boundary_fill: {time.perf_counter() - _checkpoint_start:.2f}s")
-_checkpoint_start = time.perf_counter()
-features = areas_feature_collection(boundary_rows, fill_rows)
-print(f"[timing] areas_feature_collection: {time.perf_counter() - _checkpoint_start:.2f}s")
+# ── Choropleth fill + boundaries (render-opt) ────────────────────────────── #
+# The fill is a pandas groupby over the units frame's `name` column — no
+# spatial join — and the boundaries fetch covers every area at the level so
+# the layer outlines the whole level and fills only the displayed selection.
+# At the country level the fill is skipped (no `name` column) since the
+# boundary layer paints no choropleth there.
+fills = area_fills(units)
+boundary_rows = fetch_boundaries(engine, level=level)
+features = areas_feature_collection(
+    boundary_rows, fills, selected_names=selected_names
+)
+print(f"[timing] area_fills + fetch_boundaries + features: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
 
 # ── Camera (issue #26) ──────────────────────────────────────────────────── #
@@ -278,10 +279,13 @@ _checkpoint_start = time.perf_counter()
 # session state.  It is replaced only when the level or area selection changes
 # (or on the first run); every source/timescope rerun over the same scope keeps
 # the stored camera, so the deck's unchanged initial view lets the frontend
-# preserve the user's own framing.
+# preserve the user's own framing.  Points come from the displayed selection
+# only — the context outlines beyond it must not move the camera.
+selected_set = frozenset(selected_names)
 camera_points = [
     point
     for feature in features["features"]
+    if feature["properties"]["name"] in selected_set
     for point in geometry_points(feature["geometry"])
 ]
 if should_refit(
@@ -299,26 +303,16 @@ camera = st.session_state["camera"]
 print(f"[timing] camera fit: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
 
-# ── Header aggregates (issue #25) ──────────────────────────────────────── #
-
-# Every header figure follows the selection like the scatter: the scope/area
-# cells narrow to the picked areas and the metrics to the units whose
-# region/district/municipality names one of them, so a chosen area reads as
-# "Region Berlin" with Berlin's capacity, units and km².  On the all-areas
-# selection the figures are simply the level-wide totals.  The metrics share
-# the map's exact timescope predicate and checked-source set, so all four
-# header values track every filter change on the same rows the layers render.
-# The strip renders label + value on one line each (CSS `.hdr-row`), smaller
-# than st.metric's stacked layout.
-areas = fetch_areas(engine, level, names=selected_names)
-metrics = fetch_header_metrics(
-    engine,
-    active_from=active_from,
-    active_to=active_to,
-    sources=tuple(checked_sources),
-    area_column=area_column,
-    area_names=area_filter_names or (),
-)
+# ── Header aggregates (issue #25, render-opt) ───────────────────────────── #
+# The scope figures come from the boundary rows already fetched for the
+# choropleth (count, km² sum, single name over the selection) and the capacity
+# / unit-count from the units frame itself — no extra queries.  On the
+# all-areas selection the figures are simply the level-wide totals.
+areas = areas_summary(boundary_rows, selected_names)
+metrics = {
+    "capacity_mw": float(units["installed_capacity"].sum()) / 1000.0,
+    "unit_count": len(units),
+}
 
 header_cells = "".join(
     f"<span class='hdr-label'>{html.escape(str(label))}</span>"
@@ -331,20 +325,26 @@ header_cells = "".join(
     )
 )
 st.markdown(f"<div class='hdr-row'>{header_cells}</div>", unsafe_allow_html=True)
-print(f"[timing] fetch_areas + fetch_header_metrics + header: {time.perf_counter() - _checkpoint_start:.2f}s")
+print(f"[timing] header: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
 
 # Area fills paint below the unit points, so points stay legible on top of the
 # choropleth; the camera comes from the session state above.  At the country
-# level the choropleth gives way to the plain boundary layer (no fill).
+# level the choropleth gives way to the plain boundary layer (no fill).  Each
+# scatter layer reads the JSON-ready records of one energy_source group.
 area_layer = (
     build_boundary_layer(features)
     if level_label == "Germany"
     else build_choropleth_layer(features)
 )
-layers = [area_layer, *build_source_layers(units)]
+source_records = {
+    source: unit_records(group)
+    for source, group in units.groupby("energy_source")
+}
+layers = [area_layer, *build_source_layers(source_records)]
 print(f"[timing] build layers: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
+
 st.pydeck_chart(
     build_deck(
         layers=layers,
@@ -364,7 +364,7 @@ _checkpoint_start = time.perf_counter()
 # a real capacity ramp (Germany has no choropleth, and an all-zero or empty
 # fill has nothing to scale) — the top label is the largest area fill across
 # the displayed scope, matching the ramp's high end.
-colorbar_max = max((row["capacity_mw"] for row in fill_rows), default=0.0)
+colorbar_max = max((row["capacity_mw"] for row in fills), default=0.0)
 if level_label != "Germany" and colorbar_max > 0:
     st.markdown(colorbar_html(colorbar_max), unsafe_allow_html=True)
 
