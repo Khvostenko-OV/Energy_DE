@@ -128,7 +128,7 @@ except SQLAlchemyError:
 
 if missing:
     missing_names = ", ".join(f"`core.{table}`" for table in missing)
-    with st.container(height=100):
+    with st.container(height=80):
         st.warning(
             f"No core tables in the database — {missing_names} are missing. "
             "Load them with `python -m etl run-all`."

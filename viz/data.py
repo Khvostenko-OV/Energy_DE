@@ -63,8 +63,8 @@ STORAGE_SOURCE = "storage"
 # unit fetches and the header aggregates, so both always resolve the same
 # active set — the map and the header can't drift apart.
 ACTIVE_UNIT_PREDICATE = (
-    "commissioning_date <= :to "
-    "AND (decommissioning_date IS NULL OR decommissioning_date >= :from)"
+    "commissioning_date >= :from "
+    "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
 )
 
 # Columns every fetched unit row needs for the scatter layer and its tooltip.
