@@ -56,3 +56,45 @@ raw datalake (ADR 0004), quality annotations as property links (ADR 0005), per-k
 (ADR 0006), operational metadata in the `service` schema (ADR 0007).
 
 See `CONTEXT.md` for the glossary and `docs/adr/` for the rationale behind these choices.
+
+## Deploy
+
+Two supported ways to run the stack; the containerized one is the deploy path.
+
+### Containerized stack (recommended)
+
+Requires Docker, the private raw data set under `data/` (sources + boundaries), and
+a running PostGIS database*.
+
+```sh
+cp .env.example .env          # optional; overrides documented defaults
+scripts/seed_data_volume.sh   # one-time: copies data/ + docker.env into the etl_data volume
+docker compose up --build --wait db viz
+```
+
+- `db` provisions the schemas and the read-only `viz_reader` role on a fresh volume
+  (`docker/viz_reader.sql`); `pipeline` runs `run-all` on demand
+  (`docker compose run --rm pipeline`); `viz` serves the Streamlit app on
+  http://localhost:8501.
+- Verify the marts:
+  `docker compose exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY region LIMIT 8"`
+- *Alternative: seed a remote PostGIS and point the seed script's `DB_HOST`/`DB_PORT`
+  env at it — see `docs/remote-deploy.md`.
+
+### Dev host (CI-style)
+
+```sh
+.venv/bin/pip install -r requirements.txt -r requirements-viz.txt
+cp .env.example .env          # set DATABASE_URL (and VIZ_DATABASE_URL) to your PostGIS
+python -m etl run-all         # extract → staging → core → marts
+.venv/bin/streamlit run viz/app.py
+```
+
+### Reset / clean slate
+
+```sh
+scripts/drop_pipeline_data.sh # empties raw/stage/core/marts/service (schemas kept)
+python -m etl run-all         # rebuild from the raw data
+```
+
+Full walkthrough, configuration table, and teardown: `docs/containerization.md`.
