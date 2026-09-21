@@ -5,13 +5,8 @@
 2. ETL pipeline that integrates geospatial data on renewable energy installations in Germany 
 with administrative and maritime boundaries. The data is enriched using spatial joins and stored in PostGIS.
 3. Interactive dashboard in Metabase to analyze capacity, energy types, and regional distribution.
-Aggregation total installed capacity by region (Bundesland / Landkreis / Gemeinde), 
+Aggregation total installed capacity by state (Bundesland), region (Regierungsbezirk), and district (Landkreis), 
 by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
-
-> **Note (issue #28):** the dashboard tooling has since moved on — the implemented
-> visualization is the Streamlit + PyDeck app (`VisualizationSpec.md`, issues #23+),
-> deployed as its own compose container, and the Metabase container was dropped
-> from the stack. The marts and their aggregation contract here are unchanged.
 
 ## Data description
 ### Energy installations. Source https://zenodo.org/records/20716459  
@@ -26,13 +21,13 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 | Solar Energy         | Locations of solar energy systems                        | Solar_Energy_V20250101.gpkg          | Point        |
 | Wind Energy          | Locations of wind turbines                               | Wind_Energy_V20250101.gpkg           | Point        |
 
-### Germany administrative boundaries (incl. Offshore zones). Source https://www.quickmaptools.com https://www.marineregions.org
-| Dataset        | Description                                              | Filename               | Type         |
-|----------------|----------------------------------------------------------|------------------------|--------------|
-| State boundary | Germany state boundary                                   | germany_boundary.gpkg  | Multipolygon |
-| Regions + EEZ  | Regions boundaries + Germany EEZ boundaries (Bundesland) | germany_regions.gpkg   | Multipolygon |
-| Districts      | District boundaries (Landkreis + Kreisfreie Stadt)       | germany_districts.gpkg | Multipolygon |
-| Municipalities | Municipalities boundaries (Gemeinde)                     | germany_munis.gpkg     | Multipolygon |
+### Germany administrative boundaries (incl. Offshore zones). Source https://gdz.bkg.bund.de/ https://www.quickmaptools.com https://www.marineregions.org
+| Dataset        | Description                                         | Filename               | Type         |
+|----------------|-----------------------------------------------------|------------------------|--------------|
+| State borders  | Germany state outline                               | germany_boundary.gpkg  | Multipolygon |
+| States + EEZ   | States boundaries + Germany EEZ (Bundesland)        | germany_states.gpkg    | Multipolygon |
+| Regions        | Regions boundaries (Regierungsbezirk)               | germany_regions.gpkg   | Multipolygon |
+| Districts      | Districts boundaries (Landkreis + Kreisfreie Stadt) | germany_districts.gpkg | Multipolygon |
 
 ## ETL-pipeline description
 ### 1. Extract
@@ -48,7 +43,7 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 ### 2. Transform
 - Input: list of tables to be transformed
 - Add primary keys
-- Enrich tables with columns 'region', 'district', 'municipality' (spatial join with Boundaries)
+- Enrich tables with columns 'state', 'region', 'district' (spatial join with Boundaries)
 - Decompose some properties to normalized table **properties** (other properties stay in 'secondary_attribures').
 Properties to decompose:
   - biomass_type
@@ -81,7 +76,7 @@ Properties to decompose:
 - Quality check. Flag collisions, add property 'collision' with collisions description, 
 add property 'close_to' with reference to close unit
   1. close location. Distance between units < 10m (only if geo_accuracy=1)
-  2. region is null
+  2. outside location (state is null)
   2. onshore unit in the sea
   3. storage_capacity <=0 or null (for storages)
 
@@ -93,17 +88,18 @@ add property 'close_to' with reference to close unit
 - Quality check
 
 ### Creating Materialized Views
-- Number of units pivot table (region / energy_source)
-- Generation capacity pivot table (region / energy_source)
-- Storage capacity pivot table (region / source_type)
+- Number of units pivot table (state / energy_source)
+- Generation capacity pivot table (state / energy_source)
+- Storage capacity pivot table (state / source_type)
 
 ## Serving
 ### 1. Visualization
 - Dashboard with map
 - Checkboxes to show units of different type (Bio, Hydro, Wind, Solar, Gas, Storage)
-- Multiselector to include different regions, districts, municipalities
+- Multiselector to include different states, regions, districts
 - Selectbox to choose timescope 
 - Header showing the total installed capacity according to the selected unit types and timescope
+<br>
 For more details see VisualizationSpec.md
 
 ### 2. Admin panel (auth)
@@ -161,13 +157,13 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | loaded_to   | str       |
 
 #### boundaries - administrative and maritime reference polygons
-| Column           | Data type    | Description                                         |
-|------------------|--------------|-----------------------------------------------------|
-| country_iso      | str          | DEU                                                 |
-| name             | str          | name of area                                        |
-| level            | int          | Administrative level 0 - county,..,3 - municipality |
-| area             | float        | km2                                                 |
-| geometry         | multipolygon | WGS-84                                              |
+| Column           | Data type    | Description                                               |
+|------------------|--------------|-----------------------------------------------------------|
+| country_iso      | str          | DEU                                                       |
+| name             | str          | name of area                                              |
+| level            | int          | 0 - country, 1 - states + EEZ, 2 - regions, 3 - districts |
+| area             | float        | km2                                                       |
+| geometry         | multipolygon | WGS-84                                                    |
 
 
 ### 3. Staging
@@ -187,9 +183,9 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | reference_id         | str       | Reference id of the record in the original source |
 | secondary_attributes | text      | Dictionary of secondary attributes                |
 | country_iso          | str       | DEU                                               |
-| region               | str       | Bundesland / Sea                                  |
-| district             | str       | Landkreis                                         |
-| municipality         | str       | Gemeinde                                          |
+| state                | str       | Bundesland / Sea                                  |
+| region               | str       | Regierungsbezirk                                         |
+| district             | str       | Landkreis                                          |
 | bad_quality          | bool      | Flag bad quality record                           |
 
 #### Units table: storage
@@ -209,9 +205,9 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | reference_date       | timestamp | Timestamp of the record in the original source     |
 | secondary_attributes | text      | Dictionary of secondary attributes                 |
 | country_iso          | str       | DEU                                                |
-| region               | str       | Bundesland / Sea                                   |
-| district             | str       | Landkreis                                          |
-| municipality         | str       | Gemeinde                                           |
+| state                | str       | Bundesland / Sea                                   |
+| region               | str       | Regierungsbezirk                                          |
+| district             | str       | Landkreis                                           |
 | bad_quality          | bool      | Flag bad quality record                            |
 
 ### Dimension tables (normalized, one per-kind set for each staging Unit table)
@@ -246,9 +242,9 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | reference_id         | str       | Reference id of the record in the original source |
 | secondary_attributes | text      | Dictionary of secondary attributes                |
 | country_iso          | str       | DEU                                               |
-| region               | str       | Bundesland / Sea                                  |
-| district             | str       | Landkreis                                         |
-| municipality         | str       | Gemeinde                                          |
+| state                | str       | Bundesland / Sea                                  |
+| region               | str       | Regierungsbezirk                                         |
+| district             | str       | Landkreis                                          |
 | collision            | bool      | Flag collisions                                   |
 
 #### storages
@@ -268,9 +264,9 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | reference_date       | timestamp | Timestamp of the record in the original source     |
 | secondary_attributes | text      | Dictionary of secondary attributes                 |
 | country_iso          | str       | DEU                                                |
-| region               | str       | Bundesland / Sea                                   |
-| district             | str       | Landkreis                                          |
-| municipality         | str       | Gemeinde                                           |
+| state                | str       | Bundesland / Sea                                   |
+| region               | str       | Regierungsbezirk                                          |
+| district             | str       | Landkreis                                           |
 | collision            | bool      | Flag collisions                                    |
 
 ### Dimension tables (per unit-kind, ADR 0006)

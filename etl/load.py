@@ -24,7 +24,7 @@ from etl.db_schema import (
     DECOMPOSED_PROPERTIES,
     ONSHORE_IN_SEA_COLLISION_REASON,
     ONSHORE_SOURCES,
-    REGION_NULL_COLLISION_REASON,
+    OUTSIDE_LOCATION_COLLISION_REASON,
     SEA_REGIONS,
     STAGING_GENERATOR_SOURCES,
     STAGING_SCHEMA,
@@ -82,9 +82,9 @@ GENERATOR_KIND = _CoreKind(
         "reference_date": "reference_date",
         "secondary_attributes": "secondary_attributes",
         "country_iso": "country_iso",
+        "state": "state",
         "region": "region",
         "district": "district",
-        "municipality": "municipality",
     },
     onshore_sources=ONSHORE_SOURCES,
     check_storage_capacity=False,
@@ -112,9 +112,9 @@ STORAGE_KIND = _CoreKind(
         "reference_date": "reference_date",
         "secondary_attributes": "secondary_attributes",
         "country_iso": "country_iso",
+        "state": "state",
         "region": "region",
         "district": "district",
-        "municipality": "municipality",
     },
     onshore_sources=("storage",),
     check_storage_capacity=True,
@@ -148,7 +148,7 @@ def _load(kind: _CoreKind) -> LoadReport:
     then refreshed (flags reset, collision links cleared, re-written from
     scratch so they never orphan):
     - close-location pairs (geo_accuracy=1, <10m apart)
-    - region-null units
+    - state-null units (outside every boundary)
     - onshore sources in the sea
     - storage_capacity <= 0 or null (storages only)
     Collision rows are annotated with property links and remain in core.
@@ -585,7 +585,7 @@ def _detect_collisions(
     close_units: dict[int, list[int]] = {}
 
     _detect_close_location(engine, collision_units, close_units, kind, affected_ids)
-    _detect_region_null(engine, collision_units, kind, affected_ids)
+    _detect_outside_location(engine, collision_units, kind, affected_ids)
     _detect_onshore_in_sea(engine, collision_units, kind, affected_ids)
     if kind.check_storage_capacity:
         _detect_storage_capacity(engine, collision_units, kind, affected_ids)
@@ -648,32 +648,32 @@ def _detect_close_location(
         close_units.setdefault(uid_b, []).append(uid_a)
 
 
-def _detect_region_null(
+def _detect_outside_location(
     engine: Engine,
     collision_units: dict[int, list[str]],
     kind: _CoreKind,
     affected_ids: list[int] | None = None,
 ) -> None:
-    """Flag units whose region is NULL (outside every boundary)."""
+    """Flag units whose state is NULL (outside every boundary)."""
     if affected_ids is not None and not affected_ids:
         return
 
-    region_filter = ""
+    state_filter = ""
     params: dict[str, object] = {}
     if affected_ids is not None:
-        region_filter = "AND unit_id = ANY(:affected)"
+        state_filter = "AND unit_id = ANY(:affected)"
         params["affected"] = affected_ids
 
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 f"SELECT unit_id FROM {CORE_SCHEMA}.{kind.core_table} "
-                f"WHERE region IS NULL {region_filter}"
+                f"WHERE state IS NULL {state_filter}"
             ),
             params,
         ).fetchall()
     for (uid,) in rows:
-        collision_units.setdefault(uid, []).append(REGION_NULL_COLLISION_REASON)
+        collision_units.setdefault(uid, []).append(OUTSIDE_LOCATION_COLLISION_REASON)
 
 
 def _detect_onshore_in_sea(
@@ -682,7 +682,7 @@ def _detect_onshore_in_sea(
     kind: _CoreKind,
     affected_ids: list[int] | None = None,
 ) -> None:
-    """Flag onshore-only sources in sea/EEZ regions."""
+    """Flag onshore-only sources in sea/EEZ states."""
     if affected_ids is not None and not affected_ids:
         return
 
@@ -693,13 +693,13 @@ def _detect_onshore_in_sea(
         params["affected"] = affected_ids
 
     sources = ", ".join(f"'{s}'" for s in kind.onshore_sources)
-    regions = ", ".join(f"'{r}'" for r in SEA_REGIONS)
+    states = ", ".join(f"'{r}'" for r in SEA_REGIONS)
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 f"SELECT unit_id FROM {CORE_SCHEMA}.{kind.core_table} "
                 f"WHERE energy_source IN ({sources}) "
-                f"AND region IN ({regions}) "
+                f"AND state IN ({states}) "
                 f"{sea_filter}"
             ),
             params,

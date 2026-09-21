@@ -19,7 +19,7 @@ source/timescope filters as the scatter and header, and the camera refits to
 the selected areas' bounding box only when the level or area selection
 changes — session-state camera survives every other rerun.  With a proper
 subset of areas picked, the scatter points and every header figure narrow to
-those areas (units whose region/district/municipality names one of them); on
+those areas (units whose state/region/district names one of them); on
 the all-areas selection every active unit renders and counts, including
 offshore units that belong to no polygon at the active level.  At the country
 level ("Germany") the area multiselect is omitted and the choropleth gives
@@ -210,7 +210,7 @@ else:
     selected_names = tuple(selected_areas or area_names)
 
 # The scatter points and header metrics follow the selection only when it is a
-# proper subset of the level's areas: a unit's region/district/municipality
+# proper subset of the level's areas: a unit's state/region/district
 # attribute must name one of the picked areas.  On the all-areas selection no
 # filter applies, so units that belong to no polygon at the active level still
 # render and count.

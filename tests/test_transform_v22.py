@@ -52,7 +52,7 @@ EXPECTED_JSON_KEYS = {
     "storage": set(),
 }
 
-EXPECTED_REGION_NULLS = {"hydro": 15, "solar": 5, "wind": 1, "storage": 30}
+EXPECTED_STATE_NULLS = {"hydro": 15, "solar": 5, "wind": 1, "storage": 30}
 EXPECTED_BAD_QUALITY = {"bio": 0, "gas": 0, "hydro": 0, "solar": 12, "wind": 0, "storage": 0}
 
 
@@ -112,23 +112,23 @@ def test_properties_tables_contain_only_whitelisted_keys(source):
     assert not (names - WHITELIST)
 
 
-def test_region_null_units_no_longer_bad_quality():
+def test_state_null_units_no_longer_bad_quality():
     for source in SOURCE_NAMES:
-        region_nulls = scalar(
-            f"SELECT COUNT(*) FROM stage.{source} WHERE region IS NULL"
+        state_nulls = scalar(
+            f"SELECT COUNT(*) FROM stage.{source} WHERE state IS NULL"
         )
         bad = scalar(f"SELECT COUNT(*) FROM stage.{source} WHERE bad_quality")
-        bad_region = scalar(
-            f"SELECT COUNT(*) FROM stage.{source} WHERE region IS NULL AND bad_quality"
+        bad_state = scalar(
+            f"SELECT COUNT(*) FROM stage.{source} WHERE state IS NULL AND bad_quality"
         )
-        assert region_nulls == EXPECTED_REGION_NULLS.get(source, 0)
+        assert state_nulls == EXPECTED_STATE_NULLS.get(source, 0)
         assert bad == EXPECTED_BAD_QUALITY[source]
-        assert bad_region == 0
+        assert bad_state == 0
         assert (
             scalar(
                 f"SELECT COUNT(*) FROM stage.{source}_units_properties up "
                 f"JOIN stage.{source}_properties p ON p.param_id = up.param_id "
-                f"WHERE p.name = 'bad_quality' AND p.value LIKE '%region%'"
+                f"WHERE p.name = 'bad_quality' AND p.value LIKE '%outside location%'"
             )
             == 0
         )

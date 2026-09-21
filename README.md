@@ -1,7 +1,7 @@
 # Renewable Energy Installations in Germany
 
 Geospatial registry of renewable energy installations in Germany, with an ETL pipeline
-(GeoPandas → PostGIS marts) for analyzing installed capacity by energy source, region,
+(GeoPandas → PostGIS marts) for analyzing installed capacity by energy source, state,
 and commissioning date, and a Streamlit + PyDeck map app that visualises the marts.
 
 ## Status
@@ -34,7 +34,7 @@ aggregates) runs in the containerized stack. Design work recorded in:
 | What                                                                 | Where                                     |
 |----------------------------------------------------------------------|-------------------------------------------|
 | Raw unit GPKG files (6 sources incl. solar, wind, storage)           | `data/sources/*.gpkg`                     |
-| Germany boundaries (state, regions + EEZ, districts, municipalities) | `data/boundaries/germany_*.gpkg`          |
+| Germany boundaries (states + EEZ, regions, districts)                | `data/boundaries/germany_*.gpkg`          |
 | Source documentation                                                 | `data/sources/data_descriptor_V20260203.xlsx` |
 
 All files are 2026-02-03 versions. The files are authoritative.
@@ -51,7 +51,7 @@ Four PostGIS layers, run per-stage or as one pass via the CLI (`python -m etl <s
 Each stage verifies its own output (row counts, key uniqueness, join coverage, idempotency) and
 fails loudly on violation. Key decisions: staging identity from `reference_id`, core serial keys with
 record-identity updates gated on `reference_date` (ADR 0001), gas production capacity recorded as
-`installed_capacity` (ADR 0002), marts as materialized views at region grain (ADR 0003), versioned
+`installed_capacity` (ADR 0002), marts as materialized views at state grain (ADR 0003), versioned
 raw datalake (ADR 0004), quality annotations as property links (ADR 0005), per-kind property tables
 (ADR 0006), operational metadata in the `service` schema (ADR 0007).
 
@@ -90,7 +90,7 @@ docker compose up --build --wait db viz
   (`docker compose run --rm pipeline`); `viz` serves the Streamlit app on
   http://localhost:8501.
 - Verify the marts:
-  `docker compose exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY region LIMIT 8"`
+  `docker compose exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"`
 - *Alternative: seed a remote PostGIS and point the seed script's `DB_HOST`/`DB_PORT`
   env at it — see `docs/remote-deploy.md`.
 
@@ -109,5 +109,10 @@ python -m etl run-all         # extract → staging → core → marts
 scripts/drop_pipeline_data.sh # empties raw/stage/core/marts/service (schemas kept)
 python -m etl run-all         # rebuild from the raw data
 ```
+
+> **Upgrading a database seeded before the states/regions/districts rename (#32):**
+> there is no migration code — drop the pipeline data and re-run
+> (`scripts/drop_pipeline_data.sh && python -m etl run-all`); staging/core are
+> dropped and recreated on every load and the marts views are rebuilt.
 
 Full walkthrough, configuration table, and teardown: `docs/containerization.md`.

@@ -245,11 +245,11 @@ class TestCollisionAnnotationIntegrity:
     @pytest.mark.parametrize(
         "kind", [GENERATOR_KIND, STORAGE_KIND], ids=["generators", "storages"]
     )
-    def test_region_null_rows_carry_collision_link(self, _loaded_core, kind):
+    def test_state_null_rows_carry_collision_link(self, _loaded_core, kind):
         table, props, links = kind
         outside = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.{table} g "
-            f"WHERE g.region IS NULL AND NOT EXISTS ("
+            f"WHERE g.state IS NULL AND NOT EXISTS ("
             f"SELECT 1 FROM {CORE_SCHEMA}.{links} up "
             f"JOIN {CORE_SCHEMA}.{props} p ON p.prop_id = up.prop_id "
             f"WHERE up.unit_id = g.unit_id AND p.name = '{COLLISION_PROPERTY}')"
@@ -259,26 +259,26 @@ class TestCollisionAnnotationIntegrity:
     @pytest.mark.parametrize(
         "kind", [GENERATOR_KIND, STORAGE_KIND], ids=["generators", "storages"]
     )
-    def test_region_null_rows_are_collision_flagged(self, _loaded_core, kind):
+    def test_state_null_rows_are_collision_flagged(self, _loaded_core, kind):
         table, _, _ = kind
         unflagged = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.{table} "
-            f"WHERE region IS NULL AND NOT collision"
+            f"WHERE state IS NULL AND NOT collision"
         )
         assert unflagged == 0
 
     @pytest.mark.parametrize(
         "kind", [GENERATOR_KIND, STORAGE_KIND], ids=["generators", "storages"]
     )
-    def test_collision_link_value_carries_region_null_reason(self, _loaded_core, kind):
-        """'correct' links: a region-null row's collision value names the reason."""
+    def test_collision_link_value_carries_outside_location_reason(self, _loaded_core, kind):
+        """'correct' links: an outside-location row's collision value names the reason."""
         table, props, links = kind
         stripped = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.{table} g "
             f"JOIN {CORE_SCHEMA}.{links} up ON up.unit_id = g.unit_id "
             f"JOIN {CORE_SCHEMA}.{props} p ON p.prop_id = up.prop_id "
-            f"WHERE g.region IS NULL AND p.name = '{COLLISION_PROPERTY}' "
-            f"AND p.value NOT LIKE '%region is null%'"
+            f"WHERE g.state IS NULL AND p.name = '{COLLISION_PROPERTY}' "
+            f"AND p.value NOT LIKE '%outside location%'"
         )
         assert stripped == 0
 
@@ -537,9 +537,9 @@ class TestDriftDetection:
     @pytest.mark.parametrize(
         "kind", [GENERATOR_KIND, STORAGE_KIND], ids=["generators", "storages"]
     )
-    def test_verifier_flags_stripped_region_null_reason(self, _loaded_core, kind):
-        """A region-null row whose collision value lost its reason is 'correct'
-        drift the value-level check must catch."""
+    def test_verifier_flags_stripped_outside_location_reason(self, _loaded_core, kind):
+        """An outside-location row whose collision value lost its reason is
+        'correct' drift the value-level check must catch."""
         table, props, links = kind
         with ENGINE.connect() as conn:
             row = conn.execute(
@@ -548,14 +548,14 @@ class TestDriftDetection:
                     f"FROM {CORE_SCHEMA}.{links} up "
                     f"JOIN {CORE_SCHEMA}.{props} p ON p.prop_id = up.prop_id "
                     f"JOIN {CORE_SCHEMA}.{table} g ON g.unit_id = up.unit_id "
-                    f"WHERE g.region IS NULL AND p.name = '{COLLISION_PROPERTY}' "
+                    f"WHERE g.state IS NULL AND p.name = '{COLLISION_PROPERTY}' "
                     f"LIMIT 1"
                 )
             ).fetchone()
-        assert row is not None, f"No region-null collided unit in core.{table}"
+        assert row is not None, f"No outside-location collided unit in core.{table}"
         prop_id, orig_value = int(row[1]), str(row[2])
         marker = f"drift-{uuid.uuid4().hex}"
-        tampered = orig_value.replace("region is null", marker)
+        tampered = orig_value.replace("outside location", marker)
         with ENGINE.begin() as conn:
             conn.execute(
                 text(f"UPDATE {CORE_SCHEMA}.{props} SET value = :v WHERE prop_id = :pid"),
@@ -563,7 +563,7 @@ class TestDriftDetection:
             )
         try:
             errors = self._verifier(kind)(ENGINE, LoadReport())
-            assert any("region is null" in e for e in errors), f"errors: {errors}"
+            assert any("outside location" in e for e in errors), f"errors: {errors}"
         finally:
             with ENGINE.begin() as conn:
                 conn.execute(

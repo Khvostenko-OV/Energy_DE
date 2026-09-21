@@ -4,7 +4,7 @@
 # Proves, on a genuinely fresh stack: the pipeline and viz images build, compose
 # brings up a PostGIS database, the pipeline, and the viz app, the containerized
 # `run_all` completes every stage (failing loudly on any drift), the three
-# marts are produced at region grain including the `outside` bucket, the
+# marts are produced at state grain including the `outside` bucket, the
 # read-only `viz_reader` role is provisioned and can read core/service/marts,
 # and the viz service passes Streamlit's `/_stcore/health` probe on port 8501.
 #
@@ -87,7 +87,7 @@ step "Running the containerized pipeline (python -m etl run-all)"
 # code, so a failing stage (or mart drift) fails the smoke run loudly.
 docker compose run --rm -T pipeline
 
-step "Verifying the three marts at region grain (incl. outside bucket)"
+step "Verifying the three marts at state grain (incl. outside bucket)"
 expect_count "materialized mart views exist" -eq 3 \
     "SELECT count(*) FROM pg_matviews WHERE schemaname='marts' AND matviewname IN ('installation_counts','generation_capacity','storage_capacity')"
 
@@ -98,25 +98,25 @@ expect_count "generation_capacity has rows" -gt 0 \
 expect_count "storage_capacity has rows" -gt 0 \
     "SELECT count(*) FROM marts.storage_capacity"
 
-expect_count "installation_counts region grain has no NULL regions" -eq 0 \
-    "SELECT count(*) FROM marts.installation_counts WHERE region IS NULL"
-expect_count "generation_capacity region grain has no NULL regions" -eq 0 \
-    "SELECT count(*) FROM marts.generation_capacity WHERE region IS NULL"
-expect_count "storage_capacity region grain has no NULL regions" -eq 0 \
-    "SELECT count(*) FROM marts.storage_capacity WHERE region IS NULL"
+expect_count "installation_counts state grain has no NULL states" -eq 0 \
+    "SELECT count(*) FROM marts.installation_counts WHERE state IS NULL"
+expect_count "generation_capacity state grain has no NULL states" -eq 0 \
+    "SELECT count(*) FROM marts.generation_capacity WHERE state IS NULL"
+expect_count "storage_capacity state grain has no NULL states" -eq 0 \
+    "SELECT count(*) FROM marts.storage_capacity WHERE state IS NULL"
 
 expect_count "'outside' bucket appears across the marts" -gt 0 \
     "SELECT count(*) FROM (
-        SELECT 'installation_counts' AS mart FROM marts.installation_counts WHERE region='outside'
+        SELECT 'installation_counts' AS mart FROM marts.installation_counts WHERE state='outside'
         UNION ALL
-        SELECT 'generation_capacity' AS mart FROM marts.generation_capacity WHERE region='outside'
+        SELECT 'generation_capacity' AS mart FROM marts.generation_capacity WHERE state='outside'
         UNION ALL
-        SELECT 'storage_capacity' AS mart FROM marts.storage_capacity WHERE region='outside'
+        SELECT 'storage_capacity' AS mart FROM marts.storage_capacity WHERE state='outside'
     ) o"
 
 step "Mart sample rows"
-docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT * FROM marts.installation_counts ORDER BY region LIMIT 8"
-docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT * FROM marts.storage_capacity ORDER BY region LIMIT 5"
+docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"
+docker compose exec -T db psql -U "$DB_USER" -d "$DB_NAME" -c "SELECT * FROM marts.storage_capacity ORDER BY state LIMIT 5"
 
 step "Provisioning: viz_reader role (idempotent SQL seam)"
 # The role was created from /docker-entrypoint-initdb.d when the fresh db
@@ -178,6 +178,6 @@ if [ "$FAILURES" -gt 0 ]; then
 fi
 
 printf '\nSMOKE PASSED: containerized run_all completed, the three marts\n'
-printf 'are populated at region grain (incl. the outside bucket), the\n'
+printf 'are populated at state grain (incl. the outside bucket), the\n'
 printf 'read-only viz_reader role reads core/service/marts, and the viz\n'
 printf 'service answers its health probe on port %s.\n' "$VIZ_PORT"

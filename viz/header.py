@@ -18,9 +18,9 @@ from typing import Any, Mapping
 # sits outside this map: its single displayed area is the country itself, so
 # its name ("Germany") is used bare.
 SINGULAR_LEVEL_PREFIX = {
+    "States": "State",
     "Regions": "Region",
     "Districts": "District",
-    "Municipalities": "Municipality",
 }
 
 

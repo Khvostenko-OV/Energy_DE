@@ -68,7 +68,7 @@ ACTIVE_UNIT_PREDICATE = (
 )
 
 # Columns every fetched unit row needs for the scatter layer and its hover
-# card.  The location address reads region · municipality (district left the
+# card.  The location address reads state · district (region left the
 # card in #24) and storages add storage_capacity (kWh).  ``unit_id`` is
 # dropped: it only keyed the retired spatial fill's COUNT.
 UNIT_COLUMNS = (
@@ -78,8 +78,8 @@ UNIT_COLUMNS = (
     "decommissioning_date",
     "longitude",
     "latitude",
-    "region",
-    "municipality",
+    "state",
+    "district",
 )
 UNIT_COLUMNS_SQL = ", ".join(UNIT_COLUMNS)
 STORAGE_COLUMNS = UNIT_COLUMNS + ("storage_capacity",)
@@ -87,7 +87,7 @@ STORAGE_COLUMNS_SQL = ", ".join(STORAGE_COLUMNS)
 
 # The column every unit row carries for the choropleth fill and header
 # drill-down: the unit attribute naming its area at the active level, aliased
-# ``name`` (e.g. ``region`` at the States level).  ``name`` joins units to the
+# ``name`` (e.g. ``state`` at the States level).  ``name`` joins units to the
 # ``service.boundaries.name`` rows; dropped when the level (Germany) has none.
 AREA_NAME_ALIAS = "name"
 

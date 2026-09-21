@@ -47,7 +47,7 @@ class TestLevelDefaults:
         assert LEVEL_INDEX[INITIAL_LEVEL] == 0
 
     def test_every_chooser_label_maps_to_a_boundary_level(self):
-        assert list(LEVEL_INDEX) == list(MAP_LEVELS)
+        assert list(LEVEL_INDEX) == [label.split(" ")[0] for label in MAP_LEVELS]
 
     def test_levels_index_matches_the_boundary_table(self):
         assert LEVEL_INDEX == {
@@ -60,7 +60,9 @@ class TestLevelDefaults:
 
 class TestLevelAreaColumns:
     def test_every_level_maps_to_a_unit_area_column(self):
-        assert list(LEVEL_UNIT_AREA_COLUMN) == list(MAP_LEVELS)
+        assert list(LEVEL_UNIT_AREA_COLUMN) == [
+            label.split(" ")[0] for label in MAP_LEVELS
+        ]
 
     def test_country_needs_no_area_column(self):
         assert LEVEL_UNIT_AREA_COLUMN["Germany"] is None
@@ -68,9 +70,9 @@ class TestLevelAreaColumns:
     def test_attribute_matches_the_levels_spatial_grain(self):
         assert LEVEL_UNIT_AREA_COLUMN == {
             "Germany": None,
-            "States": "region",
-            "Regions": "district",
-            "Districts": "municipality",
+            "States": "state",
+            "Regions": "region",
+            "Districts": "district",
         }
 
     def test_columns_are_safe_static_attribute_names(self):

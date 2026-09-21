@@ -13,7 +13,7 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, text
 
-from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_REGION
+from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_STATE
 from etl.load import load_generators, load_storages
 from etl.marts import MART_DEFINITIONS, build_marts, verify_marts
 
@@ -103,23 +103,23 @@ class TestTableShape:
 
     def test_installation_counts_columns(self, _loaded_core, _marts):
         cols = self._column_names("installation_counts")
-        assert {"region", "energy_source", "installation_count"} <= cols, (
+        assert {"state", "energy_source", "installation_count"} <= cols, (
             f"Missing columns: "
-            f"{({'region', 'energy_source', 'installation_count'} - cols)}"
+            f"{({'state', 'energy_source', 'installation_count'} - cols)}"
         )
 
     def test_generation_capacity_columns(self, _loaded_core, _marts):
         cols = self._column_names("generation_capacity")
-        assert {"region", "energy_source", "generation_capacity"} <= cols, (
+        assert {"state", "energy_source", "generation_capacity"} <= cols, (
             f"Missing columns: "
-            f"{({'region', 'energy_source', 'generation_capacity'} - cols)}"
+            f"{({'state', 'energy_source', 'generation_capacity'} - cols)}"
         )
 
     def test_storage_capacity_columns(self, _loaded_core, _marts):
         cols = self._column_names("storage_capacity")
-        assert {"region", "source_type", "storage_capacity"} <= cols, (
+        assert {"state", "source_type", "storage_capacity"} <= cols, (
             f"Missing columns: "
-            f"{({'region', 'source_type', 'storage_capacity'} - cols)}"
+            f"{({'state', 'source_type', 'storage_capacity'} - cols)}"
         )
 
     def _column_names(self, view: str) -> set[str]:
@@ -136,14 +136,14 @@ ACTIVE = "decommissioning_date IS NULL OR decommissioning_date > CURRENT_DATE"
 
 
 def _cells(sql: str) -> dict[tuple[str, str], float]:
-    """Read an aggregate query into {(region, pivot): value} cells."""
+    """Read an aggregate query into {(state, pivot): value} cells."""
     with ENGINE.connect() as conn:
         rows = conn.execute(text(sql)).fetchall()
     return {(r[0], r[1]): float(r[2] or 0) for r in rows}
 
 
 def _mart_cells(view: str, pivot: str, value: str) -> dict[tuple[str, str], float]:
-    return _cells(f"SELECT region, {pivot}, {value} FROM {MARTS_SCHEMA}.{view}")
+    return _cells(f"SELECT state, {pivot}, {value} FROM {MARTS_SCHEMA}.{view}")
 
 
 def _assert_cells_equal(
@@ -162,12 +162,12 @@ def _assert_cells_equal(
         )
 
 
-def _null_regions(view: str) -> int:
-    return int(_scalar(f"SELECT COUNT(*) FROM {MARTS_SCHEMA}.{view} WHERE region IS NULL"))
+def _null_states(view: str) -> int:
+    return int(_scalar(f"SELECT COUNT(*) FROM {MARTS_SCHEMA}.{view} WHERE state IS NULL"))
 
 
 def _insert_generator(
-    *, region: str | None, decommissioning_date=None, capacity: float = 123.5
+    *, state: str | None, decommissioning_date=None, capacity: float = 123.5
 ) -> str:
     """Insert a distinctive probe row into core.generators; return its id."""
     ref_id = f"test_marts_probe_{uuid.uuid4().hex[:8]}"
@@ -178,23 +178,23 @@ def _insert_generator(
                 f"(energy_source, installed_capacity, commissioning_date, "
                 f"decommissioning_date, longitude, latitude, geo_accuracy, "
                 f"reference_id, reference_date, secondary_attributes, "
-                f"country_iso, region, district, municipality, collision) "
+                f"country_iso, state, region, district, collision) "
                 f"VALUES ('wind', :cap, '2010-01-01', :decommissioning_date, "
                 f"10.0, 50.0, 1, :ref, '2020-01-01 00:00:00', NULL, "
-                f"'DEU', :region, NULL, NULL, false)"
+                f"'DEU', :state, NULL, NULL, false)"
             ),
             {
                 "cap": capacity,
                 "decommissioning_date": decommissioning_date,
                 "ref": ref_id,
-                "region": region,
+                "state": state,
             },
         )
     return ref_id
 
 
 def _insert_storage(
-    *, region: str | None, source_type: str = "Battery", capacity: float = 50.0
+    *, state: str | None, source_type: str = "Battery", capacity: float = 50.0
 ) -> str:
     """Insert a distinctive probe row into core.storages; return its id."""
     ref_id = f"test_marts_probe_{uuid.uuid4().hex[:8]}"
@@ -205,16 +205,16 @@ def _insert_storage(
                 f"(energy_source, storage_type, storage_capacity, installed_capacity, "
                 f"commissioning_date, decommissioning_date, longitude, latitude, "
                 f"geo_accuracy, reference_id, reference_date, secondary_attributes, "
-                f"country_iso, region, district, municipality, collision) "
+                f"country_iso, state, region, district, collision) "
                 f"VALUES ('storage', :source_type, :cap, NULL, '2010-01-01', NULL, "
                 f"10.0, 50.0, 1, :ref, '2020-01-01 00:00:00', NULL, "
-                f"'DEU', :region, NULL, NULL, false)"
+                f"'DEU', :state, NULL, NULL, false)"
             ),
             {
                 "source_type": source_type,
                 "cap": capacity,
                 "ref": ref_id,
-                "region": region,
+                "state": state,
             },
         )
     return ref_id
@@ -276,37 +276,37 @@ class TestBuildReport:
 class TestContent:
     def test_installation_counts_match_core(self, _loaded_core, _marts):
         expected = f"""
-            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region, energy_source,
+            SELECT COALESCE(state, '{OUTSIDE_STATE}') AS state, energy_source,
                    COUNT(*) AS installation_count
             FROM (
-                SELECT region, energy_source FROM {CORE_SCHEMA}.generators
+                SELECT state, energy_source FROM {CORE_SCHEMA}.generators
                 WHERE {ACTIVE}
                 UNION ALL
-                SELECT region, energy_source FROM {CORE_SCHEMA}.storages
+                SELECT state, energy_source FROM {CORE_SCHEMA}.storages
                 WHERE {ACTIVE}
             ) active_units
-            GROUP BY region, energy_source
+            GROUP BY state, energy_source
         """
         _assert_cells_equal(expected, "installation_counts", "energy_source", "installation_count")
 
     def test_generation_capacity_matches_core(self, _loaded_core, _marts):
         expected = f"""
-            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region, energy_source,
+            SELECT COALESCE(state, '{OUTSIDE_STATE}') AS state, energy_source,
                    SUM(installed_capacity) AS generation_capacity
             FROM {CORE_SCHEMA}.generators
             WHERE {ACTIVE}
-            GROUP BY region, energy_source
+            GROUP BY state, energy_source
         """
         _assert_cells_equal(expected, "generation_capacity", "energy_source", "generation_capacity")
 
     def test_storage_capacity_matches_core(self, _loaded_core, _marts):
         expected = f"""
-            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
+            SELECT COALESCE(state, '{OUTSIDE_STATE}') AS state,
                    storage_type AS source_type,
                    SUM(storage_capacity) AS storage_capacity
             FROM {CORE_SCHEMA}.storages
             WHERE {ACTIVE}
-            GROUP BY region, storage_type
+            GROUP BY state, storage_type
         """
         _assert_cells_equal(expected, "storage_capacity", "source_type", "storage_capacity")
 
@@ -337,7 +337,7 @@ class TestActiveOnly:
         key = ("Bayern", "wind")
         base_count, base_cap = counts[key], caps[key]
 
-        ref_id = _insert_generator(region="Bayern")
+        ref_id = _insert_generator(state="Bayern")
         build_marts()
         counts = _mart_cells("installation_counts", "energy_source", "installation_count")
         caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
@@ -359,7 +359,7 @@ class TestActiveOnly:
         key = ("Bayern", "Battery")
         base = cells[key]
 
-        ref_id = _insert_storage(region="Bayern")
+        ref_id = _insert_storage(state="Bayern")
         build_marts()
         cells = _mart_cells("storage_capacity", "source_type", "storage_capacity")
         assert abs(cells[key] - (base + 50.0)) < 0.01
@@ -380,17 +380,17 @@ class TestActiveOnly:
 
 class TestNullValues:
     def test_null_generator_capacity_group_reports_zero(self, _loaded_core, _marts):
-        region = "Marts_Null_Cap"
-        ref_id = _insert_generator(region=region, capacity=None)
+        state = "Marts_Null_Cap"
+        ref_id = _insert_generator(state=state, capacity=None)
         build_marts()
         try:
             with ENGINE.connect() as conn:
                 value = conn.execute(
                     text(
                         f"SELECT generation_capacity FROM {MARTS_SCHEMA}.generation_capacity "
-                        "WHERE region = :region AND energy_source = 'wind'"
+                        "WHERE state = :state AND energy_source = 'wind'"
                     ),
-                    {"region": region},
+                    {"state": state},
                 ).scalar()
             assert value is not None, "expected a row for the all-NULL capacity group"
             assert value == 0, f"expected 0, got {value!r}"
@@ -399,17 +399,17 @@ class TestNullValues:
             build_marts()
 
     def test_null_storage_capacity_group_reports_zero(self, _loaded_core, _marts):
-        region = "Marts_Null_Cap"
-        ref_id = _insert_storage(region=region, capacity=None)
+        state = "Marts_Null_Cap"
+        ref_id = _insert_storage(state=state, capacity=None)
         build_marts()
         try:
             with ENGINE.connect() as conn:
                 value = conn.execute(
                     text(
                         f"SELECT storage_capacity FROM {MARTS_SCHEMA}.storage_capacity "
-                        "WHERE region = :region AND source_type = 'Battery'"
+                        "WHERE state = :state AND source_type = 'Battery'"
                     ),
-                    {"region": region},
+                    {"state": state},
                 ).scalar()
             assert value is not None, "expected a row for the all-NULL capacity group"
             assert value == 0, f"expected 0, got {value!r}"
@@ -419,17 +419,17 @@ class TestNullValues:
 
 
 class TestOutsideBucket:
-    def test_region_null_units_reported_as_outside(self, _loaded_core, _marts):
+    def test_state_null_units_reported_as_outside(self, _loaded_core, _marts):
         counts = _mart_cells("installation_counts", "energy_source", "installation_count")
         caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
-        out_key = (OUTSIDE_REGION, "wind")
+        out_key = (OUTSIDE_STATE, "wind")
         base_count, base_cap = counts[out_key], caps[out_key]
 
-        ref_id = _insert_generator(region=None)
+        ref_id = _insert_generator(state=None)
         build_marts()
 
         for view in MART_NAMES:
-            assert _null_regions(view) == 0, f"{view} has a NULL-region row"
+            assert _null_states(view) == 0, f"{view} has a NULL-state row"
 
         counts = _mart_cells("installation_counts", "energy_source", "installation_count")
         caps = _mart_cells("generation_capacity", "energy_source", "generation_capacity")
@@ -439,16 +439,16 @@ class TestOutsideBucket:
         _delete_probe("generators", ref_id)
         build_marts()
 
-    def test_outside_cells_match_region_null_core_rows(self, _loaded_core, _marts):
+    def test_outside_cells_match_state_null_core_rows(self, _loaded_core, _marts):
         expected = f"""
-            SELECT '{OUTSIDE_REGION}' AS region, energy_source, COUNT(*) AS installation_count
+            SELECT '{OUTSIDE_STATE}' AS state, energy_source, COUNT(*) AS installation_count
             FROM {CORE_SCHEMA}.generators
-            WHERE ({ACTIVE}) AND region IS NULL
+            WHERE ({ACTIVE}) AND state IS NULL
             GROUP BY energy_source
             UNION ALL
-            SELECT '{OUTSIDE_REGION}' AS region, energy_source, COUNT(*) AS installation_count
+            SELECT '{OUTSIDE_STATE}' AS state, energy_source, COUNT(*) AS installation_count
             FROM {CORE_SCHEMA}.storages
-            WHERE ({ACTIVE}) AND region IS NULL
+            WHERE ({ACTIVE}) AND state IS NULL
             GROUP BY energy_source
         """
         stored = {
@@ -456,7 +456,7 @@ class TestOutsideBucket:
             for key, v in _mart_cells(
                 "installation_counts", "energy_source", "installation_count"
             ).items()
-            if key[0] == OUTSIDE_REGION
+            if key[0] == OUTSIDE_STATE
         }
         core = _cells(expected)
         assert stored == core
@@ -472,8 +472,8 @@ class TestVerification:
         assert verify_marts(ENGINE) == []
 
     def test_verify_fails_on_unrefreshed_core_change(self, _loaded_core, _marts):
-        gen_id = _insert_generator(region="Bayern")
-        sto_id = _insert_storage(region="Bayern")
+        gen_id = _insert_generator(state="Bayern")
+        sto_id = _insert_storage(state="Bayern")
         try:
             errors = verify_marts(ENGINE)
         finally:

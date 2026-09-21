@@ -10,10 +10,10 @@ CORE_SCHEMA = "core"
 SERVICE_SCHEMA = "service"
 MARTS_SCHEMA = "marts"
 
-# Region key shown for units the spatial join left outside every boundary; a
-# region-null unit is a load-stage collision that still reaches core, so the
+# State key shown for units the spatial join left outside every boundary; a
+# state-null unit is a load-stage collision that still reaches core, so the
 # mart pivots report it under this bucket instead of a NULL key (#9).
-OUTSIDE_REGION = "outside"
+OUTSIDE_STATE = "outside"
 
 # Generator sources consolidated into core.generators (storage is separate).
 STAGING_GENERATOR_SOURCES = ("bio", "gas", "hydro", "solar", "wind")
@@ -56,9 +56,9 @@ STAGING_COLUMNS = (
     "reference_date",
     "secondary_attributes",
     "country_iso",
+    "state",
     "region",
     "district",
-    "municipality",
     BAD_QUALITY_PROPERTY,
 ) + STORAGE_COLUMNS
 
@@ -85,7 +85,7 @@ BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
 
 BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
-BOUNDARY_LEVEL_COLUMNS = {1: "region", 2: "district", 3: "municipality"}
+BOUNDARY_LEVEL_COLUMNS = {1: "state", 2: "region", 3: "district"}
 
 CORE_GENERATORS_COLUMNS = (
     "unit_id",
@@ -101,27 +101,28 @@ CORE_GENERATORS_COLUMNS = (
     "reference_date",
     "secondary_attributes",
     "country_iso",
+    "state",
     "region",
     "district",
-    "municipality",
     "collision",
 )
 
 COLLISION_PROPERTY = "collision"
 CLOSE_TO_PROPERTY = "close_to"
 CLOSE_LOCATION_REASON = "close location"
-REGION_NULL_COLLISION_REASON = "region is null"
+OUTSIDE_LOCATION_COLLISION_REASON = "outside location"
 ONSHORE_IN_SEA_COLLISION_REASON = "onshore unit in the sea"
 STORAGE_CAPACITY_COLLISION_REASON = "storage_capacity <= 0 or null"
 
 # Sources whose units are onshore-only: an energy_source in this set whose
-# region is a sea/EEZ area is an "onshore unit in the sea" collision.
+# state is a sea/EEZ area is an "onshore unit in the sea" collision.
 ONSHORE_SOURCES = ("bio", "gas", "hydro", "solar")
 
 SYNTHETIC_ID_PREFIX = "syn_"
 
-# Sea/EEZ areas at boundary level 1 — assigning any of these as a region to an
-# onshore-only source (bio/gas/hydro/solar) flags an onshore-in-sea collision.
+# Sea/EEZ areas at boundary level 1 (the state grain) — assigning any of these
+# as a state to an onshore-only source (bio/gas/hydro/solar) flags an
+# onshore-in-sea collision.
 SEA_REGIONS = ("North Sea", "Baltic Sea", "Kattegat")
 
 COLLISION_CLOSE_DISTANCE_M = 10.0

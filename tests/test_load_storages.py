@@ -96,9 +96,9 @@ class TestTableShape:
             "reference_id",
             "reference_date",
             "country_iso",
+            "state",
             "region",
             "district",
-            "municipality",
         }
         assert expected.issubset(cols), f"Missing columns: {expected - cols}"
 
@@ -342,16 +342,16 @@ class TestIncrementalUpdate:
 
 
 class TestCollisions:
-    def test_region_null_flagged(self, _loaded_core):
-        region_null_collisions = _scalar(
+    def test_state_null_flagged(self, _loaded_core):
+        state_null_collisions = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages "
-            f"WHERE region IS NULL AND collision"
+            f"WHERE state IS NULL AND collision"
         )
-        staging_region_null = _scalar(
+        staging_state_null = _scalar(
             f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{SOURCE} "
-            f"WHERE NOT bad_quality AND region IS NULL"
+            f"WHERE NOT bad_quality AND state IS NULL"
         )
-        assert region_null_collisions == staging_region_null
+        assert state_null_collisions == staging_state_null
 
     def test_storage_capacity_collision_flagged(self, _loaded_core):
         bad_capacity = _scalar(
@@ -366,14 +366,14 @@ class TestCollisions:
         assert bad_capacity == staging_bad_capacity
 
     def test_onshore_in_sea_flagged(self, _loaded_core):
-        sea_regions = "'North Sea', 'Baltic Sea', 'Kattegat'"
+        sea_states = "'North Sea', 'Baltic Sea', 'Kattegat'"
         onshore_sea = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages "
-            f"WHERE region IN ({sea_regions}) AND collision"
+            f"WHERE state IN ({sea_states}) AND collision"
         )
         expected = _scalar(
             f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{SOURCE} "
-            f"WHERE NOT bad_quality AND region IN ({sea_regions})"
+            f"WHERE NOT bad_quality AND state IN ({sea_states})"
         )
         assert onshore_sea == expected
 

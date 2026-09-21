@@ -66,9 +66,9 @@ def unit_row(source="solar"):
         "decommissioning_date": None,
         "longitude": 10.5,
         "latitude": 50.5,
-        "region": "Bavaria",
+        "state": "Bavaria",
+        "region": None,
         "district": None,
-        "municipality": None,
     }
 
 

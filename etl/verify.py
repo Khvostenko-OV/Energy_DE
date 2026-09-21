@@ -19,8 +19,8 @@ from etl.db_schema import (
     MARTS_SCHEMA,
     ONSHORE_IN_SEA_COLLISION_REASON,
     ONSHORE_SOURCES,
+    OUTSIDE_LOCATION_COLLISION_REASON,
     RAW_SCHEMA,
-    REGION_NULL_COLLISION_REASON,
     SEA_REGIONS,
     SERVICE_SCHEMA,
     STAGING_GENERATOR_SOURCES,
@@ -406,10 +406,10 @@ def _verify_load_generators(engine: Engine, report: LoadReport) -> list[str]:
     onshore_sql = ", ".join(f"'{s}'" for s in ONSHORE_SOURCES)
     sea_sql = ", ".join(f"'{r}'" for r in SEA_REGIONS)
     for reason, condition in (
-        (REGION_NULL_COLLISION_REASON, "g.region IS NULL"),
+        (OUTSIDE_LOCATION_COLLISION_REASON, "g.state IS NULL"),
         (
             ONSHORE_IN_SEA_COLLISION_REASON,
-            f"g.energy_source IN ({onshore_sql}) AND g.region IN ({sea_sql})",
+            f"g.energy_source IN ({onshore_sql}) AND g.state IN ({sea_sql})",
         ),
         (
             CLOSE_LOCATION_REASON,
@@ -633,10 +633,10 @@ def _verify_load_storages(engine: Engine, report: LoadReport) -> list[str]:
     # though a 'collision' link still exists.
     sea_sql = ", ".join(f"'{r}'" for r in SEA_REGIONS)
     for reason, condition in (
-        (REGION_NULL_COLLISION_REASON, "g.region IS NULL"),
+        (OUTSIDE_LOCATION_COLLISION_REASON, "g.state IS NULL"),
         (
             ONSHORE_IN_SEA_COLLISION_REASON,
-            f"g.energy_source = 'storage' AND g.region IN ({sea_sql})",
+            f"g.energy_source = 'storage' AND g.state IN ({sea_sql})",
         ),
         (
             STORAGE_CAPACITY_COLLISION_REASON,
@@ -743,20 +743,20 @@ def _verify_marts(
 ) -> list[str]:
     """Reconcile each stored pivot to a fresh aggregation of core.
 
-    For every mart the stored ``(region, pivot, value)`` cells are compared
+    For every mart the stored ``(state, pivot, value)`` cells are compared
     against the live expected aggregation as a set difference (``EXCEPT``).
     A row is drifted when a cell appears on one side but not the other —
     either the mart carries a cell the expected aggregation does not, the
     mart is missing a cell core warrants, or a stored ``value`` disagrees
     with the expected one.  ``EXCEPT`` compares NULLs as equal, which is
-    exactly the outside-bucket / region-NULL semantics the pivots rely on.
+    exactly the outside-bucket / state-NULL semantics the pivots rely on.
     The error list is non-empty on drift (fail loudly).
     """
     errors: list[str] = []
     for name, defn in definitions.items():
         p, v = defn.pivot, defn.value
         mart_fq = f"{MARTS_SCHEMA}.{name}"
-        columns = f"region, {p}, {v}"
+        columns = f"state, {p}, {v}"
 
         stale = (
             f"SELECT COUNT(*) FROM ("

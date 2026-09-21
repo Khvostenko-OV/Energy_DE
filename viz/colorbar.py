@@ -97,7 +97,7 @@ def colorbar_html(capacity_max_mw: float) -> str:
     low = _rgba(RAMP_LOW)
     high = _rgba(RAMP_HIGH)
     # Marks 1000 MW and up are labeled in GW (MW ÷ 1000), one decimal digit,
-    # so region-sized capacities read as compact values — e.g. 62,490.1 MW →
+    # so state-sized capacities read as compact values — e.g. 62,490.1 MW →
     # 62.5 — instead of long thousand-separated strings; sub-GW ranges keep
     # plain MW labels.
     scale = 1000.0 if capacity_max_mw >= 1000.0 else 1.0

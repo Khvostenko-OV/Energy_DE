@@ -148,7 +148,7 @@ class TestUnitsQuery:
         )
         assert sql == (
             "SELECT energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, municipality "
+            "decommissioning_date, longitude, latitude, state, district "
             "FROM core.generators "
             "WHERE energy_source = ANY(:sources) "
             "AND commissioning_date >= :from "
@@ -170,7 +170,7 @@ class TestUnitsQuery:
         )
         assert sql.startswith(
             "SELECT energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, municipality, "
+            "decommissioning_date, longitude, latitude, state, district, "
             "storage_capacity FROM core.storages "
         )
 
@@ -197,11 +197,11 @@ class TestUnitsQuery:
             sources=("solar",),
             active_from=date(1990, 1, 1),
             active_to=date(2010, 1, 1),
-            area_column="region",
+            area_column="state",
             area_names=("Berlin", "Hamburg"),
         )
-        assert "region AS name" in sql
-        assert "AND region = ANY(:area_names)" in sql
+        assert "state AS name" in sql
+        assert "AND state = ANY(:area_names)" in sql
         assert params["area_names"] == ["Berlin", "Hamburg"]
 
     def test_country_level_projects_no_area_alias_or_filter(self):
@@ -245,18 +245,18 @@ class TestFetchUnits:
             active_from=date(2020, 1, 1),
             active_to=date(2021, 1, 1),
             sources=("solar", "wind", "storage"),
-            area_column="region",
+            area_column="state",
         )
         assert [sql for sql, _ in calls] == [
             "SELECT energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, municipality, "
-            "region AS name FROM core.generators "
+            "decommissioning_date, longitude, latitude, state, district, "
+            "state AS name FROM core.generators "
             "WHERE energy_source = ANY(:sources) "
             "AND commissioning_date >= :from "
             "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)",
             "SELECT energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, municipality, "
-            "storage_capacity, region AS name FROM core.storages "
+            "decommissioning_date, longitude, latitude, state, district, "
+            "storage_capacity, state AS name FROM core.storages "
             "WHERE energy_source = ANY(:sources) "
             "AND commissioning_date >= :from "
             "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)",
@@ -288,7 +288,7 @@ class TestFetchUnits:
         )
         assert [sql for sql, _ in calls] == [
             "SELECT energy_source, installed_capacity, commissioning_date, "
-            "decommissioning_date, longitude, latitude, region, municipality "
+            "decommissioning_date, longitude, latitude, state, district "
             "FROM core.generators "
             "WHERE energy_source = ANY(:sources) "
             "AND commissioning_date >= :from "
@@ -305,11 +305,11 @@ class TestFetchUnits:
             active_from=date(2020, 1, 1),
             active_to=date(2021, 1, 1),
             sources=("solar", "storage"),
-            area_column="region",
+            area_column="state",
             area_names=("Berlin",),
         )
         assert all(
-            "AND region = ANY(:area_names)" in sql for sql, _ in calls
+            "AND state = ANY(:area_names)" in sql for sql, _ in calls
         )
         assert [params for _, params in calls] == [
             {
@@ -336,7 +336,7 @@ class TestFetchUnits:
             active_from=date(2020, 1, 1),
             active_to=date(2021, 1, 1),
             sources=(),
-            area_column="region",
+            area_column="state",
         )
         assert calls == []
         assert units.empty
@@ -352,8 +352,8 @@ class TestFetchUnits:
                     "decommissioning_date": None,
                     "longitude": 10.5,
                     "latitude": 50.5,
-                    "region": "Bavaria",
-                    "municipality": None,
+                    "state": "Bavaria",
+                    "district": None,
                     "name": "Bavaria",
                 }]
             ),
@@ -365,8 +365,8 @@ class TestFetchUnits:
                     "decommissioning_date": None,
                     "longitude": 11.5,
                     "latitude": 51.5,
-                    "region": "Berlin",
-                    "municipality": "Berlin",
+                    "state": "Berlin",
+                    "district": "Berlin",
                     "name": "Berlin",
                     "storage_capacity": 800.0,
                 }]
@@ -382,7 +382,7 @@ class TestFetchUnits:
             active_from=date(2020, 1, 1),
             active_to=date(2021, 1, 1),
             sources=("solar", "storage"),
-            area_column="region",
+            area_column="state",
         )
         assert list(units["energy_source"]) == ["solar", "storage"]
         assert list(units["name"]) == ["Bavaria", "Berlin"]
@@ -413,8 +413,8 @@ class TestUnitRecords:
                 "decommissioning_date": None,
                 "longitude": 10.5,
                 "latitude": 50.5,
-                "region": None,
-                "municipality": None,
+                "state": None,
+                "district": None,
                 "name": None,
                 "storage_capacity": float("nan"),
             }]
@@ -424,7 +424,7 @@ class TestUnitRecords:
         assert record["decommissioning_date"] is None
         assert record["name"] is None
         assert record["storage_capacity"] is None
-        assert record["region"] is None
+        assert record["state"] is None
 
     def test_missing_dates_normalize_to_none(self):
         frame = pd.DataFrame(

@@ -153,18 +153,18 @@ and falls back to `DATABASE_URL` on the dev host (`viz/data.py`).
 ## Verify the marts
 
 ```bash
-docker compose exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY region LIMIT 8"
+docker compose exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"
 ```
 
-The three materialized views exist in schema `marts` at region grain
+The three materialized views exist in schema `marts` at state grain
 (`installation_counts`, `generation_capacity`, `storage_capacity`); units with
-no region fall under the `outside` bucket rather than `NULL`.
+no state fall under the `outside` bucket rather than `NULL`.
 
 ## Automated smoke check
 
 `scripts/smoke_etl_container.sh` proves the acceptance criteria on a genuinely
 fresh stack: teardown → seed → healthy PostGIS → containerized `run-all` →
-mart assertions (three views exist, non-empty, no NULL regions, `outside`
+mart assertions (three views exist, non-empty, no NULL states, `outside`
 bucket present) → idempotent `viz_reader` re-provisioning + read checks over
 the app's TCP path → viz up and answering `/_stcore/health` on port 8501. The
 `metabase` service's absence is asserted too. Re-run it any time the packaging

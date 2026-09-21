@@ -57,8 +57,8 @@ class TestSingleAreaTitle:
     def test_district_level_prefixes_the_name(self):
         assert single_area_title("Districts", "Calw") == "District Calw"
 
-    def test_municipality_level_prefixes_the_name(self):
-        assert single_area_title("Municipalities", "Calw") == "Municipality Calw"
+    def test_state_level_prefixes_the_name(self):
+        assert single_area_title("States", "Berlin") == "State Berlin"
 
     def test_country_level_uses_the_bare_name(self):
         assert single_area_title("Germany", "Germany") == "Germany"
@@ -85,7 +85,7 @@ class TestLevelConfig:
         }
 
     def test_every_chooser_label_has_a_level(self):
-        assert list(LEVEL_INDEX) == list(MAP_LEVELS)
+        assert list(LEVEL_INDEX) == [label.split(" ")[0] for label in MAP_LEVELS]
 
     def test_initial_level_is_the_country(self):
         assert LEVEL_INDEX[INITIAL_LEVEL] == 0
@@ -97,9 +97,9 @@ class TestLevelConfig:
 class TestSingularPrefixMap:
     def test_singular_prefixes_cover_the_sub_country_levels(self):
         assert SINGULAR_LEVEL_PREFIX == {
+            "States": "State",
             "Regions": "Region",
             "Districts": "District",
-            "Municipalities": "Municipality",
         }
 
 

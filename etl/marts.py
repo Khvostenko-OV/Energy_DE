@@ -1,14 +1,14 @@
-"""Marts layer: three stored wide pivots at region grain (issue #9).
+"""Marts layer: three stored wide pivots at state grain (issue #9).
 
 The marts are Postgres `MATERIALIZED VIEW`s (ADR 0003) computed from the
-active units in core — `marts.installation_counts` (region × energy_source,
-counting active units), `marts.generation_capacity` (region × energy_source,
+active units in core — `marts.installation_counts` (state × energy_source,
+counting active units), `marts.generation_capacity` (state × energy_source,
 summing active generator installed_capacity) and `marts.storage_capacity`
-(region × source_type, summing active storage storage_capacity).  They are
+(state × source_type, summing active storage storage_capacity).  They are
 built and refreshed on demand by `python -m etl marts`; after refresh the
 stored pivots are verified against a fresh aggregation of core and any drift
-is reported as a failure.  A region-null unit (a load-stage collision that
-still reaches core) is reported under the OUTSIDE_REGION bucket rather than a
+is reported as a failure.  A state-null unit (a load-stage collision that
+still reaches core) is reported under the OUTSIDE_STATE bucket rather than a
 NULL key.
 """
 
@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
-from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_REGION
+from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_STATE
 from etl.db_utils import _ensure_schema, _table_exists
 from etl.reports import MartsReport
 from etl.verify import _verify_marts
@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 class _MartDefinition:
     """One stored-pivot definition: key column, value column, and SQL.
 
-    ``select_sql`` must produce exactly the columns ``(region, pivot, value)``
+    ``select_sql`` must produce exactly the columns ``(state, pivot, value)``
     under those final aliases.  It is used both to create the materialized
     view and as the live expected aggregation for verification, so the check
     is always "does the stored pivot reconcile to current core?".  The shared
@@ -53,42 +53,42 @@ MART_DEFINITIONS: dict[str, _MartDefinition] = {
         pivot="energy_source",
         value="installation_count",
         select_sql=f"""
-            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
+            SELECT COALESCE(state, '{OUTSIDE_STATE}') AS state,
                    energy_source, COUNT(*) AS installation_count
             FROM (
-                SELECT region, energy_source FROM {CORE_SCHEMA}.generators
+                SELECT state, energy_source FROM {CORE_SCHEMA}.generators
                 WHERE {_ACTIVE}
                 UNION ALL
-                SELECT region, energy_source FROM {CORE_SCHEMA}.storages
+                SELECT state, energy_source FROM {CORE_SCHEMA}.storages
                 WHERE {_ACTIVE}
             ) active_units
-            GROUP BY COALESCE(region, '{OUTSIDE_REGION}'), energy_source
+            GROUP BY COALESCE(state, '{OUTSIDE_STATE}'), energy_source
         """,
     ),
     "generation_capacity": _MartDefinition(
         pivot="energy_source",
         value="generation_capacity",
         select_sql=f"""
-            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
+            SELECT COALESCE(state, '{OUTSIDE_STATE}') AS state,
                    energy_source,
                    ROUND(COALESCE(SUM(installed_capacity), 0)::numeric, 6)
                        AS generation_capacity
             FROM {CORE_SCHEMA}.generators
             WHERE {_ACTIVE}
-            GROUP BY COALESCE(region, '{OUTSIDE_REGION}'), energy_source
+            GROUP BY COALESCE(state, '{OUTSIDE_STATE}'), energy_source
         """,
     ),
     "storage_capacity": _MartDefinition(
         pivot="source_type",
         value="storage_capacity",
         select_sql=f"""
-            SELECT COALESCE(region, '{OUTSIDE_REGION}') AS region,
+            SELECT COALESCE(state, '{OUTSIDE_STATE}') AS state,
                    storage_type AS source_type,
                    ROUND(COALESCE(SUM(storage_capacity), 0)::numeric, 6)
                        AS storage_capacity
             FROM {CORE_SCHEMA}.storages
             WHERE {_ACTIVE}
-            GROUP BY COALESCE(region, '{OUTSIDE_REGION}'), storage_type
+            GROUP BY COALESCE(state, '{OUTSIDE_STATE}'), storage_type
         """,
     ),
 }

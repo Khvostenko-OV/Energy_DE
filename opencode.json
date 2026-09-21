@@ -33,6 +33,7 @@
       "psql *": "allow",
       "head *": "allow",
       "tail *": "allow",
+      "test *": "allow",
       "sleep *": "allow",
       "source *": "allow",
       "python *": "allow",

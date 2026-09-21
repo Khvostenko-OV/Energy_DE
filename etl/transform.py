@@ -42,12 +42,12 @@ def transform_sources(*sources: str) -> TransformReport:
     (or calling with no arguments) transforms every source.  Each source
     reads raw.<source>_<YYYYMMDD>_<n> (the latest version), assigns units
     their staging identity (natural key from reference_id, synthetic hash
-    where absent), enriches with region/district/municipality via a spatial
+    where absent), enriches with state/region/district via a spatial
     join against the boundary reference layers, applies the quality gate,
     and decomposes the whitelisted secondary attributes into normalized
     property tables (the rest staying in the reduced `secondary_attributes`
     json).  A bad quality row stays in staging but is never a candidate for
-    core; a region-null row is not bad quality (spec v2.2 leaves that to the
+    core; a state-null row is not bad quality (spec v2.2 leaves that to the
     load stage's collision checks).  The per-source reports are merged into
     one aggregate report.
     """
@@ -89,8 +89,6 @@ def _transform_source(source: str) -> TransformReport:
 
         log.info("Transforming %s from %s.%s", source, RAW_SCHEMA, raw_table)
         t = time.perf_counter()
-        # Boundaries (and loaded_files) live in the service schema, not raw;
-        # see the extract implementation and the review of extract v2.
         df = gpd.read_postgis(
             f'SELECT * FROM {RAW_SCHEMA}."{raw_table}"', engine, geom_col="geometry"
         )
@@ -212,7 +210,7 @@ def _merge_transform_reports(
     merged.bad_quality = sum(r.bad_quality for r in reports)
     merged.properties_count = sum(r.properties_count for r in reports)
     merged.links_count = sum(r.links_count for r in reports)
-    for level in ("region", "district", "municipality"):
+    for level in ("state", "region", "district"):
         merged.join_unmapped[level] = sum(r.join_unmapped.get(level, 0) for r in reports)
     for r in reports:
         for reason, count in r.quality_reasons.items():
@@ -269,8 +267,8 @@ def _synthetic_unit_id(source: str, x, y, capacity, commissioning) -> str:
 def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:
     """Return one list of failed-check descriptions per row.
 
-    Checks follow the spec order: capacity, dates, coordinates. A region-null
-    row is deliberately not flagged here — "region is null" is a load-stage
+    Checks follow the spec order: capacity, dates, coordinates. A state-null
+    row is deliberately not flagged here — "outside location" is a load-stage
     collision (spec v2.2), not a staging bad-quality reason. Capacity is its
     own gate with a null and a non-positive check. A row nested in several
     polygons, nulls, and geometry/coordinate disagreements all resolve to

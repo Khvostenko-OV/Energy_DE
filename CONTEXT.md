@@ -57,20 +57,20 @@ A generated staging unit_id for units lacking a reference ID (39 solar rows), de
 ### Geography
 
 **Boundaries**:
-The single level-coded `service.boundaries` table of administrative and maritime polygons (0 country outline, 1 regions + EEZ, 2 districts, 3 municipalities) used to assign each unit its region, district, and municipality by spatial join.
+The single level-coded `service.boundaries` table of administrative and maritime polygons (0 country outline, 1 states + EEZ, 2 regions, 3 districts) used to assign each unit its state, region, and district by spatial join.
+
+**State**:
+A Bundesland (federal state) or, for offshore units, the sea/EEZ area they fall in. A unit that joins to no boundary row keeps a null state, is flagged `collision`, and is reported under the "outside" bucket in the marts.
+_Avoid_: Land, Region
 
 **Region**:
-A Bundesland (federal state) or, for offshore units, the sea/EEZ area they fall in. A unit that joins to no boundary row keeps a null region, is flagged `collision`, and is reported under the "outside" bucket in the marts.
-_Avoid_: State, Land
+A Regierungsbezirk (administrative region).
 
 **District**:
 A Landkreis (administrative district).
 
-**Municipality**:
-A Gemeinde (municipality).
-
 **Offshore**:
-A wind unit located at sea, enriched against the EEZ region layer rather than onshore boundaries.
+A wind unit located at sea, enriched against the EEZ state layer rather than onshore boundaries.
 
 **Coordinates**:
 The WGS-84 longitude/latitude pair of a unit. Carried as `x_coordinates` / `y_coordinates` in raw and staging, and as `longitude` / `latitude` in core, where it rides alongside the retained `geometry` point.
@@ -91,13 +91,13 @@ The extract layer: versioned per-source unit tables with secondary attributes fo
 The operational-metadata schema, deliberately separate from the versioned raw datalake: the `loaded_files` log (see Load signature) and the non-versioned level-coded `boundaries` reference layer used by the transform spatial joins. Non-versioned by design; only the unit tables are versioned.
 
 **Staging**:
-The transform layer: raw rows enriched with region, district, and municipality via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`). Staging carries both the `geometry` point and explicit `x_coordinates` / `y_coordinates`.
+The transform layer: raw rows enriched with state, region, and district via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`). Staging carries both the `geometry` point and explicit `x_coordinates` / `y_coordinates`.
 
 **Core**:
 The consolidated layer: `generators` and `storages`, each unit appearing exactly once, holding a serial surrogate key, the reduced `secondary_attributes` jsonb, the retained `geometry` point plus `longitude` / `latitude`, and collision flags. Core rows are updated in place and never deleted.
 
 **Marts**:
-The aggregation layer: three Postgres materialized views (installation counts, generation capacity, storage capacity) at region grain, computed from active units only.
+The aggregation layer: three Postgres materialized views (installation counts, generation capacity, storage capacity) at state grain, computed from active units only.
 
 **Properties**:
 Normalized (name, value) attribute pairs of a unit, held per unit-kind — `generator_properties` for generators, `storage_properties` for storages — linked to the unit through `generator_units_properties` / `storage_units_properties` (ADR 0006). Also the home of quality annotations (`bad_quality`, `collision`, `close_to`).
@@ -110,11 +110,11 @@ _Avoid_: Properties (column name — now a table, not a column)
 ### Quality
 
 **Bad quality**:
-A staging flag on a record failing a transform-level check (installed_capacity ≤ 0 or null; decommissioning_date before commissioning_date; coordinates conflicting with geometry). The failing record is excluded from core, and a `bad_quality` property link carries the newline-joined descriptions. Region-null is deliberately not a staging check — it is a load-stage collision.
+A staging flag on a record failing a transform-level check (installed_capacity ≤ 0 or null; decommissioning_date before commissioning_date; coordinates conflicting with geometry). The failing record is excluded from core, and a `bad_quality` property link carries the newline-joined descriptions. State-null is deliberately not a staging check — it is a load-stage collision.
 _Avoid_: Error, anomaly
 
 **Collision**:
-A core flag on a unit flagged by a load-level check: two `geo_accuracy = 1` units less than 10 m apart, a unit the spatial join left outside every boundary (region null), an onshore-labelled unit inside the sea, or a storage with `storage_capacity ≤ 0` or null. Collision rows remain in core, annotated by property links (`collision`, and `close_to` naming the neighbouring unit).
+A core flag on a unit flagged by a load-level check: two `geo_accuracy = 1` units less than 10 m apart, a unit the spatial join left outside every boundary (state null, reason "outside location"), an onshore-labelled unit inside the sea, or a storage with `storage_capacity ≤ 0` or null. Collision rows remain in core, annotated by property links (`collision`, and `close_to` naming the neighbouring unit).
 _Avoid_: Issue, error, anomaly
 
 **Close-to**:

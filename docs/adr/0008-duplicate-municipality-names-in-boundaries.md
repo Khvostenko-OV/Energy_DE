@@ -1,6 +1,6 @@
-# Duplicate municipality names in `service.boundaries` are a documented collision, fix deferred
+# Duplicate district names in `service.boundaries` are a documented collision, fix deferred
 
-The seeded `service.boundaries` municipality layer (level 3) carries 27 duplicated names — 428 rows for 401 unique names — each pair being two distinct, non-identical polygons that share a name: one gemeinde/Stadt-sized and one Kreis/Kreisfreie-Stadt-sized (e.g. "Cuxhaven": 0.1 km² and 2,059 km²; "Dithmarschen": 15 km² and 1,428 km²; "Landkreis Rostock": 0.1 km² and 3,429 km²), all `country_iso='DEU'` and `ST_Equals` false. The collision is recorded here, not fixed: the remedy (drop the county-sized polygon at load, de-duplicate name-based joins in the ETL/viz, or key boundaries by more than `name`) is still under consideration. Levels 0–2 have no duplicates, so only the Municipalities grain is affected.
+The seeded `service.boundaries` district (Kreis) layer (level 3) carries 27 duplicated names — 428 rows for 401 unique names — each pair being two distinct, non-identical polygons that share a name: one gemeinde/Stadt-sized and one Kreis/Kreisfreie-Stadt-sized (e.g. "Cuxhaven": 0.1 km² and 2,059 km²; "Dithmarschen": 15 km² and 1,428 km²; "Landkreis Rostock": 0.1 km² and 3,429 km²), all `country_iso='DEU'` and `ST_Equals` false. The collision is recorded here, not fixed: the remedy (drop the county-sized polygon at load, de-duplicate name-based joins in the ETL/viz, or key boundaries by more than `name`) is still under consideration. Levels 0–2 have no duplicates, so only the Districts grain is affected.
 
 ## Consequences
 

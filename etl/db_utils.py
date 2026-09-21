@@ -83,9 +83,9 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
                     reference_date       TIMESTAMP,
                     secondary_attributes TEXT,
                     country_iso          TEXT,
+                    state                TEXT,
                     region               TEXT,
                     district             TEXT,
-                    municipality         TEXT,
                     bad_quality          BOOLEAN NOT NULL
                 )
                 """
@@ -149,9 +149,9 @@ def _create_core_storages(engine: Engine) -> None:
                     reference_date       TIMESTAMP,
                     secondary_attributes TEXT,
                     country_iso          TEXT,
+                    state                TEXT,
                     region               TEXT,
                     district             TEXT,
-                    municipality         TEXT,
                     collision            BOOLEAN NOT NULL DEFAULT false
                 )
                 """
@@ -229,9 +229,9 @@ def _create_core_generators(engine: Engine) -> None:
                     reference_date       TIMESTAMP,
                     secondary_attributes TEXT,
                     country_iso          TEXT,
+                    state                TEXT,
                     region               TEXT,
                     district             TEXT,
-                    municipality         TEXT,
                     collision            BOOLEAN NOT NULL DEFAULT false
                 )
                 """

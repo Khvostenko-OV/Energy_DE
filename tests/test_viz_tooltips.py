@@ -7,7 +7,7 @@ template, because Streamlit's deckgl frontend escapes interpolated values.
 columns in one pass.  The generator and storage contracts differ by exactly
 one line (storage capacity).  The tests pin the agreed rendering: titled
 source, kW/kWh formatting, ISO dates ("active" when null), and the
-region · municipality address with missing parts dropped.
+state · district address with missing parts dropped.
 """
 
 from datetime import date
@@ -32,9 +32,9 @@ def generator_row(**overrides):
         "decommissioning_date": None,
         "longitude": 10.5,
         "latitude": 50.5,
-        "region": "Bavaria",
-        "district": "Munich district",
-        "municipality": "Munich",
+        "state": "Bavaria",
+        "region": "Upper Bavaria",
+        "district": "Munich",
     }
     row.update(overrides)
     return row
@@ -83,13 +83,13 @@ class TestGeneratorTooltip:
         text = unit_tooltip(generator_row(decommissioning_date=date(2020, 12, 31)))
         assert "Decommissioning: 2020-12-31" in text
 
-    def test_location_joins_region_and_municipality(self):
+    def test_location_joins_state_and_district(self):
         text = unit_tooltip(generator_row())
         assert "Bavaria · Munich" in text
         assert "district" not in text.lower()
 
     def test_missing_location_parts_are_dropped(self):
-        text = unit_tooltip(generator_row(municipality=None))
+        text = unit_tooltip(generator_row(district=None))
         assert "Bavaria" in text
         assert " · " not in text
 

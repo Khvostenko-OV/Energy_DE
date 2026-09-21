@@ -92,7 +92,7 @@ AREA_FILL_COLOR_ACCESSOR = "properties.fill_color"
 # readable over both the base map and the capacity fill.
 AREA_LINE_COLOR: tuple[int, int, int, int] = (90, 100, 112, 200)
 
-# Minimum on-screen outline width, so district/municipality borders don't
+# Minimum on-screen outline width, so region/district borders don't
 # vanish into the antialiasing at overview zooms.
 AREA_LINE_WIDTH_MIN_PX = 1
 

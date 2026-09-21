@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 
 import click
+import time
 
 from etl.config import SOURCE_NAMES, boundaries_manifest, sources_data_dir
 from etl.extract import extract_boundaries, extract_source
@@ -21,6 +22,36 @@ def cli(verbose: bool):
 
 @cli.command()
 @click.argument("target", required=False)
+@click.option("-f", "--force", is_flag=True, help="Reload boundaries whose load signature is already logged.")
+def boundaries(target: str | None, force: bool):
+    """Load boundary reference files listed in a manifest into service.boundaries.
+
+    TARGET is the manifest file path (defaults to the configured boundaries
+    manifest). Each file name on its own line is resolved against the
+    manifest's directory; the first file replaces the table and the rest
+    append, the level being read from each file's data. Files already logged
+    in loaded_files are skipped unless --force is given. Area is then computed
+    in km² via PostGIS.
+    """
+    manifest = Path(target) if target else boundaries_manifest()
+    click.echo(f"\nLoading boundaries from {manifest}")
+    start = time.perf_counter()
+
+    if not manifest.is_file():
+        raise click.BadParameter("Manifest not found!")
+
+    report = extract_boundaries(manifest, force=force)
+
+    click.echo("\nBoundaries report:")
+    click.echo(report.summary())
+    click.echo(f"\nLoading boundaries complete. Total time: {(time.perf_counter() - start):.2f} seconds.")
+
+    if not report.passed:
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("target", required=False)
 @click.option("-f", "--force", is_flag=True, help="Reload files whose load signature is already logged.")
 def extract(target: str | None, force: bool):
     """Extract unit sources found in a folder into versioned raw tables.
@@ -33,10 +64,14 @@ def extract(target: str | None, force: bool):
     """
     log = logging.getLogger(__name__)
 
+    click.echo("\nStart Extraction...")
+    start = time.perf_counter()
+
     data_dir = Path(target) if target else sources_data_dir()
     if not data_dir.is_dir():
         raise click.BadParameter(f"Sources folder not found: {data_dir}")
 
+    log.info("Extracting energy sources from %s", data_dir.name)
     by_source: dict[str, Path] = {}
     skipped: list[str] = []
     for f in sorted(data_dir.glob("*.gpkg")):
@@ -62,34 +97,9 @@ def extract(target: str | None, force: bool):
     for r in reports:
         click.echo(f"\nExtraction report ({r.source}):")
         click.echo(r.summary())
+    click.echo(f"\nExtraction complete. Total time: {(time.perf_counter() - start):.2f} seconds.")
 
     if any(not r.passed for r in reports):
-        raise SystemExit(1)
-
-
-@cli.command()
-@click.argument("target", required=False)
-@click.option("-f", "--force", is_flag=True, help="Reload boundaries whose load signature is already logged.")
-def boundaries(target: str | None, force: bool):
-    """Load boundary reference files listed in a manifest into service.boundaries.
-
-    TARGET is the manifest file path (defaults to the configured boundaries
-    manifest). Each file name on its own line is resolved against the
-    manifest's directory; the first file replaces the table and the rest
-    append, the level being read from each file's data. Files already logged
-    in loaded_files are skipped unless --force is given. Area is then computed
-    in km² via PostGIS.
-    """
-    manifest = Path(target) if target else boundaries_manifest()
-    if not manifest.is_file():
-        raise click.BadParameter(f"Manifest not found: {manifest}")
-
-    report = extract_boundaries(manifest, force=force)
-
-    click.echo("\nBoundaries report:")
-    click.echo(report.summary())
-
-    if not report.passed:
         raise SystemExit(1)
 
 
@@ -106,17 +116,25 @@ def transform(sources):
     every source.  With no arguments, all sources are transformed.  Builds
     the staging row (unit_id — natural from reference_id or synthetic where
     absent, canonical energy_source, geo_accuracy, country_iso, geometry),
-    spatially joins boundaries to assign region/district/municipality, runs
+    spatially joins boundaries to assign state/region/district, runs
     the quality gate, and decomposes the whitelisted secondary attributes
     into normalized properties (the rest staying in the reduced
-    secondary_attributes json). A region-null row is not bad quality
+    secondary_attributes json). A state-null row is not bad quality
     (spec v2.2). Storage staging additionally carries its storage shape
     (storage_type, storage_capacity).
     """
+
+    if sources:
+        click.echo(f"\nStart transforming for {' '.join(sources)}.")
+    else:
+        click.echo("\nRunning transform stage for all sources...")
+    start = time.perf_counter()
+
     report = transform_sources(*sources) if sources else transform_sources()
 
     click.echo(f"\nTransform report ({report.source}):")
     click.echo(report.summary())
+    click.echo(f"\nTransform complete. Total time: {(time.perf_counter() - start):.2f} seconds.")
 
     if not report.passed:
         raise SystemExit(1)
@@ -131,6 +149,9 @@ def load():
     surrogate key, collision checks, and property-link annotation.  The load
     is incremental and idempotent.
     """
+    click.echo("\nRunning load stage for generators and storages...")
+    start = time.perf_counter()
+
     reports = [
         load_generators(),
         load_storages(),
@@ -139,6 +160,7 @@ def load():
     for report in reports:
         click.echo(f"\nLoad report ({report.target}):")
         click.echo(report.summary())
+    click.echo(f"\nLoad complete. Total time: {(time.perf_counter() - start):.2f} seconds.")
 
     if any(not report.passed for report in reports):
         raise SystemExit(1)
@@ -150,10 +172,11 @@ def marts():
 
     Ensures the marts schema and the three stored pivots exist
     (installation_counts, generation_capacity, storage_capacity), refreshes
-    them from core at region grain (active units only, region-null units
+    them from core at state grain (active units only, state-null units
     under the "outside" bucket), and verifies the stored pivots reconcile to
     the live core aggregates — failing loudly and exiting non-zero on drift.
     """
+    click.echo("\nStart creating marts materialized views...")
     report = build_marts()
 
     click.echo(f"\nMarts report:")
@@ -166,25 +189,22 @@ def marts():
 @cli.command()
 @click.option("-f", "--force", is_flag=True, help="Reload files whose load signature is already logged.")
 def run_all(force: bool):
-    """Run all ETL stages."""
+    """Run all ETL stages"""
+    click.echo("\n==== Run all ETL stages ====")
+    start = time.perf_counter()
     ctx = click.get_current_context()
 
-    click.echo("Loading boundaries...")
     ctx.invoke(boundaries, force=force)
 
-    click.echo("\nRunning extract stage...")
     ctx.invoke(extract, force=force)
 
-    click.echo("\nRunning transform stage for all sources...")
     ctx.invoke(transform)
 
-    click.echo("\nRunning load stage for generators and storages...")
     ctx.invoke(load)
 
-    click.echo("\nRunning marts stage...")
     ctx.invoke(marts)
 
-    click.echo("\nAll stages complete.")
+    click.echo(f"\n==== All stages complete. Total time: {(time.perf_counter() - start):.2f} seconds.")
 
 
 if __name__ == "__main__":
