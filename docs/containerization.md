@@ -60,8 +60,7 @@ defaults; anything real replaces them at seed time and stays in the volume.
 ## One-time seed (per machine)
 
 Prerequisites: docker; the private raw data set present under `data/sources/`
-and `data/boundaries/` (including the `sources.txt` / `boundaries.txt`
-manifests).
+and `data/boundaries/` (including the `boundaries.txt` manifest).
 
 ```bash
 scripts/seed_data_volume.sh          # defaults to volume `etl_data`

@@ -13,7 +13,6 @@ from etl.config import get_engine
 from etl.db_schema import (
     BOUNDARY_COLUMNS,
     BOUNDARY_COLUMN_MAPPING,
-    BOUNDARY_FILE_LEVELS,
     RAW_COLUMNS,
     RAW_COLUMN_MAPPING,
     RAW_SCHEMA,
@@ -193,9 +192,10 @@ def extract_boundaries(manifest: Path, force: bool = False) -> BoundariesReport:
     """Load the boundary reference files listed in a manifest into service.boundaries.
 
     MANIFEST lists one germany_*.gpkg file per line, resolved against the
-    manifest's directory; each file's level (0-3) is read from its name. Every
-    file is read into a GeoDataFrame, stripped to the raw column set (iso is
-    mapped to country_iso), stamped with its level and written via
+    manifest's directory; each file's level (0-3) is read from its `level`
+    column, and a file without one fails loudly rather than mislabelling.
+    Every file is read into a GeoDataFrame, stripped to the raw column set
+    (iso is mapped to country_iso), stamped with its level and written via
     to_postgis: the first file replaces the table, the rest append. Area is
     computed in km² via PostGIS.
 
@@ -229,21 +229,22 @@ def extract_boundaries(manifest: Path, force: bool = False) -> BoundariesReport:
         else:
             first = True
             for filename in filenames:
-                stem = Path(filename).stem
-                level = (
-                    BOUNDARY_FILE_LEVELS.get(stem[len("germany_"):])
-                    if stem.startswith("germany_") else None
-                )
-                if level is None:
-                    log.warning("Skipping %s: cannot map to a boundary level", filename)
-                    continue
                 f = manifest.parent / filename
                 stat = f.stat()
-                log.info("Loading %s as level %d", filename, level)
+                log.info("Loading %s", filename)
 
                 gdf = gpd.read_file(f)
                 if "name" not in gdf.columns:
                     raise ValueError(f"{filename} has no 'name' column")
+                if "level" not in gdf.columns:
+                    raise ValueError(f"{filename} has no 'level' column")
+                levels = gdf["level"].unique()
+                if len(levels) != 1:
+                    raise ValueError(
+                        f"{filename} must carry a single 'level' value, "
+                        f"found {sorted(levels.tolist())}"
+                    )
+                level = int(levels[0])
 
                 out = gdf.rename(columns=BOUNDARY_COLUMN_MAPPING)
                 drop = [c for c in out.columns if c not in BOUNDARY_COLUMNS]

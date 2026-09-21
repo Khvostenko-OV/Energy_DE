@@ -39,10 +39,10 @@ The data is git-ignored, so it must be copied from the machine that holds it:
 scp -r data/sources data/boundaries user@server:/path/to/Energy_DE/data/
 ```
 
-On the server, confirm the manifests came along:
+On the server, confirm the data came along:
 
 ```bash
-ls data/sources/sources.txt data/boundaries/boundaries.txt
+ls data/sources data/boundaries/boundaries.txt
 ```
 
 ## 4. Set credentials

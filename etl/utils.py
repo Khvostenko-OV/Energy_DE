@@ -11,7 +11,27 @@ from sqlalchemy.engine import Engine
 from etl.config import SOURCE_NAMES
 from etl.db_schema import RAW_SCHEMA, SERVICE_SCHEMA
 
-FILENAME_PATTERN = r"(" + "|".join(SOURCE_NAMES) + ")"
+# Filename stem per canonical source key (ordered as SOURCE_NAMES). The ETL
+# discovers unit sources by filename, so the two rigs that look like real
+# sources but are not loadable — Solar_Energy_Polygons and Cogeneration_Units —
+# simply do not match the anchored pattern below.
+FILENAMES_BY_SOURCE = {
+    "bio": "Bioenergy",
+    "gas": "Gas_Producer",
+    "hydro": "Hydropower",
+    "solar": "Solar_Energy",
+    "wind": "Wind_Energy",
+    "storage": "Energy_Storage",
+}
+
+_FILENAME_BY_UPPER_PREFIX = {
+    prefix.upper(): source for source, prefix in FILENAMES_BY_SOURCE.items()
+}
+
+FILENAME_PATTERN = re.compile(
+    r"^(" + "|".join(FILENAMES_BY_SOURCE.values()) + r")_V\d{8}\.gpkg$",
+    re.IGNORECASE,
+)
 
 
 def _raw_table_versions(engine: Engine, source: str) -> list[tuple[str, int, str]]:
@@ -105,16 +125,19 @@ def _drop_duplicate_reference_ids(df: pandas.DataFrame) -> int:
 
 
 def _source_from_filename(filename: str) -> str:
-    """Map a source file name to its canonical source key via regex.
+    """Map a source file name to its canonical source key via an anchored regex.
 
-    The match is case-insensitive, so 'Bioenergy_V20260203.gpkg' maps to
-    'bio', 'Energy_Storage_V20260203.gpkg' to 'storage', and so on.
+    Only the six known `_V<YYYYMMDD>.gpkg` source files match (case-
+    insensitive): 'Bioenergy_V20260203.gpkg' maps to 'bio',
+    'Energy_Storage_V20260203.gpkg' to 'storage', and so on. Look-alikes such
+    as 'Solar_Energy_Polygons_V20260203.gpkg' and 'Cogeneration_Units_...'
+    fail the anchored suffix match, so a folder glob cannot load them.
     Returns an empty string when the file name cannot be mapped.
     """
-    match = re.search(FILENAME_PATTERN, filename, re.IGNORECASE)
+    match = FILENAME_PATTERN.match(filename)
     if not match:
         return ""
-    return match.group(1).lower()
+    return _FILENAME_BY_UPPER_PREFIX[match.group(1).upper()]
 
 
 def _read_manifest(manifest: Path) -> list[str]:

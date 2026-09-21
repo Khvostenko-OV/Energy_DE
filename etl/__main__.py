@@ -3,12 +3,12 @@ from pathlib import Path
 
 import click
 
-from etl.config import SOURCE_NAMES
+from etl.config import SOURCE_NAMES, boundaries_manifest, sources_data_dir
 from etl.extract import extract_boundaries, extract_source
 from etl.load import load_generators, load_storages
 from etl.marts import build_marts
 from etl.transform import transform_sources
-from etl.utils import _read_manifest
+from etl.utils import _source_from_filename
 
 
 @click.group()
@@ -20,28 +20,44 @@ def cli(verbose: bool):
 
 
 @cli.command()
-@click.argument("target")
+@click.argument("target", required=False)
 @click.option("-f", "--force", is_flag=True, help="Reload files whose load signature is already logged.")
-def extract(target: str, force: bool):
-    """Extract unit sources listed in a manifest file.
+def extract(target: str | None, force: bool):
+    """Extract unit sources found in a folder into versioned raw tables.
 
-    TARGET is the manifest file path. Each file name on its own line is
-    resolved against the manifest's directory. Files already logged in
-    loaded_files are skipped unless --force is given.
+    TARGET is the sources folder (defaults to the configured sources folder).
+    Each *_V<YYYYMMDD>.gpkg matching one of the six unit sources is extracted
+    in SOURCE_NAMES order; look-alikes such as Solar_Energy_Polygons and
+    Cogeneration_Units, and any other files, are logged and skipped. Files
+    already logged in loaded_files are skipped unless --force is given.
     """
     log = logging.getLogger(__name__)
 
-    manifest = Path(target)
-    if not manifest.is_file():
-        raise click.BadParameter(f"Manifest not found: {target}")
+    data_dir = Path(target) if target else sources_data_dir()
+    if not data_dir.is_dir():
+        raise click.BadParameter(f"Sources folder not found: {data_dir}")
 
-    data_dir = manifest.parent
-    filenames = _read_manifest(manifest)
+    by_source: dict[str, Path] = {}
+    skipped: list[str] = []
+    for f in sorted(data_dir.glob("*.gpkg")):
+        source = _source_from_filename(f.name)
+        if not source:
+            skipped.append(f.name)
+            continue
+        if source in by_source:
+            log.warning(
+                "Multiple files map to source %s: keeping %s, ignoring %s",
+                source, by_source[source].name, f.name,
+            )
+            continue
+        by_source[source] = f
+    if skipped:
+        log.info("Skipping unrecognised file(s): %s", ", ".join(skipped))
 
-    log.info("Extracting %d source file(s) from %s", len(filenames), manifest)
-    reports = [
-        extract_source(data_dir / f, force=force) for f in filenames
-    ]
+    filenames = [by_source[s] for s in SOURCE_NAMES if s in by_source]
+    log.info("Extracting %d source file(s) from %s", len(filenames), data_dir)
+
+    reports = [extract_source(f, force=force) for f in filenames]
 
     for r in reports:
         click.echo(f"\nExtraction report ({r.source}):")
@@ -52,19 +68,21 @@ def extract(target: str, force: bool):
 
 
 @cli.command()
-@click.argument("target")
+@click.argument("target", required=False)
 @click.option("-f", "--force", is_flag=True, help="Reload boundaries whose load signature is already logged.")
-def boundaries(target: str, force: bool):
+def boundaries(target: str | None, force: bool):
     """Load boundary reference files listed in a manifest into service.boundaries.
 
-    TARGET is the manifest file path. Each file name on its own line is
-    resolved against the manifest's directory; the first file replaces the
-    table and the rest append. Files already logged in loaded_files are
-    skipped unless --force is given. Area is then computed in km² via PostGIS.
+    TARGET is the manifest file path (defaults to the configured boundaries
+    manifest). Each file name on its own line is resolved against the
+    manifest's directory; the first file replaces the table and the rest
+    append, the level being read from each file's data. Files already logged
+    in loaded_files are skipped unless --force is given. Area is then computed
+    in km² via PostGIS.
     """
-    manifest = Path(target)
+    manifest = Path(target) if target else boundaries_manifest()
     if not manifest.is_file():
-        raise click.BadParameter(f"Manifest not found: {target}")
+        raise click.BadParameter(f"Manifest not found: {manifest}")
 
     report = extract_boundaries(manifest, force=force)
 
@@ -152,10 +170,10 @@ def run_all(force: bool):
     ctx = click.get_current_context()
 
     click.echo("Loading boundaries...")
-    ctx.invoke(boundaries, target="data/boundaries/boundaries.txt", force=force)
+    ctx.invoke(boundaries, force=force)
 
     click.echo("\nRunning extract stage...")
-    ctx.invoke(extract, target="data/sources/sources.txt", force=force)
+    ctx.invoke(extract, force=force)
 
     click.echo("\nRunning transform stage for all sources...")
     ctx.invoke(transform)

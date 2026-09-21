@@ -57,6 +57,19 @@ raw datalake (ADR 0004), quality annotations as property links (ADR 0005), per-k
 
 See `CONTEXT.md` for the glossary and `docs/adr/` for the rationale behind these choices.
 
+## Configuration
+
+`extract` and `boundaries` take their target from two env vars with repo-root
+defaults, so they run with **no arguments** — an explicit `TARGET` always wins:
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `SOURCES_DATA_DIR` | `<repo>/data/sources` | folder scanned for `*_V<YYYYMMDD>.gpkg` unit-source files (the six sources in `SOURCE_NAMES` order; `Solar_Energy_Polygons` / `Cogeneration_Units` look-alikes are logged and skipped) |
+| `BOUNDARIES_MANIFEST` | `<repo>/data/boundaries/boundaries.txt` | manifest listing the `germany_*.gpkg` boundary files, each file's `level` read from its data |
+
+Both are documented (commented) in `.env.example`. `run-all` uses the same
+configured paths, so a bare `python -m etl run-all` needs no arguments at all.
+
 ## Deploy
 
 Two supported ways to run the stack; the containerized one is the deploy path.

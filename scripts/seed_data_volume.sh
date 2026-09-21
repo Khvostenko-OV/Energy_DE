@@ -3,7 +3,7 @@
 # (issues #13, #28).
 #
 # Copies the private raw data set (data/sources + data/boundaries, including the
-# manifest files) and the connection settings into a detached Docker named
+# boundaries manifest) and the connection settings into a detached Docker named
 # volume. The pipeline container mounts that volume at /app/data and reads the
 # connection settings from docker.env before running the CLI; the viz container
 # mounts the same volume and reads the app's read-only role connection
