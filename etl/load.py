@@ -236,9 +236,16 @@ def _load(kind: _CoreKind) -> LoadReport:
         if has_changes:
             log.info("Running collision checks...")
             t = time.perf_counter()
-            _reset_collision_annotation(engine, affected_ids=affected, kind=kind)
+            collision_affected = (
+                None
+                if affected is None
+                else _expand_collision_affected(engine, affected, kind)
+            )
+            _reset_collision_annotation(
+                engine, affected_ids=collision_affected, kind=kind
+            )
             collision_df, close_units = _detect_collisions(
-                engine, affected_ids=affected, kind=kind
+                engine, affected_ids=collision_affected, kind=kind
             )
             report.collisions = len(collision_df)
             report.collision_links = _write_collision_links(
@@ -603,17 +610,14 @@ def _detect_collisions(
     return pandas.DataFrame(rows, columns=["unit_id", "reasons"]), close_units
 
 
-def _detect_close_location(
+def _close_location_pairs(
     engine: Engine,
-    collision_units: dict[int, list[str]],
-    close_units: dict[int, list[int]],
     kind: _CoreKind,
     affected_ids: list[int] | None = None,
-) -> None:
-    """Find pairs of geo_accuracy=1 units within 10m of each other.
+) -> list[tuple[int, int]]:
+    """Return geo_accuracy=1 pairs within COLLISION_CLOSE_DISTANCE_M.
 
-    Each side of a pair is flagged with the CLOSE_LOCATION_REASON and listed
-    as the other's close neighbour in *close_units*.  When *affected_ids* is
+    Pairs are returned as ``(a, b)`` with ``a < b``.  When *affected_ids* is
     given the join is restricted to rows where at least one side is affected —
     pairs between two unchanged rows are already known from the previous run.
     """
@@ -626,7 +630,7 @@ def _detect_close_location(
         params["affected"] = affected_ids
 
     with engine.connect() as conn:
-        pairs = conn.execute(
+        rows = conn.execute(
             text(
                 f"SELECT a.unit_id, b.unit_id "
                 f"FROM {CORE_SCHEMA}.{kind.core_table} a "
@@ -640,12 +644,80 @@ def _detect_close_location(
             ),
             params,
         ).fetchall()
+    return [(int(a), int(b)) for a, b in rows]
 
-    for uid_a, uid_b in pairs:
+
+def _detect_close_location(
+    engine: Engine,
+    collision_units: dict[int, list[str]],
+    close_units: dict[int, list[int]],
+    kind: _CoreKind,
+    affected_ids: list[int] | None = None,
+) -> None:
+    """Find pairs of geo_accuracy=1 units within 10m of each other.
+
+    Each side of a pair is flagged with the CLOSE_LOCATION_REASON and listed
+    as the other's close neighbour in *close_units*.
+    """
+    for uid_a, uid_b in _close_location_pairs(engine, kind, affected_ids):
         collision_units.setdefault(uid_a, []).append(CLOSE_LOCATION_REASON)
         collision_units.setdefault(uid_b, []).append(CLOSE_LOCATION_REASON)
         close_units.setdefault(uid_a, []).append(uid_b)
         close_units.setdefault(uid_b, []).append(uid_a)
+
+
+def _rows_referencing_ids_in_close_to(
+    engine: Engine, ids: list[int], kind: _CoreKind
+) -> list[int]:
+    """Return rows whose secondary_attributes 'close_to' lists an id.
+
+    An affected row that moved out of range of a former close partner no
+    longer appears in the geometric pair join, yet the partner row still
+    lists it (and may hold stale annotation) — such partners must be swept
+    into the incremental reset/detect set too.
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                f"SELECT DISTINCT g.unit_id "
+                f"FROM {CORE_SCHEMA}.{kind.core_table} g "
+                f"WHERE g.secondary_attributes IS NOT NULL "
+                f"AND g.secondary_attributes::jsonb ? 'close_to' "
+                f"AND EXISTS ("
+                f"SELECT 1 FROM jsonb_array_elements("
+                f"g.secondary_attributes::jsonb -> 'close_to') e "
+                f"WHERE (e #>> '{{}}')::int = ANY(:ids))"
+            ),
+            {"ids": ids},
+        ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def _expand_collision_affected(
+    engine: Engine, affected_ids: list[int], kind: _CoreKind
+) -> list[int]:
+    """Expand the incremental set to the full close-location component.
+
+    A row's collision annotation depends on its neighbours: an in-place update
+    can add/remove a close pair for a partner row that is itself unchanged,
+    and the affected-only reset would leave that partner with a stale or
+    duplicated link and a scrubbed ``close_to`` (issue #30).  This expands the
+    reset/detect set to every row reachable through close-location pairs from
+    an affected row — plus any row whose ``close_to`` still names an affected
+    row, covering a partner the affected row moved away from — so each member
+    of the component is reset and fully re-annotated in one pass.
+    """
+    expanded: set[int] = set(affected_ids)
+    while True:
+        before = len(expanded)
+        ids = sorted(expanded)
+        for uid_a, uid_b in _close_location_pairs(engine, kind, ids):
+            expanded.add(uid_a)
+            expanded.add(uid_b)
+        expanded.update(_rows_referencing_ids_in_close_to(engine, ids, kind))
+        if len(expanded) == before:
+            break
+    return sorted(expanded)
 
 
 def _detect_outside_location(
