@@ -85,6 +85,13 @@ BOUNDARY_COLUMNS = ("country_iso", "name", "geometry")
 
 BOUNDARY_COLUMN_MAPPING = {"iso": "country_iso"}
 
+# Boundary-geometry simplification tolerance (degrees) used to materialize the
+# per-row `service.boundaries.geojson` column once at pipeline load, so the viz
+# app never re-simplifies or re-encodes geometry per rerun (issue #31).  Cuts
+# the district-level payload ≈3.5× (≈14 MB → ≈4 MB) at a fidelity cost well
+# under a pixel at the app's zoom range.
+BOUNDARY_SIMPLIFY_TOLERANCE = 0.001
+
 BOUNDARY_LEVEL_COLUMNS = {1: "state", 2: "region", 3: "district"}
 
 CORE_GENERATORS_COLUMNS = (

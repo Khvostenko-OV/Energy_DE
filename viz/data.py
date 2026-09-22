@@ -17,10 +17,10 @@ pandas and caps the query count:
   attribute as ``name`` (`area_column AS name`) so the same frame feeds the
   scatter layers, the per-area choropleth fill and the header totals.
 - `boundaries_query` / `fetch_boundaries` return **every** area at the level
-  (name, km² `area`, simplified GeoJSON geometry) in one query — the
-  choropleth outlines all areas and fills only the displayed selection, and
-  the header's scope figures (count, km² sum, single name) derive from the
-  same rows.
+  (name, km² `area`, pre-simplified GeoJSON geometry stored by the pipeline)
+  in one query — the choropleth outlines all areas and fills only the
+  displayed selection, and the header's scope figures (count, km² sum, single
+  name) derive from the same rows.
 - The former spatial-join per-area fill (`ST_Intersects`), the header-metrics
   union and the separate areas/count queries are gone: the fill is the name
   groupby in `viz.choropleth.area_fills`, the header totals the frame's
@@ -90,11 +90,6 @@ STORAGE_COLUMNS_SQL = ", ".join(STORAGE_COLUMNS)
 # ``name`` (e.g. ``state`` at the States level).  ``name`` joins units to the
 # ``service.boundaries.name`` rows; dropped when the level (Germany) has none.
 AREA_NAME_ALIAS = "name"
-
-# Boundary-geometry simplification before ``ST_AsGeoJSON`` (tolerance in
-# degrees).  Cuts the district-level payload ≈3.5× (≈14 MB → ≈4 MB) at a
-# fidelity cost well under a pixel at the app's zoom range.
-BOUNDARY_SIMPLIFY_TOLERANCE = 0.001
 
 
 def get_viz_engine() -> Engine:
@@ -290,20 +285,22 @@ def boundaries_query(level: int) -> tuple[str, dict]:
     One row per area at ``level`` — every area, since the layer outlines the
     whole level and fills only the displayed selection (render-opt/drop family)
     — with its name, stored ``area`` (km², for the header scope figures) and
-    WGS-84 GeoJSON geometry, simplified to `BOUNDARY_SIMPLIFY_TOLERANCE` so the
-    district-level payload stays in the low bytes.  ``name`` is the join key
-    the choropleth and header seams match fill rows against.
+    its pre-simplified WGS-84 GeoJSON text.  The geometry is simplified and
+    geo-encoded **once** by the pipeline when `service.boundaries` is loaded
+    (`etl.extract.extract_boundaries`, issue #31), so a rerun just reads the
+    stored ``geojson`` text — no per-rerun `ST_SimplifyPreserveTopology` +
+    `ST_AsGeoJSON`.  ``name`` is the join key the choropleth and header seams
+    match fill rows against.
     """
     sql = (
-        "SELECT name, area, ST_AsGeoJSON("
-        "ST_SimplifyPreserveTopology(geometry, :tolerance)) AS geojson "
+        "SELECT name, area, geojson "
         "FROM service.boundaries WHERE level = :level ORDER BY name"
     )
-    return sql, {"level": level, "tolerance": BOUNDARY_SIMPLIFY_TOLERANCE}
+    return sql, {"level": level}
 
 
 def fetch_boundaries(engine: Engine, *, level: int) -> list[dict[str, Any]]:
-    """Boundary rows (name, km² area, simplified GeoJSON text) for a level."""
+    """Boundary rows (name, km² area, pre-simplified GeoJSON text) for a level."""
     sql, params = boundaries_query(level)
     return run_query(engine, sql, params)
 

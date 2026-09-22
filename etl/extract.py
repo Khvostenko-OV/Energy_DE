@@ -13,6 +13,7 @@ from etl.config import get_engine
 from etl.db_schema import (
     BOUNDARY_COLUMNS,
     BOUNDARY_COLUMN_MAPPING,
+    BOUNDARY_SIMPLIFY_TOLERANCE,
     RAW_COLUMNS,
     RAW_COLUMN_MAPPING,
     RAW_SCHEMA,
@@ -27,6 +28,7 @@ from etl.utils import (
     _log_load,
     _next_table_version,
     _read_manifest,
+    _refresh_boundary_geojson,
     _source_from_filename,
 )
 from etl.verify import _verify_boundaries, _verify_extraction
@@ -204,6 +206,12 @@ def extract_boundaries(manifest: Path, force: bool = False) -> BoundariesReport:
     modified_at) is not yet logged in service.loaded_files or force is set;
     every file written is then logged.  If all files are already logged the
     entire operation is skipped.
+
+    On every run the simplified GeoJSON the viz app reads is materialized
+    idempotently (`_refresh_boundary_geojson`, issue #31): the `geojson`
+    column is added if missing and recomputed for every row with
+    `BOUNDARY_SIMPLIFY_TOLERANCE`, even when the load itself is skipped, so
+    existing databases self-upgrade on any run.
     """
     report = BoundariesReport()
     start = time.perf_counter()
@@ -266,6 +274,12 @@ def extract_boundaries(manifest: Path, force: bool = False) -> BoundariesReport:
                 _compute_boundary_areas(engine)
                 report.loaded = True
                 report.errors = _verify_boundaries(engine)
+
+        # Materialize the simplified GeoJSON the viz app reads, idempotently
+        # (issue #31): ALTER + UPDATE run on every boundaries run — even the
+        # skipped one — so a database seeded before the column existed
+        # self-upgrades without a force reload.
+        _refresh_boundary_geojson(engine)
     except Exception as e:
         report.errors.append(f"Boundary load failed: {e}")
         log.exception("Boundary load failed")

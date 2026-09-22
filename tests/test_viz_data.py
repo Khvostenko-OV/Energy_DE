@@ -434,18 +434,19 @@ class TestUnitRecords:
 
 
 class TestBoundariesQuery:
-    def test_selects_name_area_and_simplified_geojson_at_the_level(self):
+    def test_selects_name_area_and_stored_geojson_at_the_level(self):
         sql, params = boundaries_query(1)
         assert sql == (
-            "SELECT name, area, ST_AsGeoJSON("
-            "ST_SimplifyPreserveTopology(geometry, :tolerance)) AS geojson "
+            "SELECT name, area, geojson "
             "FROM service.boundaries WHERE level = :level ORDER BY name"
         )
-        assert params == {"level": 1, "tolerance": 0.001}
+        assert params == {"level": 1}
 
-    def test_simplification_tolerance_is_applied(self):
-        _, params = boundaries_query(3)
-        assert params["tolerance"] == 0.001
+    def test_no_simplification_or_geoencoding_in_the_query(self):
+        sql, _ = boundaries_query(3)
+        assert "ST_SimplifyPreserveTopology" not in sql
+        assert "ST_AsGeoJSON" not in sql
+        assert "tolerance" not in sql
 
 
 class TestFetchBoundaries:

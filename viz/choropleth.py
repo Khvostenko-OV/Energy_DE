@@ -88,15 +88,22 @@ def areas_feature_collection(
     fill_rows: list[Mapping[str, Any]],
     *,
     selected_names: tuple[str, ...] | None = None,
+    pre_parsed_geometry: Mapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """GeoJSON FeatureCollection for the choropleth, joined by area name.
 
     ``boundary_rows`` are ``{name, area, geojson}`` (``geojson`` =
-    ``ST_AsGeoJSON`` text) and ``fill_rows`` ``{name, capacity_mw, unit_count}``
-    — the `area_fills` output.  Every feature carries the area name, the
-    capacity/unit-count values, the capacity-based rgba fill, and the two
-    prebuilt hover-card fields (`source_header`/`unit_body`, via
-    `area_card`) so the single deck tooltip serves units and areas.
+    pre-simplified ``ST_AsGeoJSON`` text from `service.boundaries`) and
+    ``fill_rows`` ``{name, capacity_mw, unit_count}`` — the `area_fills`
+    output.  Every feature carries the area name, the capacity/unit-count
+    values, the capacity-based rgba fill, and the two prebuilt hover-card
+    fields (`source_header`/`unit_body`, via `area_card`) so the single deck
+    tooltip serves units and areas.
+
+    ``pre_parsed_geometry`` maps area name → parsed geometry dict; a row whose
+    entry is present skips the per-row ``json.loads`` (issue #31: the app
+    caches the parsed geometries per level).  A row without an entry falls
+    back to parsing its ``geojson`` text (the seam's default).
 
     The layer outlines **every** boundary at the level and fills only the
     ``selected_names`` display scope (render-opt): unselected areas paint the
@@ -134,10 +141,14 @@ def areas_feature_collection(
         properties.update(
             area_card(name, capacity_mw, fill["unit_count"], selected=is_selected)
         )
+        if pre_parsed_geometry and name in pre_parsed_geometry:
+            geometry: dict[str, Any] = pre_parsed_geometry[name]
+        else:
+            geometry = json.loads(row["geojson"])
         features.append(
             {
                 "type": "Feature",
-                "geometry": json.loads(row["geojson"]),
+                "geometry": geometry,
                 "properties": properties,
             }
         )

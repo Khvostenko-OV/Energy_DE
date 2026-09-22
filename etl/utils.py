@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from etl.config import SOURCE_NAMES
-from etl.db_schema import RAW_SCHEMA, SERVICE_SCHEMA
+from etl.db_schema import BOUNDARY_SIMPLIFY_TOLERANCE, RAW_SCHEMA, SERVICE_SCHEMA
 
 # Filename stem per canonical source key (ordered as SOURCE_NAMES). The ETL
 # discovers unit sources by filename, so the two rigs that look like real
@@ -160,3 +160,30 @@ def _compute_boundary_areas(engine: Engine) -> None:
             )
         )
         conn.commit()
+
+
+def _refresh_boundary_geojson(engine: Engine) -> None:
+    """Materialize service.boundaries.geojson idempotently (issue #31).
+
+    Backfills each boundary row's pre-simplified ``ST_AsGeoJSON`` text — the
+    viz app then reads stored geometry instead of re-simplifying per rerun.
+    Runs on every `extract_boundaries` call (even when the load is skipped),
+    so a database seeded before the column existed self-upgrades on any
+    `python -m etl boundaries` run without a force reload.  Both statements
+    are cheap and idempotent on an already-populated table.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"ALTER TABLE {SERVICE_SCHEMA}.boundaries "
+                "ADD COLUMN IF NOT EXISTS geojson TEXT"
+            )
+        )
+        conn.execute(
+            text(
+                f"UPDATE {SERVICE_SCHEMA}.boundaries "
+                "SET geojson = ST_AsGeoJSON("
+                "ST_SimplifyPreserveTopology(geometry, "
+                f"{BOUNDARY_SIMPLIFY_TOLERANCE}))"
+            )
+        )

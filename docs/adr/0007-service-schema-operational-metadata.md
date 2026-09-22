@@ -11,7 +11,7 @@ ADR 0004 describes raw as append-only versioned tables and, originally, also pla
 Extraction writes the load log and the boundary reference layer into a dedicated `service` schema:
 
 - `service.loaded_files` — the append-only load-signature log (see ADR 0004).
-- `service.boundaries` — the single non-versioned, level-coded reference layer (`country_iso='DEU'`, `name`, `level` 0=country outline / 1=states+EEZ / 2=regions / 3=districts, `area` in km² via PostGIS).
+- `service.boundaries` — the single non-versioned, level-coded reference layer (`country_iso='DEU'`, `name`, `level` 0=country outline / 1=states+EEZ / 2=regions / 3=districts, `area` in km² via PostGIS). A `geojson` column holds the geometry pre-simplified to WGS-84 GeoJSON at load (`ST_SimplifyPreserveTopology(geometry, 0.001)`, issue #31), backfilled idempotently on every boundaries run so the viz app reads stored geometry instead of re-simplifying per rerun.
 
 `service` is operational metadata, not a pipeline data layer: the data model stays four layers (raw / staging / core / marts); `service` is the side-car the pipeline reads from and writes bookkeeping to. The transform stage spatial-joins against `service.boundaries`; the extract stage records load signatures in `service.loaded_files`.
 

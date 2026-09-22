@@ -157,13 +157,14 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | loaded_to   | str       |
 
 #### boundaries - administrative and maritime reference polygons
-| Column           | Data type    | Description                                               |
-|------------------|--------------|-----------------------------------------------------------|
-| country_iso      | str          | DEU                                                       |
-| name             | str          | name of area                                              |
-| level            | int          | 0 - country, 1 - states + EEZ, 2 - regions, 3 - districts |
-| area             | float        | km2                                                       |
-| geometry         | multipolygon | WGS-84                                                    |
+| Column            | Data type    | Description                                                              |
+|-------------------|--------------|--------------------------------------------------------------------------|
+| country_iso       | str          | DEU                                                                      |
+| name              | str          | name of area                                                             |
+| level             | int          | 0 - country, 1 - states + EEZ, 2 - regions, 3 - districts                |
+| area              | float        | km2                                                                      |
+| geometry          | multipolygon | WGS-84                                                                   |
+| geojson           | text         | geometry pre-simplified to `ST_AsGeoJSON(ST_SimplifyPreserveTopology(geometry, 0.001))` at load, served by the viz app (issue #31) |
 
 
 ### 3. Staging

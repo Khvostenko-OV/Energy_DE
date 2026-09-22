@@ -46,9 +46,11 @@ The choropleth and camera seams live in `viz.choropleth` / `viz.viewport`.
 from __future__ import annotations
 
 import html
+import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Streamlit adds only this script's folder to sys.path, so the repo root
 # wouldn't be importable and `import viz.*` below would fail.  Put it there
@@ -150,6 +152,35 @@ if missing:
     st.pydeck_chart(build_deck(), width="stretch", height=STANDBY_MAP_HEIGHT)
     st.stop()
 
+# ── Boundary data cache (issue #31) ──────────────────────────────────────── #
+# `st.pydeck_chart` re-runs this script on every widget interaction.  The
+# boundary payload depends only on the level, so it is cached server-side
+# keyed on ``(level, str(engine.url))`` — the SQLAlchemy ``Engine`` object is
+# never hashed, and the ``engine_url`` argument exists purely as that key; the
+# bodies read the module-global ``engine`` resolved above (fresh per script
+# run, so a changed `VIZ_DATABASE_URL` yields a fresh key and a cache miss).
+# On a cache hit the wrapped functions return without touching the database,
+# so a rerun over an unchanged level issues no boundaries query and skips the
+# per-row ``json.loads`` (parsed geometries ride along with the rows in one
+# cache entry).  `viz/data.py` stays pure: its ``fetch_*`` signatures are
+# untouched.
+def _cache_boundary_payload(
+    engine_url: str, level: int
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Boundary rows and their parsed geometries for a level, cached per engine url."""
+    rows = fetch_boundaries(engine, level=level)
+    geometries = {row["name"]: json.loads(row["geojson"]) for row in rows}
+    return rows, geometries
+
+
+def _cache_area_names(engine_url: str, level: int) -> list[str]:
+    """Area names of a level (multiselect options), cached per engine url."""
+    return fetch_area_names(engine, level)
+
+
+_cached_boundary_payload = st.cache_data(show_spinner=False)(_cache_boundary_payload)
+_cached_area_names = st.cache_data(show_spinner=False)(_cache_area_names)
+
 # ── Sidebar: source checkboxes + check-all ────────────────────────────── #
 
 st.sidebar.header("Energy sources")
@@ -198,7 +229,7 @@ level = LEVEL_INDEX[level_label]
 # instead of leaking the previous level's names into the new one.  At the
 # country level ("Germany", a single polygon) there is no area choice to
 # make, so the widget is omitted and the scope is always the whole country.
-area_names = fetch_area_names(engine, level)
+area_names = _cached_area_names(str(engine.url), level)
 if level_label == "Germany":
     selected_names: tuple[str, ...] = tuple(area_names)
 else:
@@ -235,6 +266,14 @@ active_from, active_to = st.sidebar.date_input(
 
 map_style_label = st.sidebar.selectbox("Map style", list(MAP_STYLES))
 
+# Manual invalidation of the boundary data cache after a pipeline re-run; the
+# click itself reruns the script, and the next fetch misses the cache.
+st.sidebar.button(
+    "Reload data",
+    on_click=st.cache_data.clear,
+    help="Re-fetch the cached boundary data after loading new data with the pipeline.",
+)
+
 # ── Fetch + render ─────────────────────────────────────────────────────── #
 
 print("Rendering", len(area_filter_names or []), level_label)
@@ -261,16 +300,23 @@ units = attach_tooltips(units)
 print(f"[timing] tooltips: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
 
-# ── Choropleth fill + boundaries (render-opt) ────────────────────────────── #
+# ── Choropleth fill + boundaries (render-opt, issue #31) ───────────────────── #
 # The fill is a pandas groupby over the units frame's `name` column — no
 # spatial join — and the boundaries fetch covers every area at the level so
 # the layer outlines the whole level and fills only the displayed selection.
-# At the country level the fill is skipped (no `name` column) since the
-# boundary layer paints no choropleth there.
+# The boundary rows + parsed geometries come from the server-side cache, so a
+# rerun over an unchanged level issues no boundaries DB query and skips the
+# per-row json.loads.  At the country level the fill is skipped (no `name`
+# column) since the boundary layer paints no choropleth there.
 fills = area_fills(units)
-boundary_rows = fetch_boundaries(engine, level=level)
+boundary_rows, boundary_geometries = _cached_boundary_payload(
+    str(engine.url), level
+)
 features = areas_feature_collection(
-    boundary_rows, fills, selected_names=selected_names
+    boundary_rows,
+    fills,
+    selected_names=selected_names,
+    pre_parsed_geometry=boundary_geometries,
 )
 print(f"[timing] area_fills + fetch_boundaries + features: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()

@@ -221,3 +221,24 @@ class TestDisplaySelection:
         rows = [boundary_row("Berlin", BERLIN_GEOMETRY)]
         collection = areas_feature_collection(rows, [], selected_names=("Berlin",))
         assert collection["features"][0]["properties"]["fill_color"] == ZERO_FILL
+
+
+class TestPreParsedGeometry:
+    def test_pre_parsed_geometry_bypasses_json_parsing(self):
+        rows = [
+            {
+                "name": "Berlin",
+                "area": 100.0,
+                "geojson": "this is not json",
+            }
+        ]
+        pre_parsed = {"Berlin": BERLIN_GEOMETRY}
+        features = areas_feature_collection(
+            rows, [], pre_parsed_geometry=pre_parsed
+        )["features"]
+        assert features[0]["geometry"] == BERLIN_GEOMETRY
+
+    def test_missing_pre_parsed_entry_falls_back_to_row_geojson(self):
+        rows = [boundary_row("Berlin", BERLIN_GEOMETRY)]
+        features = areas_feature_collection(rows, [], pre_parsed_geometry={})["features"]
+        assert features[0]["geometry"] == BERLIN_GEOMETRY
