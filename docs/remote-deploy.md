@@ -68,10 +68,18 @@ docker compose build pipeline viz
 ## 6. Start PostGIS, run the pipeline, reach the viz app
 
 ```bash
-docker compose up -d --wait db    # waits until the DB really accepts TCP
-docker compose run --rm pipeline  # python -m etl run-all; non-zero exit = loud failure
-docker compose up -d --wait viz   # healthy Streamlit app, no-auth dashboard
+docker compose up -d --wait db      # waits until the DB really accepts TCP
+docker compose run --rm pipeline    # python -m etl run-all; non-zero exit = loud failure
+docker compose up -d --wait viz nginx   # nginx reverse-proxies the viz app
 ```
+
+On the server you run the **server variant** (`compose.yaml`): the viz container
+publishes no host port — `nginx` (port 80 by default, `NGINX_PORT`) is the only
+externally reachable surface and proxies to `viz:8501` (WebSocket upgrade headers
+in `docker/nginx.conf`, so Streamlit's live runtime works through it).
+
+The app (Streamlit + PyDeck, reads the marts/core/service tables as the
+read-only role) is then at `http://<host>` (port 80) with **no auth**.
 
 A fresh db volume provisions the read-only `viz_reader` role automatically from
 `docker/viz_reader.sql` (`/docker-entrypoint-initdb.d`). For a database volume
@@ -82,9 +90,6 @@ docker compose exec -T db psql -U etl -d energy_de -f \
   /docker-entrypoint-initdb.d/99-viz-reader.sql
 ```
 
-The app (Streamlit + PyDeck, reads the marts/core/service tables as the
-read-only role) is then at `http://<host>:8501` with **no auth**.
-
 One-shot alternative for a full pipeline pass:
 
 ```bash
@@ -93,6 +98,10 @@ docker compose run --rm pipeline
 
 Re-runs are idempotent — repeat `docker compose run --rm pipeline` at any time
 to refresh the marts from the loaded raw tables.
+
+> **Local dev:** the repo also ships `local_compose.yaml`, the twin variant for
+> dev machines where the app is published directly at `http://localhost:8501`
+> (`VIZ_PORT`). Everything below that is not about the entry port is identical.
 
 ## 7. Verify the marts (incl. the `outside` bucket)
 
@@ -107,17 +116,20 @@ docker compose exec -T db psql -U etl -d energy_de -c \
 
 `db` publishes `5433:5432` on the host by default. Do not leave Postgres open to
 the internet — either add no rule for it, bind it to localhost, or restrict with
-ufw. The viz app publishes `8501` and *does* need to be reachable (it is the
-entry point for the visualisation), so it gets a rule; in front of it use HTTPS
-on a server, or open `8501` only to trusted IPs for a private setup (the app
-has no auth by design, per the visualization spec):
+ufw. The `nginx` proxy publishes `80` ($NGINX_PORT) and *does* need to be
+reachable (it is the entry point for the visualisation), so it gets a rule; the
+viz app itself publishes **no** host port in this variant (only `nginx` reaches
+it, over the compose network). No rule is needed for 8501. Use HTTPS in front of
+`nginx` for a public deployment, or leave port 80 open to the world for a
+private setup (the app has no auth by design, per the visualization spec):
 
 ```bash
 sudo ufw default deny incoming
 sudo ufw allow 22/tcp
-sudo ufw allow 8501/tcp       # Streamlit viz app (no auth — keep it restricted)
+sudo ufw allow 80/tcp          # nginx → Streamlit viz app (no auth — keep it restricted)
 # no rule for 5433 = DB reachable only from the server (the app talks to it
 # over the compose network, so it does not need the host port)
+# no rule for 8501 = the viz app publishes no host port in the server variant
 sudo ufw enable
 ```
 

@@ -21,18 +21,29 @@ connection settings into a detached volume the containers read.
  ├─ data/sources/*.gpkg, data/boundaries/*.gpkg   (private, git-ignored)
  ├─ scripts/seed_data_volume.sh  ── once per machine ──►  volume: etl_data
  │                                                       (data + docker.env)
- ├─ compose.yaml:  db          (imresamu/postgis)      ┐
+ ├─ compose.yaml:  db          (imresamu/postgis)        ┐
  ├─ compose.yaml:  pipeline    (build .; run-all) ──► db ─┤ network
- └─ compose.yaml:  viz         (Dockerfile.viz)      ───┘
+ ├─ compose.yaml:  viz         (Dockerfile.viz)        ───┤
+ └─ compose.yaml:  nginx       reverse-proxy 80 ──► viz ──┘
 ```
+
+The stack ships as **two compose variants**: `compose.yaml` is the server/deploy
+variant — the viz container publishes no host port, and `nginx` (port `${NGINX_PORT:-80}`)
+is the only externally reachable surface, proxying to `viz:8501` with WebSocket
+upgrade headers for Streamlit's live runtime (`docker/nginx.conf`). `local_compose.yaml`
+is the local-dev twin: identical stack, but the viz app is published directly on
+host port `${VIZ_PORT:-8501}` (no nginx). The `db`, `pipeline`, and data-volume
+behaviour described below is identical in both.
 
 | What | Where |
 |------|-------|
 | Pipeline image | built from this repo (`Dockerfile`), exposes `python -m etl` unchanged |
 | PostGIS database | `db` service; PostGIS extension enabled by the image on first init; the read-only `viz_reader` role provisioned from `docker/viz_reader.sql` on the same init |
-| Visualization app | `viz` service (Streamlit + PyDeck, `http://localhost:8501`, no auth), built from `Dockerfile.viz`, reads `core`/`service`/`marts` as `viz_reader` |
+| Visualization app | `viz` service (Streamlit + PyDeck, no auth), built from `Dockerfile.viz`, reads `core`/`service`/`marts` as `viz_reader`; publishes `http://localhost:8501` in `local_compose.yaml` only |
+| External entry point | `nginx` service (`nginx:stable-alpine`), publishes `${NGINX_PORT:-80}` → `viz:8501` with WebSocket support; only in `compose.yaml` (server variant) |
 | Raw data + connection settings | detached named volume `etl_data`, seeded once per machine |
 | Volume mount | `etl_data` → `/app/data` (so `run-all`'s `data/sources/...`, `data/boundaries/...` resolve and both containers source `docker.env`) |
+| Smoke seam | `scripts/smoke_etl_container.sh` pins `COMPOSE_FILE=local_compose.yaml` — it probes the app over its published 8501 port, so it exercises the local variant |
 
 The images never contain data or real connection settings. `etl/config.py` reads
 `DATABASE_URL` / `viz/data.py` reads `VIZ_DATABASE_URL` from the environment;
@@ -108,11 +119,19 @@ so a bare `docker compose run --rm pipeline` runs the pass too.
 
 ## Visualization app (viz)
 
-`viz` is a long-running service that comes up with `docker compose up`,
-reachable at <http://localhost:8501> with **no auth** (per the visualization
-spec). It reads the live `core`, `service`, and `marts` tables/app via the
-**read-only `viz_reader` role**, so the app can never mutate the database even
-if the app itself were compromised.
+`viz` is a long-running service that comes up with `docker compose up` (either
+variant), with **no auth** (per the visualization spec). It reads the live
+`core`, `service`, and `marts` tables/app via the **read-only `viz_reader`
+role**, so the app can never mutate the database even if the app itself were
+compromised. The app is reached differently per variant:
+
+- **local** (`local_compose.yaml`): directly at <http://localhost:8501>.
+- **server** (`compose.yaml`): through the `nginx` proxy at
+  `http://<host>` (port 80 by default); the viz container publishes no host
+  port. Streamlit's live runtime is a WebSocket, so `docker/nginx.conf`
+  forwards `Upgrade`/`Connection` headers and keeps long-lived connections
+  open — and `nginx` health-checks the whole entry path (`/_stcore/health`
+  through the proxy) before it is considered healthy.
 
 ### Read-only role (viz_reader)
 
@@ -167,8 +186,11 @@ fresh stack: teardown → seed → healthy PostGIS → containerized `run-all` �
 mart assertions (three views exist, non-empty, no NULL states, `outside`
 bucket present) → idempotent `viz_reader` re-provisioning + read checks over
 the app's TCP path → viz up and answering `/_stcore/health` on port 8501. The
-`metabase` service's absence is asserted too. Re-run it any time the packaging
-changes:
+`metabase` service's absence is asserted too. The smoke runs against the
+**local** variant (it pins `COMPOSE_FILE=local_compose.yaml` to probe the app
+over its published port); the server variant's nginx entry is verified by its
+own `/_stcore/health`-through-the-proxy healthcheck in compose. Re-run it any
+time the packaging changes:
 
 ```bash
 scripts/smoke_etl_container.sh
@@ -183,7 +205,8 @@ scripts/smoke_etl_container.sh
 | `POSTGRES_PASSWORD` | `etl` | db password (compose `db`) |
 | `POSTGRES_DB` | `energy_de` | default database, PostGIS enabled there |
 | `POSTGRES_PORT` | `5433` | host port for the db (5432 is the in-network/default dev port) |
-| `VIZ_PORT` | `8501` | host port for the viz app |
+| `VIZ_PORT` | `8501` | host port for the viz app (`local_compose.yaml` only) |
+| `NGINX_PORT` | `80` | host port for the nginx reverse proxy (`compose.yaml`, server variant) |
 | `DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`/`DB_NAME` | `etl`/`etl`/`db`/`5432`/`energy_de` | what the seed script writes into `docker.env` `DATABASE_URL` (for the pipeline) |
 | `VIZ_USER`/`VIZ_PASSWORD` | `viz_reader`/`viz` | what the seed script writes into `docker.env` `VIZ_DATABASE_URL` (for the viz app); must match `docker/viz_reader.sql` |
 

@@ -16,19 +16,9 @@
 #             against `db`, which verifies every stage and fails loudly on drift.
 #
 #   viz       the Streamlit + PyDeck app in its own container, always running
-#             (no auth). It reads the marts/core/service tables through the
-#             read-only `viz_reader` role via the VIZ_DATABASE_URL that the
-#             data-volume seed writes. For local development the app stays
-#             directly reachable at http://localhost:8501 via this file's twin
-#             `local_compose.yaml`; this (server) variant publishes no app
-#             port — nginx is the only externally reachable surface.
-#
-#   nginx     the single external entry point on the server: reverse-proxies
-#             the viz container (nginx.conf → http://viz:8501, with websocket
-#             upgrade headers for Streamlit's live runtime) so Streamlit never
-#             needs its own published port. Edit `docker/nginx.conf` and the
-#             `nginx` service here to pin hostname/TLS if you serve from a real
-#             domain.
+#             alongside the stack at http://localhost:8501 (no auth). It reads
+#             the marts/core/service tables through the read-only `viz_reader`
+#             role via the VIZ_DATABASE_URL that the data-volume seed writes.
 #
 # The raw data set + connection settings live in the DETACHED named volume
 # `etl_data` (external: the seed script, scripts/seed_data_volume.sh, creates
@@ -96,11 +86,10 @@ services:
     # 0.0.0.0 --server.port 8501" is the image's default command; nothing to
     # override here. The entrypoint sources VIZ_DATABASE_URL from the seeded
     # volume (the app reads it with a DATABASE_URL fallback, viz/data.py).
-    # No host port is published for this service in this (server) variant:
-    # the nginx service above is the only external entry point. The local
-    # variant (local_compose.yaml) keeps the `"${VIZ_PORT:-8501}:8501"` mapping.
     environment:
       DATA_ENV_FILE: /app/data/docker.env
+    ports:
+      - "${VIZ_PORT:-8501}:8501"
     volumes:
       - etl_data:/app/data
     depends_on:
@@ -114,29 +103,6 @@ services:
       timeout: 5s
       retries: 30
       start_period: 20s
-
-  nginx:
-    # Single externally-published entry point: port 80 → viz:8501. "I want to
-    # reach Streamlit without exposing 8501" — the viz container has no host
-    # port mapping here, so HTTP traffic enters only through this proxy.
-    image: nginx:stable-alpine
-    ports:
-      - "${NGINX_PORT:-80}:80"
-    volumes:
-      # Conf.d drop-in: the image's default /etc/nginx/conf.d/default.conf is
-      # replaced wholesale by our server block.
-      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      viz:
-        condition: service_healthy
-    healthcheck:
-      # nginx:stable-alpine ships wget. Probe the proxied root through nginx
-      # itself, proving the whole entry path (nginx → viz) is healthy.
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/_stcore/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 10s
 
 volumes:
   db_data:

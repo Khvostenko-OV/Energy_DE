@@ -12,6 +12,13 @@
 # (full-stack verification) builds on it. The pipeline's own integration suite
 # still owns pipeline semantics.
 #
+# The stack runs in two compose variants: `compose.yaml` is the server/deploy
+# variant (nginx reverse-proxies the viz app; no host port is published for
+# Streamlit), and `local_compose.yaml` is the local-dev variant (viz directly
+# published on host port 8501). This smoke exercises the local variant: it
+# probes the app over its published port, so it pins COMPOSE_FILE to
+# local_compose.yaml rather than the deploy file.
+#
 # Usage:  scripts/smoke_etl_container.sh
 #
 # Requires docker (with the aarch64/arm64 platforms as needed) and the private
@@ -21,6 +28,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Local-dev compose variant (viz published on 8501). The deploy variant
+# (compose.yaml) goes through nginx instead, which this smoke does not cover.
+COMPOSE_FILE="${COMPOSE_FILE:-local_compose.yaml}"
 
 VOLUME_NAME="${ETL_DATA_VOLUME:-etl_data}"
 DB_USER="${DB_USER:-etl}"
