@@ -8,6 +8,7 @@
       "ps*": "allow",
       "cd *": "allow",
       "mv *": "allow",
+      "nc *": "allow",
       "wc *": "allow",
       "rg *": "allow",
       "du *": "allow",

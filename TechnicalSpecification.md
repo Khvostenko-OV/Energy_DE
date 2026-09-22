@@ -185,8 +185,8 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | secondary_attributes | text      | Dictionary of secondary attributes                |
 | country_iso          | str       | DEU                                               |
 | state                | str       | Bundesland / Sea                                  |
-| region               | str       | Regierungsbezirk                                         |
-| district             | str       | Landkreis                                          |
+| region               | str       | Regierungsbezirk                                  |
+| district             | str       | Landkreis                                         |
 | bad_quality          | bool      | Flag bad quality record                           |
 
 #### Units table: storage
@@ -207,8 +207,8 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | secondary_attributes | text      | Dictionary of secondary attributes                 |
 | country_iso          | str       | DEU                                                |
 | state                | str       | Bundesland / Sea                                   |
-| region               | str       | Regierungsbezirk                                          |
-| district             | str       | Landkreis                                           |
+| region               | str       | Regierungsbezirk                                   |
+| district             | str       | Landkreis                                          |
 | bad_quality          | bool      | Flag bad quality record                            |
 
 ### Dimension tables (normalized, one per-kind set for each staging Unit table)
@@ -244,8 +244,8 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | secondary_attributes | text      | Dictionary of secondary attributes                |
 | country_iso          | str       | DEU                                               |
 | state                | str       | Bundesland / Sea                                  |
-| region               | str       | Regierungsbezirk                                         |
-| district             | str       | Landkreis                                          |
+| region               | str       | Regierungsbezirk                                  |
+| district             | str       | Landkreis                                         |
 | collision            | bool      | Flag collisions                                   |
 
 #### storages
@@ -266,8 +266,8 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | secondary_attributes | text      | Dictionary of secondary attributes                 |
 | country_iso          | str       | DEU                                                |
 | state                | str       | Bundesland / Sea                                   |
-| region               | str       | Regierungsbezirk                                          |
-| district             | str       | Landkreis                                           |
+| region               | str       | Regierungsbezirk                                   |
+| district             | str       | Landkreis                                          |
 | collision            | bool      | Flag collisions                                    |
 
 ### Dimension tables (per unit-kind, ADR 0006)
