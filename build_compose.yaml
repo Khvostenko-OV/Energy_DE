@@ -30,12 +30,6 @@
 #             `nginx` service here to pin hostname/TLS if you serve from a real
 #             domain.
 #
-# Images: the pipeline and viz containers are pulled from Docker Hub
-# (`khvostenko/energy-etl`, `khvostenko/energy-viz`, both `latest` by default;
-# `${PIPELINE_IMAGE}` / `${VIZ_IMAGE}` override to pin another tag or registry).
-# The build-from-source twin of this file — the same stack that compiles both
-# images from this repo — is `build_compose.yaml`.
-#
 # The raw data set + connection settings live in the DETACHED named volume
 # `etl_data` (external: the seed script, scripts/seed_data_volume.sh, creates
 # it once per machine). The pipeline and viz containers mount it at /app/data
@@ -83,7 +77,7 @@ services:
       start_period: 10s
 
   pipeline:
-    image: ${PIPELINE_IMAGE:-khvostenko/energy-etl:latest}
+    build: .
     # `run_all` is the Python function name; Click surfaces it as `run-all`
     # (the same name the host CLI uses — the image behaviour is identical).
     command: ["python", "-m", "etl", "run-all"]
@@ -96,7 +90,9 @@ services:
         condition: service_healthy
 
   viz:
-    image: ${VIZ_IMAGE:-khvostenko/energy-viz:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile.viz
     restart: always
     # "streamlit run viz/app.py --server.headless --server.address
     # 0.0.0.0 --server.port 8501" is the image's default command; nothing to
