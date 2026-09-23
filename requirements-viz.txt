@@ -1,5 +1,10 @@
-# Visualization layer (Streamlit + PyDeck app, issues #23-...). Layers on top
-# of the pipeline requirements.txt — the viz runtime installs both files; the
-# pipeline requirements.txt stays unchanged.
+# Visualization layer (Streamlit + PyDeck app, issues #23-...). Self-contained:
+# the viz runtime installs ONLY this file — the pipeline-only deps (click,
+# geopandas, geoalchemy2) never enter the viz image. `etl` is imported read-side
+# (schema constants only), so its requirements are intentionally absent here.
+pandas>=2.0
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+sqlalchemy>=2.0
 streamlit>=1.30
 pydeck>=0.8

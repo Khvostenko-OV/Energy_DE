@@ -33,7 +33,9 @@ Gotchas:
   (spec says `V20250101`) and the gas file is `Gas_Producer_V20260203.gpkg` (spec says
   `Gas_Production`). Trust the files, not the spec.
 - The `.venv` is populated; install with `.venv/bin/pip install -r requirements.txt -r requirements-dev.txt`.
-  The viz layer (`viz/`, Streamlit + PyDeck) additionally needs `-r requirements-viz.txt`.
+  The viz layer (`viz/`, Streamlit + PyDeck) uses the self-contained
+  `requirements-viz.txt` (its own pandas/SQLAlchemy/psycopg2 set, no click/geopandas).
+  For project-wide dev, install all three: `-r requirements.txt -r requirements-viz.txt -r requirements-dev.txt`.
 - `DATABASE_URL` and the raw data are required to run the pipeline; both stay out of git.
 
 ## Conventions to follow

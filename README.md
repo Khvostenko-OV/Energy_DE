@@ -98,7 +98,7 @@ docker compose -f local_compose.yaml up --build --wait db viz
 ### Dev host (CI-style)
 
 ```sh
-.venv/bin/pip install -r requirements.txt -r requirements-viz.txt
+.venv/bin/pip install -r requirements.txt -r requirements-viz.txt   # requirements-viz.txt is self-contained (viz-only)
 cp .env.example .env          # set DATABASE_URL (and VIZ_DATABASE_URL) to your PostGIS
 python -m etl run-all         # extract → staging → core → marts
 .venv/bin/streamlit run viz/app.py
