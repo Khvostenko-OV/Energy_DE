@@ -7,7 +7,11 @@ settings) is cloned or committed; it is transferred and seeded per machine.
 
 ## 0. Prereqs
 
-- Linux server (x86_64/amd64 or arm64 — the `db` image is multi-arch, so no emulation on either)
+- Linux server (x86_64/amd64 or arm64 — the `db` image is multi-arch). The
+  **published pipeline/viz images are amd64-only** (the CI runners that build
+  them are x86), so on an arm64 server they run under emulation until the
+  publish workflow goes multi-arch; `build_compose.yaml` compiles native images
+  on the server if that matters.
 - Docker Engine + Compose v2
 - A machine that holds the private raw data set (`data/sources`,
   `data/boundaries`)
@@ -51,19 +55,28 @@ The defaults are `etl`/`etl`. The compose `POSTGRES_*` variables and the seed
 script's `DB_*` variables are a coupled pair — they must match. Set both before
 building/seeding; the viz role password defaults to `viz` in both
 `docker/viz_reader.sql` (the DB-side provisioning) and the seed. Set both
-before building/seeding if you deviate:
+before seeding if you deviate:
 
 ```bash
 export POSTGRES_USER=etl POSTGRES_PASSWORD='<you-know>'
 export DB_USER=etl DB_PASSWORD='<you-know>'
 ```
 
-## 5. Build images + seed the data volume (once per machine)
+## 5. Pull images + seed the data volume (once per machine)
+
+The pipeline and viz images are published to Docker Hub by CI
+(`khvostenko/energy-etl`, `khvostenko/energy-viz` — see
+`docs/containerization.md` → "CI & publishing"), so the server only **pulls**:
 
 ```bash
-docker compose build pipeline viz
-./scripts/seed_data_volume.sh     # creates etl_data volume: raw data + docker.env
+docker compose pull                # pulls the published images (no build on the server)
+./scripts/seed_data_volume.sh      # creates etl_data volume: raw data + docker.env
 ```
+
+> **Building instead of pulling:** to compile both images from this repo on the
+> server (e.g. an unpushed change, or native arm64), use the build-from-source
+> twin and build+seed together: `docker compose -f build_compose.yaml build
+> pipeline viz && ./scripts/seed_data_volume.sh`.
 
 ## 6. Start PostGIS, run the pipeline, reach the viz app
 

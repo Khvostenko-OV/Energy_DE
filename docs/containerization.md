@@ -18,32 +18,40 @@ connection settings into a detached volume the containers read.
 
 ```
  host machine (docker)
+ ├─ images pulled from Docker Hub:  khvostenko/energy-etl, khvostenko/energy-viz
  ├─ data/sources/*.gpkg, data/boundaries/*.gpkg   (private, git-ignored)
  ├─ scripts/seed_data_volume.sh  ── once per machine ──►  volume: etl_data
  │                                                       (data + docker.env)
  ├─ compose.yaml:  db          (imresamu/postgis)        ┐
- ├─ compose.yaml:  pipeline    (build .; run-all) ──► db ─┤ network
- ├─ compose.yaml:  viz         (Dockerfile.viz)        ───┤
- └─ compose.yaml:  nginx       reverse-proxy 80 ──► viz ──┘
+ ├─ compose.yaml:  pipeline    (image; run-all) ──► db ──┤ network
+ ├─ compose.yaml:  viz         (image)                ───┤
+ └─ compose.yaml:  nginx       reverse-proxy 80 ──► viz ─┘
 ```
 
-The stack ships as **two compose variants**: `compose.yaml` is the server/deploy
-variant — the viz container publishes no host port, and `nginx` (port `${NGINX_PORT:-80}`)
-is the only externally reachable surface, proxying to `viz:8501` with WebSocket
-upgrade headers for Streamlit's live runtime (`docker/nginx.conf`). `local_compose.yaml`
-is the local-dev twin: identical stack, but the viz app is published directly on
-host port `${VIZ_PORT:-8501}` (no nginx). The `db`, `pipeline`, and data-volume
-behaviour described below is identical in both.
+The stack ships as **three compose variants**: `compose.yaml` is the server/deploy
+variant — the pipeline and viz containers are **pulled from Docker Hub**
+(`khvostenko/energy-etl`, `khvostenko/energy-viz`, both `latest` by default; see
+"CI & publishing" below); the viz container publishes no host port, and `nginx`
+(port `${NGINX_PORT:-80}`) is the only externally reachable surface, proxying to
+`viz:8501` with WebSocket upgrade headers for Streamlit's live runtime
+(`docker/nginx.conf`). `local_compose.yaml` is the local-dev twin — identical
+stack, but the app is published directly on host port `${VIZ_PORT:-8501}` (no
+nginx). `build_compose.yaml` is the build-from-source twin of the server
+variant: the same deployment, but both images are compiled from this repo
+(`Dockerfile` / `Dockerfile.viz`) instead of pulled — used for testing local
+image changes without publishing. The `db`, `pipeline`, and data-volume
+behaviour described below is identical across the variants.
 
 | What | Where |
 |------|-------|
-| Pipeline image | built from this repo (`Dockerfile`), exposes `python -m etl` unchanged |
+| Pipeline image | pulled from Docker Hub (`khvostenko/energy-etl:latest`, `${PIPELINE_IMAGE}` override), built by CI and published on `main`; exposes `python -m etl` unchanged |
 | PostGIS database | `db` service; PostGIS extension enabled by the image on first init; the read-only `viz_reader` role provisioned from `docker/viz_reader.sql` on the same init |
-| Visualization app | `viz` service (Streamlit + PyDeck, no auth), built from `Dockerfile.viz`, reads `core`/`service`/`marts` as `viz_reader`; publishes `http://localhost:8501` in `local_compose.yaml` only |
-| External entry point | `nginx` service (`nginx:stable-alpine`), publishes `${NGINX_PORT:-80}` → `viz:8501` with WebSocket support; only in `compose.yaml` (server variant) |
+| Visualization app | `viz` service (Streamlit + PyDeck, no auth), pulled from Docker Hub (`khvostenko/energy-viz:latest`, `${VIZ_IMAGE}` override), reads `core`/`service`/`marts` as `viz_reader`; publishes `http://localhost:8501` in `local_compose.yaml` only |
+| External entry point | `nginx` service (`nginx:stable-alpine`), publishes `${NGINX_PORT:-80}` → `viz:8501` with WebSocket support; only in `compose.yaml` / `build_compose.yaml` (server variants) |
 | Raw data + connection settings | detached named volume `etl_data`, seeded once per machine |
 | Volume mount | `etl_data` → `/app/data` (so `run-all`'s `data/sources/...`, `data/boundaries/...` resolve and both containers source `docker.env`) |
 | Smoke seam | `scripts/smoke_etl_container.sh` pins `COMPOSE_FILE=local_compose.yaml` — it probes the app over its published 8501 port, so it exercises the local variant |
+| Build-from-source seams | `build_compose.yaml` (server variant) and `local_compose.yaml` (local variant) compile the images from this repo (`Dockerfile`, `Dockerfile.viz`) |
 
 The images never contain data or real connection settings. `etl/config.py` reads
 `DATABASE_URL` / `viz/data.py` reads `VIZ_DATABASE_URL` from the environment;
@@ -79,8 +87,10 @@ defaults; anything real replaces them at seed time and stays in the volume.
 > **Platform note:** the `db` image is a multi-arch build
 > (`imresamu/postgis`, arm64 + amd64), so the database runs natively on both
 > Apple Silicon and x86 servers — the official `postgis/postgis` images are
-> amd64-only and would otherwise run under emulation on ARM. The pipeline and
-> viz containers are native `arm64`/`amd64` Python images.
+> amd64-only and would otherwise run under emulation on ARM. The **published**
+> pipeline/viz images are amd64-only (the CI runners that publish them are
+> x86); the build-from-source variants (`build_compose.yaml`, `local_compose.yaml`)
+> compile native `arm64` Python images on the machine they run on.
 
 ## One-time seed (per machine)
 
@@ -110,9 +120,19 @@ comes up fully provisioned. (An existing volume from before this change gets
 the role once by running the seam by hand — see below.)
 
 ```bash
-docker compose build pipeline viz           # build both images
-docker compose up -d --wait db              # db healthy (role provisioned on fresh db)
-docker compose run --rm pipeline            # the full pass (run-all)
+docker compose pull                       # pull the published images (default: compose.yaml)
+docker compose up -d --wait db             # db healthy (role provisioned on fresh db)
+docker compose run --rm pipeline           # the full pass (run-all)
+```
+
+The deploy file **pulls** the pipeline and viz images from Docker Hub — nothing
+is built on the machine. To build both images from this repo instead (e.g. to
+test unpushed changes), run the same stack through the build-from-source twin:
+
+```bash
+docker compose -f build_compose.yaml build pipeline viz
+docker compose -f build_compose.yaml up -d --wait db
+docker compose -f build_compose.yaml run --rm pipeline
 ```
 
 The full pass runs extract → transform → load → marts against the compose
@@ -210,6 +230,22 @@ time the packaging changes:
 scripts/smoke_etl_container.sh
 ```
 
+## CI & publishing
+
+Two GitHub Actions workflows keep the images honest:
+
+- `.github/workflows/ci.yml` (issue #14) — cheap smoke gates on every push to
+  `main` and pull request: byte-compiles `etl`/`viz`/`tests`/`scripts`/`docker`
+  and builds **both** the pipeline and viz images. Never requires the private
+  raw data and never runs the integration suite.
+- `.github/workflows/publish-docker.yml` — on every push to `main`, builds and
+  pushes the images to Docker Hub as `khvostenko/energy-etl` and
+  `khvostenko/energy-viz` (both tagged `latest`, the tags `compose.yaml` pulls).
+  Needs the `DOCKER_PASSWORD` repo secret. The images carry no raw data or
+  connection settings by design — the seed provides those at deploy time. The
+  build-from-source variants are not affected: `build_compose.yaml` and
+  `local_compose.yaml` compile from this repo regardless of what is published.
+
 ## Configuration
 
 | Env var | Default | Meaning |
@@ -221,6 +257,8 @@ scripts/smoke_etl_container.sh
 | `POSTGRES_PORT` | `5433` | host port for the db (5432 is the in-network/default dev port) |
 | `VIZ_PORT` | `8501` | host port for the viz app (`local_compose.yaml` only) |
 | `NGINX_PORT` | `80` | host port for the nginx reverse proxy (`compose.yaml`, server variant) |
+| `PIPELINE_IMAGE` | `khvostenko/energy-etl:latest` | pipeline image `compose.yaml` pulls (override to pin a tag/registry) |
+| `VIZ_IMAGE` | `khvostenko/energy-viz:latest` | viz image `compose.yaml` pulls (override to pin a tag/registry) |
 | `DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`/`DB_NAME` | `etl`/`etl`/`db`/`5432`/`energy_de` | what the seed script writes into `docker.env` `DATABASE_URL` (for the pipeline) |
 | `VIZ_USER`/`VIZ_PASSWORD` | `viz_reader`/`viz` | what the seed script writes into `docker.env` `VIZ_DATABASE_URL` (for the viz app); must match `docker/viz_reader.sql` |
 
@@ -253,8 +291,9 @@ seed. Re-running `docker volume create` is idempotent.
 
 - #13 containerization
 - #14 CI smoke gates (compile check + pipeline image build) — `.github/workflows/ci.yml` now
-  lives in CI: byte-compile (`python -m compileall`) + `docker build` of the pipeline image on
-  push to `main` and pull requests, no raw data and no integration suite
+  lives in CI: byte-compile (`python -m compileall`) + `docker build` of the pipeline and viz
+  images on push to `main` and pull requests, no raw data and no integration suite; a publish
+  workflow (`.github/workflows/publish-docker.yml`) pushes both images to Docker Hub on `main`
 - #15 Metabase was joined to this compose stack and from #28 **removed** in
   favour of the Streamlit viz app; the marts are the still-authoritative
   analytical layer, surfaced by the app instead of Metabase dashboards.

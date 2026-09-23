@@ -6,7 +6,7 @@ Implemented. The ETL pipeline (GeoPandas → PostGIS) runs end-to-end from the C
 function name) and is covered by a full integration test suite. Containerized:
 a pipeline image + PostGIS + Streamlit-viz compose stack with a one-time data-volume
 seed, read-only `viz_reader` role provisioning (dev-host SQL seam in
-`docker/viz_reader.sql`), and a smoke seam (`compose.yaml`,
+`docker/viz_reader.sql`), and a smoke seam (`local_compose.yaml`,
 `scripts/seed_data_volume.sh`, `scripts/smoke_etl_container.sh`; see
 `docs/containerization.md`).
 Treat `TechnicalSpecification.md` as the single authoritative source for data models, table
@@ -54,10 +54,13 @@ typecheckers. The full integration suite is the verification bar — it needs a 
 (`tests/test_viz_*.py`) take no database but do need `requirements-viz.txt` installed.
 The containerized stack has its own smoke
 seam (`scripts/smoke_etl_container.sh`, #13; extended by #28 for db + pipeline + viz).
-CI (`github/workflows/ci.yml` is actually `.github/workflows/ci.yml`, #14) runs cheap
-gates only — byte-compile (`python -m compileall`) + pipeline image build — and must
-never require the raw data or run the integration suite. The raw data and the suite
-stay private either way.
+CI (`.github/workflows/ci.yml`, #14) runs cheap gates only — byte-compile
+(`python -m compileall`) + pipeline/viz image builds — and must never require the raw
+data or run the integration suite; the publish workflow
+(`.github/workflows/publish-docker.yml`) pushes both images to Docker Hub
+(`khvostenko/energy-etl`, `khvostenko/energy-viz`) on `main`, which `compose.yaml`
+pulls (`build_compose.yaml`/`local_compose.yaml` still build from source).
+The raw data and the suite stay private either way.
 
 ## Agent skills
 

@@ -9,7 +9,7 @@ and commissioning date, and a Streamlit + PyDeck map app that visualises the mar
 Implemented. The ETL pipeline (extract → staging → core → marts) runs end-to-end via the CLI
 (`python -m etl <stage>`, or `run-all` for the whole pass; Click hyphenates the `run_all`
 Python function name) and is covered by a full integration
-test suite (pytest, 120+ tests against a PostGIS dev DB), and the Streamlit viz app
+test suite (pytest, 327 tests against a PostGIS dev DB), and the Streamlit viz app
 (`viz/`, T1–T4, no-auth map with per-source scatter layers, area choropleth and header
 aggregates) runs in the containerized stack. Design work recorded in:
 
@@ -25,9 +25,11 @@ aggregates) runs in the containerized stack. Design work recorded in:
 - PostgreSQL + PostGIS (`energy_de` database)
 - Streamlit + PyDeck (`viz/` — the deployed visualization app, reads the marts through a
   read-only `viz_reader` role)
-- Docker (containerized stack — `compose.yaml`: db + pipeline + viz images, data-volume
-  seed, read-only role provisioning; `docs/containerization.md`)
-- GitHub Actions (CI smoke gates — `.github/workflows/ci.yml`: byte-compile + pipeline image build, #14)
+- Docker (containerized stack — `compose.yaml`: db + pipeline + viz images pulled from
+  Docker Hub, data-volume seed, read-only role provisioning; `docs/containerization.md`)
+- GitHub Actions (`.github/workflows/ci.yml`: byte-compile + pipeline/viz image build on
+  every push/PR, #14; `.github/workflows/publish-docker.yml`: pushes both images to Docker
+  Hub as `khvostenko/energy-etl` / `khvostenko/energy-viz` on `main`)
 
 ## Data
 
@@ -89,7 +91,8 @@ docker compose -f local_compose.yaml up --build --wait db viz
   (`docker/viz_reader.sql`); `pipeline` runs `run-all` on demand
   (`docker compose -f local_compose.yaml run --rm pipeline`); `viz` serves the
   Streamlit app on http://localhost:8501. (The server/deploy variant is
-  `compose.yaml` — nginx entry point, no published viz port.)
+  `compose.yaml` — nginx entry point, no published viz port, images **pulled**
+  from Docker Hub; `build_compose.yaml` is its build-from-source twin.)
 - Verify the marts:
   `docker compose -f local_compose.yaml exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"`
 - *Alternative: seed a remote PostGIS and point the seed script's `DB_HOST`/`DB_PORT`
