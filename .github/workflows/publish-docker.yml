@@ -9,7 +9,7 @@ jobs:
     name: Publish pipeline image (khvostenko/energy-etl)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Publish to Docker Hub
         uses: elgohr/Publish-Docker-Github-Action@v5
@@ -22,7 +22,7 @@ jobs:
     name: Publish viz image (khvostenko/energy-viz)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Publish to Docker Hub
         uses: elgohr/Publish-Docker-Github-Action@v5
