@@ -252,7 +252,9 @@ seed. Re-running `docker volume create` is idempotent.
 ## Tickets
 
 - #13 containerization
-- #14 CI smoke gates (compile check + pipeline image build) — blocked by #13
+- #14 CI smoke gates (compile check + pipeline image build) — `.github/workflows/ci.yml` now
+  lives in CI: byte-compile (`python -m compileall`) + `docker build` of the pipeline image on
+  push to `main` and pull requests, no raw data and no integration suite
 - #15 Metabase was joined to this compose stack and from #28 **removed** in
   favour of the Streamlit viz app; the marts are the still-authoritative
   analytical layer, surfaced by the app instead of Metabase dashboards.

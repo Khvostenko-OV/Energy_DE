@@ -53,8 +53,10 @@ typecheckers. The full integration suite is the verification bar — it needs a 
 (`DATABASE_URL` via `.env`) and the raw data files. The viz unit seams
 (`tests/test_viz_*.py`) take no database but do need `requirements-viz.txt` installed.
 The containerized stack has its own smoke
-seam (`scripts/smoke_etl_container.sh`, #13; extended by #28 for db + pipeline + viz);
-CI is planned (#14). The raw data and the suite
+seam (`scripts/smoke_etl_container.sh`, #13; extended by #28 for db + pipeline + viz).
+CI (`github/workflows/ci.yml` is actually `.github/workflows/ci.yml`, #14) runs cheap
+gates only — byte-compile (`python -m compileall`) + pipeline image build — and must
+never require the raw data or run the integration suite. The raw data and the suite
 stay private either way.
 
 ## Agent skills

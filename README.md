@@ -27,7 +27,7 @@ aggregates) runs in the containerized stack. Design work recorded in:
   read-only `viz_reader` role)
 - Docker (containerized stack — `compose.yaml`: db + pipeline + viz images, data-volume
   seed, read-only role provisioning; `docs/containerization.md`)
-- GitHub Actions (CI, planned — #14)
+- GitHub Actions (CI smoke gates — `.github/workflows/ci.yml`: byte-compile + pipeline image build, #14)
 
 ## Data
 
