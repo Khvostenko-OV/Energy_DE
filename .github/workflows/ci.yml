@@ -1,7 +1,8 @@
 # CI smoke gates (issue #14): two cheap invariants on push to `main` and on
-# pull requests — the Python code byte-compiles, and the pipeline container
-# image still builds. Never fetches or requires the private raw data set, never
-# runs the integration suite (that needs a PostGIS dev DB + the raw data).
+# pull requests — the Python code byte-compiles, and the pipeline and viz
+# container images still build. Never fetches or requires the private raw data
+# set, never runs the integration suite (that needs a PostGIS dev DB + the raw
+# data).
 
 name: CI
 
@@ -28,10 +29,13 @@ jobs:
         run: python -m compileall -q etl viz tests scripts docker
 
   image-build:
-    name: Build pipeline image
+    name: Build pipeline + viz images
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Build pipeline container image
         run: docker build -t etl-pipeline:ci .
+
+      - name: Build viz container image
+        run: docker build -f Dockerfile.viz -t viz-app:ci .
