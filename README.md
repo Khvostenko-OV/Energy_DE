@@ -25,8 +25,8 @@ aggregates) runs in the containerized stack. Design work recorded in:
 - PostgreSQL + PostGIS (`energy_de` database)
 - Streamlit + PyDeck (`viz/` — the deployed visualization app, reads the marts through a
   read-only `viz_reader` role)
-- Docker (containerized stack — `fat_compose.yaml`: db + pipeline + viz images,
-  data-volume seed, read-only role provisioning; `docs/containerization.md`)
+- Docker (containerized stack — `compose.yaml`: db + pipeline + viz images, data-volume
+  seed, read-only role provisioning; `docs/containerization.md`)
 - GitHub Actions (CI, planned — #14)
 
 ## Data
@@ -89,8 +89,7 @@ docker compose -f local_compose.yaml up --build --wait db viz
   (`docker/viz_reader.sql`); `pipeline` runs `run-all` on demand
   (`docker compose -f local_compose.yaml run --rm pipeline`); `viz` serves the
   Streamlit app on http://localhost:8501. (The server/deploy variant is
-  `fat_compose.yaml` — nginx entry point, no published viz port; the slimmed
-  `compose.yaml` slots in later, issue #34.)
+  `compose.yaml` — nginx entry point, no published viz port.)
 - Verify the marts:
   `docker compose -f local_compose.yaml exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"`
 - *Alternative: seed a remote PostGIS and point the seed script's `DB_HOST`/`DB_PORT`

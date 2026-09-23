@@ -16,7 +16,7 @@
 #
 # Usage:  scripts/seed_data_volume.sh [VOLUME_NAME]
 #         VOLUME_NAME defaults to ${ETL_DATA_VOLUME:-etl_data} (must match
-#         fat_compose.yaml / local_compose.yaml's volume).
+#         compose.yaml / local_compose.yaml's volume).
 #
 # Re-runnable: re-running overwrites the volume contents.
 

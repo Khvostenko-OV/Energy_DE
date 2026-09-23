@@ -21,16 +21,14 @@ connection settings into a detached volume the containers read.
  ├─ data/sources/*.gpkg, data/boundaries/*.gpkg   (private, git-ignored)
  ├─ scripts/seed_data_volume.sh  ── once per machine ──►  volume: etl_data
  │                                                       (data + docker.env)
- ├─ fat_compose.yaml:  db       (imresamu/postgis)        ┐
- ├─ fat_compose.yaml:  pipeline    (build .; run-all) ──► db ─┤ network
- ├─ fat_compose.yaml:  viz         (Dockerfile.viz)        ───┤
- └─ fat_compose.yaml:  nginx       reverse-proxy 80 ──► viz ──┘
+ ├─ compose.yaml:  db          (imresamu/postgis)        ┐
+ ├─ compose.yaml:  pipeline    (build .; run-all) ──► db ─┤ network
+ ├─ compose.yaml:  viz         (Dockerfile.viz)        ───┤
+ └─ compose.yaml:  nginx       reverse-proxy 80 ──► viz ──┘
 ```
 
-The stack ships as **two compose variants**: `fat_compose.yaml` is the server/deploy
-variant (the pre-#34 server stack, kept byte-for-byte — renamed to free the
-`compose.yaml` name for a slimmed variant to slot in later) — the viz container
-publishes no host port, and `nginx` (port `${NGINX_PORT:-80}`)
+The stack ships as **two compose variants**: `compose.yaml` is the server/deploy
+variant — the viz container publishes no host port, and `nginx` (port `${NGINX_PORT:-80}`)
 is the only externally reachable surface, proxying to `viz:8501` with WebSocket
 upgrade headers for Streamlit's live runtime (`docker/nginx.conf`). `local_compose.yaml`
 is the local-dev twin: identical stack, but the viz app is published directly on
@@ -42,7 +40,7 @@ behaviour described below is identical in both.
 | Pipeline image | built from this repo (`Dockerfile`), exposes `python -m etl` unchanged |
 | PostGIS database | `db` service; PostGIS extension enabled by the image on first init; the read-only `viz_reader` role provisioned from `docker/viz_reader.sql` on the same init |
 | Visualization app | `viz` service (Streamlit + PyDeck, no auth), built from `Dockerfile.viz`, reads `core`/`service`/`marts` as `viz_reader`; publishes `http://localhost:8501` in `local_compose.yaml` only |
-| External entry point | `nginx` service (`nginx:stable-alpine`), publishes `${NGINX_PORT:-80}` → `viz:8501` with WebSocket support; only in `fat_compose.yaml` (server variant) |
+| External entry point | `nginx` service (`nginx:stable-alpine`), publishes `${NGINX_PORT:-80}` → `viz:8501` with WebSocket support; only in `compose.yaml` (server variant) |
 | Raw data + connection settings | detached named volume `etl_data`, seeded once per machine |
 | Volume mount | `etl_data` → `/app/data` (so `run-all`'s `data/sources/...`, `data/boundaries/...` resolve and both containers source `docker.env`) |
 | Smoke seam | `scripts/smoke_etl_container.sh` pins `COMPOSE_FILE=local_compose.yaml` — it probes the app over its published 8501 port, so it exercises the local variant |
@@ -111,15 +109,10 @@ On a **fresh database volume** the `db` service self-provisions the
 comes up fully provisioned. (An existing volume from before this change gets
 the role once by running the seam by hand — see below.)
 
-> The server stack currently lives in `fat_compose.yaml`, so the commands below
-> target it with `-f fat_compose.yaml` until a slimmed `compose.yaml` takes over
-> as the default (issue #34). Substitute `-f local_compose.yaml` for the local
-> variant — everything but nginx behaves the same.
-
 ```bash
-docker compose -f fat_compose.yaml build pipeline viz   # build both images
-docker compose -f fat_compose.yaml up -d --wait db      # db healthy (role provisioned on fresh db)
-docker compose -f fat_compose.yaml run --rm pipeline    # the full pass (run-all)
+docker compose build pipeline viz           # build both images
+docker compose up -d --wait db              # db healthy (role provisioned on fresh db)
+docker compose run --rm pipeline            # the full pass (run-all)
 ```
 
 The full pass runs extract → transform → load → marts against the compose
@@ -130,14 +123,13 @@ The image exposes the same CLI as the host, so any single stage works too (with
 `db` up):
 
 ```bash
-docker compose -f fat_compose.yaml up -d --wait db              # ensure db is healthy
-docker compose -f fat_compose.yaml run --rm pipeline python -m etl marts
-docker compose -f fat_compose.yaml run --rm pipeline python -m etl transform wind
+docker compose up -d --wait db                      # ensure db is healthy
+docker compose run --rm pipeline python -m etl marts
+docker compose run --rm pipeline python -m etl transform wind
 ```
 
 `DATABASE_URL` comes from the seeded volume. `run-all` is the default command,
-so a bare `docker compose -f fat_compose.yaml run --rm pipeline` runs the pass
-too.
+so a bare `docker compose run --rm pipeline` runs the pass too.
 
 ## Visualization app (viz)
 
@@ -148,7 +140,7 @@ role**, so the app can never mutate the database even if the app itself were
 compromised. The app is reached differently per variant:
 
 - **local** (`local_compose.yaml`): directly at <http://localhost:8501>.
-- **server** (`fat_compose.yaml`): through the `nginx` proxy at
+- **server** (`compose.yaml`): through the `nginx` proxy at
   `http://<host>` (port 80 by default); the viz container publishes no host
   port. Streamlit's live runtime is a WebSocket, so `docker/nginx.conf`
   forwards `Upgrade`/`Connection` headers and keeps long-lived connections
@@ -187,14 +179,14 @@ and falls back to `DATABASE_URL` on the dev host (`viz/data.py`).
 > `viz`). Change both together. Existing database volumes (created before this
 > issue) provision the role once by hand:
 > ```bash
-> docker compose -f fat_compose.yaml exec -T db psql -U etl -d energy_de -f \
+> docker compose exec -T db psql -U etl -d energy_de -f \
 >   /docker-entrypoint-initdb.d/99-viz-reader.sql
 > ```
 
 ## Verify the marts
 
 ```bash
-docker compose -f fat_compose.yaml exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"
+docker compose exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"
 ```
 
 The three materialized views exist in schema `marts` at state grain
@@ -228,7 +220,7 @@ scripts/smoke_etl_container.sh
 | `POSTGRES_DB` | `energy_de` | default database, PostGIS enabled there |
 | `POSTGRES_PORT` | `5433` | host port for the db (5432 is the in-network/default dev port) |
 | `VIZ_PORT` | `8501` | host port for the viz app (`local_compose.yaml` only) |
-| `NGINX_PORT` | `80` | host port for the nginx reverse proxy (`fat_compose.yaml`, server variant) |
+| `NGINX_PORT` | `80` | host port for the nginx reverse proxy (`compose.yaml`, server variant) |
 | `DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`/`DB_NAME` | `etl`/`etl`/`db`/`5432`/`energy_de` | what the seed script writes into `docker.env` `DATABASE_URL` (for the pipeline) |
 | `VIZ_USER`/`VIZ_PASSWORD` | `viz_reader`/`viz` | what the seed script writes into `docker.env` `VIZ_DATABASE_URL` (for the viz app); must match `docker/viz_reader.sql` |
 
@@ -240,8 +232,8 @@ the seed writes are coupled pairs: if you change `POSTGRES_PASSWORD` or
 ## Teardown / start over
 
 ```bash
-docker compose -f fat_compose.yaml down --remove-orphans   # stop and remove containers + network
-docker compose -f fat_compose.yaml down -v                 # also delete the db volume (fresh stack)
+docker compose down --remove-orphans   # stop and remove containers + network
+docker compose down -v                 # also delete the db volume (fresh stack)
 ```
 
 The data volume is deliberately **external to compose** (`external: true`), so it

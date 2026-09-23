@@ -60,25 +60,20 @@ export DB_USER=etl DB_PASSWORD='<you-know>'
 
 ## 5. Build images + seed the data volume (once per machine)
 
-The server stack lives in `fat_compose.yaml` (the pre-#34 compose preserved
-under the new name); the commands target it with `-f fat_compose.yaml` until a
-slimmed `compose.yaml` takes over as the default (issue #34).
-
 ```bash
-docker compose -f fat_compose.yaml build pipeline viz
+docker compose build pipeline viz
 ./scripts/seed_data_volume.sh     # creates etl_data volume: raw data + docker.env
 ```
 
 ## 6. Start PostGIS, run the pipeline, reach the viz app
 
 ```bash
-docker compose -f fat_compose.yaml up -d --wait db      # waits until the DB really accepts TCP
-docker compose -f fat_compose.yaml run --rm pipeline    # python -m etl run-all; non-zero exit = loud failure
-docker compose -f fat_compose.yaml up -d --wait viz nginx   # nginx reverse-proxies the viz app
+docker compose up -d --wait db      # waits until the DB really accepts TCP
+docker compose run --rm pipeline    # python -m etl run-all; non-zero exit = loud failure
+docker compose up -d --wait viz nginx   # nginx reverse-proxies the viz app
 ```
 
-On the server you run the **server variant** (`fat_compose.yaml`, the pre-#34
-server stack kept byte-for-byte under its new name): the viz container
+On the server you run the **server variant** (`compose.yaml`): the viz container
 publishes no host port — `nginx` (port 80 by default, `NGINX_PORT`) is the only
 externally reachable surface and proxies to `viz:8501` (WebSocket upgrade headers
 in `docker/nginx.conf`, so Streamlit's live runtime works through it).
@@ -102,18 +97,18 @@ A fresh db volume provisions the read-only `viz_reader` role automatically from
 that predates issue #28, run the seam once by hand:
 
 ```bash
-docker compose -f fat_compose.yaml exec -T db psql -U etl -d energy_de -f \
+docker compose exec -T db psql -U etl -d energy_de -f \
   /docker-entrypoint-initdb.d/99-viz-reader.sql
 ```
 
 One-shot alternative for a full pipeline pass:
 
 ```bash
-docker compose -f fat_compose.yaml run --rm pipeline
+docker compose run --rm pipeline
 ```
 
-Re-runs are idempotent — repeat `docker compose -f fat_compose.yaml run --rm
-pipeline` at any time to refresh the marts from the loaded raw tables.
+Re-runs are idempotent — repeat `docker compose run --rm pipeline` at any time
+to refresh the marts from the loaded raw tables.
 
 > **Local dev:** the repo also ships `local_compose.yaml`, the twin variant for
 > dev machines where the app is published directly at `http://localhost:8501`
@@ -122,9 +117,9 @@ pipeline` at any time to refresh the marts from the loaded raw tables.
 ## 7. Verify the marts (incl. the `outside` bucket)
 
 ```bash
-docker compose -f fat_compose.yaml exec -T db psql -U etl -d energy_de -c \
+docker compose exec -T db psql -U etl -d energy_de -c \
   "SELECT region, count(*) FROM marts.installation_counts GROUP BY 1 ORDER BY 2 DESC LIMIT 6"
-docker compose -f fat_compose.yaml exec -T db psql -U etl -d energy_de -c \
+docker compose exec -T db psql -U etl -d energy_de -c \
   "SELECT count(*) FROM marts.installation_counts WHERE region='outside'"
 ```
 
@@ -151,11 +146,11 @@ sudo ufw enable
 
 ## 9. Starting over / backups
 
-- Fresh rebuild: `docker compose -f fat_compose.yaml down -v`, then remove
-  the data volume (`docker volume rm etl_data`), re-seed, and `up`.
+- Fresh rebuild: `docker compose down -v`, then remove the data volume
+  (`docker volume rm etl_data`), re-seed, and `up`.
 - Backups: the loaded DB lives in the `energy-de-etl_db_data` volume, the seeds
   in `etl_data`. The simplest durable backup is:
 
 ```bash
-docker compose -f fat_compose.yaml exec -T db pg_dump -U etl energy_de > backup.sql
+docker compose exec -T db pg_dump -U etl energy_de > backup.sql
 ```

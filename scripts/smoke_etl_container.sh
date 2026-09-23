@@ -12,7 +12,7 @@
 # (full-stack verification) builds on it. The pipeline's own integration suite
 # still owns pipeline semantics.
 #
-# The stack runs in two compose variants: `fat_compose.yaml` is the server/deploy
+# The stack runs in two compose variants: `compose.yaml` is the server/deploy
 # variant (nginx reverse-proxies the viz app; no host port is published for
 # Streamlit), and `local_compose.yaml` is the local-dev variant (viz directly
 # published on host port 8501). This smoke exercises the local variant: it
@@ -30,7 +30,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # Local-dev compose variant (viz published on 8501). The deploy variant
-# (fat_compose.yaml) goes through nginx instead, which this smoke does not cover.
+# (compose.yaml) goes through nginx instead, which this smoke does not cover.
 COMPOSE_FILE="${COMPOSE_FILE:-local_compose.yaml}"
 # docker compose only sees an *exported* COMPOSE_FILE; without this it would
 # fall back to the (now nonexistent) default compose.yaml.
