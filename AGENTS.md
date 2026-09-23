@@ -6,7 +6,7 @@ Implemented. The ETL pipeline (GeoPandas → PostGIS) runs end-to-end from the C
 function name) and is covered by a full integration test suite. Containerized:
 a pipeline image + PostGIS + Streamlit-viz compose stack with a one-time data-volume
 seed, read-only `viz_reader` role provisioning (dev-host SQL seam in
-`docker/viz_reader.sql`), and a smoke seam (`compose.yaml`,
+`docker/viz_reader.sql`), and a smoke seam (`fat_compose.yaml`,
 `scripts/seed_data_volume.sh`, `scripts/smoke_etl_container.sh`; see
 `docs/containerization.md`).
 Treat `TechnicalSpecification.md` as the single authoritative source for data models, table

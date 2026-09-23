@@ -12,7 +12,7 @@
 # (full-stack verification) builds on it. The pipeline's own integration suite
 # still owns pipeline semantics.
 #
-# The stack runs in two compose variants: `compose.yaml` is the server/deploy
+# The stack runs in two compose variants: `fat_compose.yaml` is the server/deploy
 # variant (nginx reverse-proxies the viz app; no host port is published for
 # Streamlit), and `local_compose.yaml` is the local-dev variant (viz directly
 # published on host port 8501). This smoke exercises the local variant: it
@@ -30,8 +30,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # Local-dev compose variant (viz published on 8501). The deploy variant
-# (compose.yaml) goes through nginx instead, which this smoke does not cover.
+# (fat_compose.yaml) goes through nginx instead, which this smoke does not cover.
 COMPOSE_FILE="${COMPOSE_FILE:-local_compose.yaml}"
+# docker compose only sees an *exported* COMPOSE_FILE; without this it would
+# fall back to the (now nonexistent) default compose.yaml.
+export COMPOSE_FILE
 
 VOLUME_NAME="${ETL_DATA_VOLUME:-etl_data}"
 DB_USER="${DB_USER:-etl}"
@@ -176,8 +179,10 @@ else
 fi
 
 step "Seeded volume carries VIZ_DATABASE_URL the app reads"
-if docker compose exec -T viz grep -q "^export VIZ_DATABASE_URL=postgresql://$VIZ_USER:" \
-    /app/data/docker.env; then
+# The viz container is distroless (no shell/grep — issue #34), so check the
+# seeded docker.env from inside it with the python interpreter instead.
+if docker compose exec -T viz python -c \
+    "import sys; sys.exit(0) if any(l.startswith(r'export VIZ_DATABASE_URL=postgresql://$VIZ_USER:') for l in open('/app/data/docker.env')) else sys.exit(1)"; then
     printf 'PASS: VIZ_DATABASE_URL present in docker.env (viz container mount)\n'
 else
     fail "VIZ_DATABASE_URL missing from /app/data/docker.env"

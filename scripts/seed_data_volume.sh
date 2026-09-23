@@ -16,7 +16,7 @@
 #
 # Usage:  scripts/seed_data_volume.sh [VOLUME_NAME]
 #         VOLUME_NAME defaults to ${ETL_DATA_VOLUME:-etl_data} (must match
-#         compose.yaml / local_compose.yaml's volume).
+#         fat_compose.yaml / local_compose.yaml's volume).
 #
 # Re-runnable: re-running overwrites the volume contents.
 
@@ -59,6 +59,11 @@ docker exec -i "$HELPER" sh -c "cat > /data/docker.env" <<EOF
 export DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
 export VIZ_DATABASE_URL=postgresql://${VIZ_USER}:${VIZ_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
 EOF
+
+# The container images run as NON-ROOT (distroless runtime, issue #34), so the
+# seeded files must be readable by any user. `docker cp` preserves the host
+# modes — private data files are often 600 — so loosen them explicitly.
+docker exec "$HELPER" sh -c "chmod -R a+rX /data"
 
 echo
 echo "Volume contents:"

@@ -1,43 +1,68 @@
-# Streamlit + PyDeck viz service image (issue #28).
+# Streamlit + PyDeck viz service image (issue #28; distroless multistage, #34).
 #
 # Ships the local viz app (`streamlit run viz/app.py`, viz/ + requirements-viz)
-# unchanged in its own container next to the pipeline.  The same packaging
-# pattern as the pipeline image: nothing data- or connection-setting-like is
-# baked in — the detached data volume mounted at /app/data carries
-# /app/data/docker.env, whose VIZ_DATABASE_URL the shared entrypoint sources
-# (the app already reads VIZ_DATABASE_URL with a DATABASE_URL fallback in
-# viz/data.py).  Requires the provisioning SQL (docker/viz_reader.sql) to have
-# run on the database — a fresh compose db does that automatically via its
-# /docker-entrypoint-initdb.d hook.
+# unchanged in its own container next to the pipeline.  The same distroless
+# multistage packaging as the pipeline image (see Dockerfile): a `-dev` builder
+# installs pipeline + viz requirements into a venv, the minimal non-root runtime
+# copies the venv + code — no shell/pip, and the Python entrypoint
+# (docker/entrypoint.py) replaces the old shell one.
+#
+# Nothing data- or connection-setting-like is baked in — the detached data
+# volume mounted at /app/data carries /app/data/docker.env, whose
+# VIZ_DATABASE_URL the shared entrypoint loads (the app already reads
+# VIZ_DATABASE_URL with a DATABASE_URL fallback in viz/data.py).  Requires the
+# provisioning SQL (docker/viz_reader.sql) to have run on the database — a fresh
+# compose db does that automatically via its /docker-entrypoint-initdb.d hook.
 
-FROM python:3.12-slim
+FROM cgr.dev/chainguard/python:latest-dev AS builder
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+ENV HOME=/tmp \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# The builder stage runs as root so the venv can live at the spec's /venv;
+# only this throwaway stage is root — the runtime image stays non-root and its
+# /venv is root-owned but world-readable.
+USER root
 
 # Pipeline + viz requirements: the viz runtime layers on top of the pipeline
 # set exactly like the documented host install (requirements.txt +
 # requirements-viz.txt), so one copy of each stays the single source of truth.
 COPY requirements.txt requirements-viz.txt ./
-RUN pip install -r requirements.txt -r requirements-viz.txt
+RUN python -m venv /venv \
+    && /venv/bin/pip install --no-cache-dir --only-binary=:all: \
+         -r requirements.txt -r requirements-viz.txt \
+    && find /venv -type f -name '*.pyc' -delete \
+    && find /venv -type d -name '__pycache__' -empty -delete
+
+FROM cgr.dev/chainguard/python:latest
+
+WORKDIR /app
+
+ENV PATH=/venv/bin:$PATH \
+    HOME=/tmp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+COPY --from=builder /venv /venv
 
 # The viz package and the etl package it imports (<etl.db_schema> supplies
 # CORE_SCHEMA; the etl requirements are already installed above).
 COPY viz/ ./viz/
 COPY etl/ ./etl/
 
-COPY docker/entrypoint.sh /usr/local/bin/etl-entrypoint
-RUN chmod +x /usr/local/bin/etl-entrypoint
+# entrypoint.py carries the +x bit in the build context, so it is executable
+# as-is (the distroless runtime has no shell, so no `RUN chmod` is possible).
+COPY docker/entrypoint.py /usr/local/bin/etl-entrypoint
 
 # Reachable inside the container and from the compose network; the host port
-# mapping (VIZ_PORT, 8501) lives in compose.yaml.  headless: no "email to
+# mapping (VIZ_PORT, 8501) lives in the compose files.  headless: no "email to
 # upgrade" prompt to block startup in the container.
 STOPSIGNAL SIGINT
 
-ENTRYPOINT ["etl-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/etl-entrypoint"]
 CMD ["streamlit", "run", "viz/app.py", \
      "--server.headless", "true", \
      "--server.address", "0.0.0.0", \
