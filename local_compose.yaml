@@ -44,6 +44,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-etl}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-etl}
       POSTGRES_DB: ${POSTGRES_DB:-energy_de}
+    restart: always
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
@@ -82,6 +83,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.viz
+    restart: always
     # "streamlit run viz/app.py --server.headless --server.address
     # 0.0.0.0 --server.port 8501" is the image's default command; nothing to
     # override here. The entrypoint sources VIZ_DATABASE_URL from the seeded
