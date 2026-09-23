@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
-from etl.db_schema import (
+from etl.config import (
     BAD_QUALITY_PROPERTY,
     CLOSE_LOCATION_REASON,
     CLOSE_TO_PROPERTY,

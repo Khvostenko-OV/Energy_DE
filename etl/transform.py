@@ -10,7 +10,7 @@ import numpy
 import pandas
 
 from etl.config import SOURCE_NAMES, get_engine
-from etl.db_schema import (
+from etl.config import (
     BAD_QUALITY_PROPERTY,
     BOUNDARY_LEVEL_COLUMNS,
     DECOMPOSED_PROPERTIES,

@@ -13,7 +13,7 @@ import uuid
 import pytest
 from sqlalchemy import create_engine, text
 
-from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_STATE
+from etl.config import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_STATE
 from etl.load import load_generators, load_storages
 from etl.marts import MART_DEFINITIONS, build_marts, verify_marts
 

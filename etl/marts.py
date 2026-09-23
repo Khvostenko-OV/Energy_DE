@@ -22,7 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from etl.config import get_engine
-from etl.db_schema import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_STATE
+from etl.config import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_STATE
 from etl.db_utils import _ensure_schema, _table_exists
 from etl.reports import MartsReport
 from etl.verify import _verify_marts

@@ -110,19 +110,19 @@ class TestBasemapDefaults:
 
 class TestSchemaConstants:
     """The viz package is standalone (no ``etl`` import), so its schema-name
-    constants must stay in lockstep with the pipeline's `etl.db_schema`."""
+    constants must stay in lockstep with the pipeline's `etl.config`."""
 
     def test_core_schema_matches_etl(self):
-        from etl.db_schema import CORE_SCHEMA as ETL_CORE
+        from etl.config import CORE_SCHEMA as ETL_CORE
 
         assert CORE_SCHEMA == ETL_CORE
 
     def test_service_schema_matches_etl(self):
-        from etl.db_schema import SERVICE_SCHEMA as ETL_SERVICE
+        from etl.config import SERVICE_SCHEMA as ETL_SERVICE
 
         assert SERVICE_SCHEMA == ETL_SERVICE
 
     def test_marts_schema_matches_etl(self):
-        from etl.db_schema import MARTS_SCHEMA as ETL_MARTS
+        from etl.config import MARTS_SCHEMA as ETL_MARTS
 
         assert MARTS_SCHEMA == ETL_MARTS

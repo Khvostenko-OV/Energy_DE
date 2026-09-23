@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from etl.config import SOURCE_NAMES
-from etl.db_schema import BOUNDARY_SIMPLIFY_TOLERANCE, RAW_SCHEMA, SERVICE_SCHEMA
+from etl.config import BOUNDARY_SIMPLIFY_TOLERANCE, RAW_SCHEMA, SERVICE_SCHEMA
 
 # Filename stem per canonical source key (ordered as SOURCE_NAMES). The ETL
 # discovers unit sources by filename, so the two rigs that look like real

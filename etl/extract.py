@@ -10,7 +10,7 @@ import geopandas as gpd
 import pandas
 
 from etl.config import get_engine
-from etl.db_schema import (
+from etl.config import (
     BOUNDARY_COLUMNS,
     BOUNDARY_COLUMN_MAPPING,
     BOUNDARY_SIMPLIFY_TOLERANCE,

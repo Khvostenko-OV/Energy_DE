@@ -10,7 +10,7 @@ from sqlalchemy.engine import Engine
 if TYPE_CHECKING:
     from etl.marts import _MartDefinition
 
-from etl.db_schema import (
+from etl.config import (
     BAD_QUALITY_PROPERTY,
     CLOSE_LOCATION_REASON,
     COLLISION_PROPERTY,

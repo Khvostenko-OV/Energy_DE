@@ -12,7 +12,7 @@ import os
 import pytest
 from sqlalchemy import create_engine, text
 
-from etl.db_schema import DECOMPOSED_PROPERTIES
+from etl.config import DECOMPOSED_PROPERTIES
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 

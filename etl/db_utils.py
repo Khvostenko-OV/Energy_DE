@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from etl.db_schema import (
+from etl.config import (
     CORE_SCHEMA,
     RAW_SCHEMA,
     SERVICE_SCHEMA,

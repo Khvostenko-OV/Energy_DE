@@ -11,7 +11,7 @@ import os
 import pytest
 from sqlalchemy import create_engine, text
 
-from etl.db_schema import (
+from etl.config import (
     BAD_QUALITY_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
