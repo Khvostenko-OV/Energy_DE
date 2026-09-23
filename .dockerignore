@@ -20,5 +20,8 @@ data/
 
 # Docs are not installed in the image
 *.md
-opencode.json
-skills-lock.json
+docs/
+
+# Agentic tools
+.agents/
+*.json
