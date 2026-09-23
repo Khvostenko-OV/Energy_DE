@@ -46,7 +46,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from etl.db_schema import CORE_SCHEMA
+from viz.config import CORE_SCHEMA, SERVICE_SCHEMA
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -172,7 +172,7 @@ def units_query(
     active unit qualifies and no ``name`` column is projected.
     """
     sql = (
-        f"SELECT {_projection(columns, area_column)} FROM core.{table} "
+        f"SELECT {_projection(columns, area_column)} FROM {CORE_SCHEMA}.{table} "
         "WHERE energy_source = ANY(:sources) "
         f"AND {ACTIVE_UNIT_PREDICATE}"
     )
@@ -294,7 +294,7 @@ def boundaries_query(level: int) -> tuple[str, dict]:
     """
     sql = (
         "SELECT name, area, geojson "
-        "FROM service.boundaries WHERE level = :level ORDER BY name"
+        f"FROM {SERVICE_SCHEMA}.boundaries WHERE level = :level ORDER BY name"
     )
     return sql, {"level": level}
 
@@ -312,7 +312,7 @@ def boundary_names_query(level: int) -> tuple[str, dict]:
     so the multiselect options (and the fit-view scope signature) stay stable
     across reruns regardless of storage order.
     """
-    sql = "SELECT name FROM service.boundaries WHERE level = :level ORDER BY name"
+    sql = f"SELECT name FROM {SERVICE_SCHEMA}.boundaries WHERE level = :level ORDER BY name"
     return sql, {"level": level}
 
 

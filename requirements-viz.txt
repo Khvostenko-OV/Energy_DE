@@ -1,7 +1,7 @@
 # Visualization layer (Streamlit + PyDeck app, issues #23-...). Self-contained:
 # the viz runtime installs ONLY this file — the pipeline-only deps (click,
-# geopandas, geoalchemy2) never enter the viz image. `etl` is imported read-side
-# (schema constants only), so its requirements are intentionally absent here.
+# geopandas, geoalchemy2) never enter the viz image.  The viz package never
+# imports `etl`; the schema names it reads are duplicated in `viz/config.py`.
 pandas>=2.0
 psycopg2-binary>=2.9
 python-dotenv>=1.0

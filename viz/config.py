@@ -10,9 +10,17 @@ from __future__ import annotations
 
 from datetime import date
 
+# Database-schema names the app reads from.  The viz package is deliberately
+# standalone — no `etl` import — so these duplicate `etl.db_schema` string
+# values; `tests/test_viz_config.py` pins them to the etl originals so the two
+# can't drift apart.
+SERVICE_SCHEMA = "service"
+CORE_SCHEMA = "core"
+MARTS_SCHEMA = "marts"
+
 # Sidebar chooser order, topmost level first.  The drill levels mirror the
-# spatial progression of `etl.db_schema.BOUNDARY_LEVEL_COLUMNS` (state,
-# region, district) under the country overview.
+# spatial progression of the etl boundary levels (state, region, district)
+# under the country overview.
 MAP_LEVELS = ("Germany", "States (Bundesländer + EEZ)", "Regions (Regierungsbezirke)", "Districts (Landkreise)")
 
 # The drill level selected on first run.

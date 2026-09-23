@@ -8,6 +8,7 @@ view), so these tests read as a spec of what those defaults are.
 from datetime import date
 
 from viz.config import (
+    CORE_SCHEMA,
     DEFAULT_SOURCES,
     GERMANY_CENTER,
     INITIAL_LEVEL,
@@ -17,6 +18,8 @@ from viz.config import (
     LIGHT_MAP_STYLE,
     MAP_HEIGHT,
     MAP_LEVELS,
+    MARTS_SCHEMA,
+    SERVICE_SCHEMA,
     STANDBY_MAP_HEIGHT,
     TIMESCOPE_START,
     default_timescope,
@@ -103,3 +106,23 @@ class TestBasemapDefaults:
         assert LIGHT_MAP_STYLE.startswith(
             "https://basemaps.cartocdn.com/gl/positron-gl-style/"
         )
+
+
+class TestSchemaConstants:
+    """The viz package is standalone (no ``etl`` import), so its schema-name
+    constants must stay in lockstep with the pipeline's `etl.db_schema`."""
+
+    def test_core_schema_matches_etl(self):
+        from etl.db_schema import CORE_SCHEMA as ETL_CORE
+
+        assert CORE_SCHEMA == ETL_CORE
+
+    def test_service_schema_matches_etl(self):
+        from etl.db_schema import SERVICE_SCHEMA as ETL_SERVICE
+
+        assert SERVICE_SCHEMA == ETL_SERVICE
+
+    def test_marts_schema_matches_etl(self):
+        from etl.db_schema import MARTS_SCHEMA as ETL_MARTS
+
+        assert MARTS_SCHEMA == ETL_MARTS

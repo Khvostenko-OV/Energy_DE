@@ -7,10 +7,10 @@
 # minimal non-root runtime copies the venv + code — no shell/pip, and the Python
 # entrypoint (docker/entrypoint.py) replaces the old shell one.
 #
-# The viz runtime needs only pandas / SQLAlchemy / psycopg2 / python-dotenv +
-# streamlit / pydeck (it reads `etl.db_schema` — pure constants — not the
-# pipeline). It therefore installs requirements-viz.txt alone; the heavy
-# pipeline-only deps (click, geopandas, geoalchemy2) stay out of the image.
+# The viz runtime is standalone — it needs only pandas / SQLAlchemy / psycopg2 /
+# python-dotenv + streamlit / pydeck; the schema names it reads live in
+# viz/config.py, so no `etl` code is shipped and the pipeline-only deps (click,
+# geopandas, geoalchemy2) stay out of the image.
 #
 # Nothing data- or connection-setting-like is baked in — the detached data
 # volume mounted at /app/data carries /app/data/docker.env, whose
@@ -51,10 +51,9 @@ ENV PATH=/venv/bin:$PATH \
 
 COPY --from=builder /venv /venv
 
-# The viz package and the etl package it imports (<etl.db_schema> supplies
-# CORE_SCHEMA — pure constants, satisfied by the viz requirements alone).
+# The viz package only — it is fully standalone and imports no `etl` code
+# (schema names are duplicated in viz/config.py, pinned by test_viz_config).
 COPY viz/ ./viz/
-COPY etl/ ./etl/
 
 # entrypoint.py carries the +x bit in the build context, so it is executable
 # as-is (the distroless runtime has no shell, so no `RUN chmod` is possible).
