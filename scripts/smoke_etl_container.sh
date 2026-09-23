@@ -8,9 +8,9 @@
 # read-only `viz_reader` role is provisioned and can read core/service/marts,
 # and the viz service passes Streamlit's `/_stcore/health` probe on port 8501.
 #
-# This is the seam the containerization work is verified against; issue #16
-# (full-stack verification) builds on it. The pipeline's own integration suite
-# still owns pipeline semantics.
+# This is the seam the containerization work is verified against: it covers
+# issue #16's full-stack verification intent (one command proves the stack).
+# The pipeline's own integration suite still owns pipeline semantics.
 #
 # The stack runs in two compose variants: `compose.yaml` is the server/deploy
 # variant (nginx reverse-proxies the viz app; no host port is published for
