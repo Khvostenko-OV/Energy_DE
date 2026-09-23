@@ -8,6 +8,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 load_dotenv(REPO_ROOT / ".env")
 
+# Database schema names, overridable via env (defaults shown).  This module is
+# the single home for `.env`-driven settings: `etl.db_schema` re-exports these
+# names so `from etl.db_schema import ...` callers keep working.
+RAW_SCHEMA = os.environ.get("RAW_SCHEMA", "raw")
+STAGING_SCHEMA = os.environ.get("STAGING_SCHEMA", "stage")
+CORE_SCHEMA = os.environ.get("CORE_SCHEMA", "core")
+SERVICE_SCHEMA = os.environ.get("SERVICE_SCHEMA", "service")
+MARTS_SCHEMA = os.environ.get("MARTS_SCHEMA", "marts")
+
 SOURCE_NAMES = ("bio", "gas", "hydro", "solar", "wind", "storage")
 
 

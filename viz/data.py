@@ -36,19 +36,14 @@ the old spatial join silently folded such units into the polygon their
 
 from __future__ import annotations
 
-import os
 from datetime import date
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from viz.config import CORE_SCHEMA, SERVICE_SCHEMA
-
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+from viz.config import CORE_SCHEMA, SERVICE_SCHEMA, database_url
 
 # The core tables the map renders; absent tables mean the app shows the
 # "No core tables" standby map instead of a failed ``FROM core.<table>``
@@ -93,9 +88,9 @@ AREA_NAME_ALIAS = "name"
 
 
 def get_viz_engine() -> Engine:
-    """Engine for the viz read path: ``VIZ_DATABASE_URL`` when present, else ``DATABASE_URL``."""
-    url = os.environ.get("VIZ_DATABASE_URL") or os.environ["DATABASE_URL"]
-    return create_engine(url)
+    """Engine for the viz read path — the connection URL resolved by
+    `viz.config.database_url` (VIZ_DATABASE_URL with a DATABASE_URL fallback)."""
+    return create_engine(database_url())
 
 
 def missing_core_tables(

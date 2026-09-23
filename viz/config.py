@@ -8,15 +8,35 @@ Light basemap style, and the Germany-overview view state.  Widgets in
 
 from __future__ import annotations
 
+import os
 from datetime import date
+from pathlib import Path
 
-# Database-schema names the app reads from.  The viz package is deliberately
-# standalone — no `etl` import — so these duplicate `etl.db_schema` string
-# values; `tests/test_viz_config.py` pins them to the etl originals so the two
-# can't drift apart.
-SERVICE_SCHEMA = "service"
-CORE_SCHEMA = "core"
-MARTS_SCHEMA = "marts"
+from dotenv import load_dotenv
+
+# The viz package is deliberately standalone — no `etl` import — so this module
+# is its single home for `.env`-driven settings (db schema names + connection
+# URLs), mirroring `etl.config`'s role for the pipeline.
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+# Database-schema names the app reads from.  Overridable via env (defaults
+# shown); `tests/test_viz_config.py` pins them to the etl originals so the two
+# sides can't drift apart.
+SERVICE_SCHEMA = os.environ.get("SERVICE_SCHEMA", "service")
+CORE_SCHEMA = os.environ.get("CORE_SCHEMA", "core")
+MARTS_SCHEMA = os.environ.get("MARTS_SCHEMA", "marts")
+
+
+def database_url() -> str:
+    """The viz read-path connection: ``VIZ_DATABASE_URL`` when set, else
+    ``DATABASE_URL`` (one of the two must be set — mirrors viz.data's old
+    fallback)."""
+    url = os.environ.get("VIZ_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if url is None:
+        raise KeyError("DATABASE_URL")
+    return url
+
 
 # Sidebar chooser order, topmost level first.  The drill levels mirror the
 # spatial progression of the etl boundary levels (state, region, district)

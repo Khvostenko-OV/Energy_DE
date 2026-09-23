@@ -2,13 +2,20 @@
 
 Single home for the tables the pipeline builds, so the raw/extract, stage/
 transform, and verification layers all read the same layout.
+
+The schema *names* are env-configurable with defaults — they are owned by
+`etl.config` (the single home for `.env` reads) and re-exported here so the
+`from etl.db_schema import <SCHEMA>` callers keep working; the column shapes
+and boundary mapping below are fixed.
 """
 
-RAW_SCHEMA = "raw"
-STAGING_SCHEMA = "stage"
-CORE_SCHEMA = "core"
-SERVICE_SCHEMA = "service"
-MARTS_SCHEMA = "marts"
+from etl.config import (
+    CORE_SCHEMA,
+    MARTS_SCHEMA,
+    RAW_SCHEMA,
+    SERVICE_SCHEMA,
+    STAGING_SCHEMA,
+)
 
 # State key shown for units the spatial join left outside every boundary; a
 # state-null unit is a load-stage collision that still reaches core, so the
