@@ -62,15 +62,19 @@ def _teardrop(d: ImageDraw.ImageDraw, cell: int, cx: float, cy: float, r: float,
 
 
 def _wind_cross(d: ImageDraw.ImageDraw, cell: int) -> None:
-    # X: two diagonal bars, cut flush with the cell bounds.
-    hw = 0.08
-    off = hw / math.sqrt(2)
-    for (e1, e2) in (((0.18, 0.18), (0.82, 0.82)), ((0.18, 0.82), (0.82, 0.18))):
+    # X: two diagonal bars crossing at the centre.
+    def bar(e1: tuple[float, float], e2: tuple[float, float]) -> None:
+        dx, dy = e2[0] - e1[0], e2[1] - e1[1]
+        length = math.hypot(dx, dy)
+        ox, oy = (dy / length) * 0.08, -(dx / length) * 0.08
         pts = (
-            (e1[0] - off, e1[1] + off), (e1[0] + off, e1[1] - off),
-            (e2[0] + off, e2[1] - off), (e2[0] - off, e2[1] + off),
+            (e1[0] + ox, e1[1] + oy), (e1[0] - ox, e1[1] - oy),
+            (e2[0] - ox, e2[1] - oy), (e2[0] + ox, e2[1] + oy),
         )
         d.polygon([P(cell, x, y) for x, y in pts], fill=WHITE)
+
+    bar((0.18, 0.18), (0.82, 0.82))  # top-left → bottom-right
+    bar((0.18, 0.82), (0.82, 0.18))  # bottom-left → top-right
 
 
 def _solar_bullet(d: ImageDraw.ImageDraw, cell: int) -> None:
