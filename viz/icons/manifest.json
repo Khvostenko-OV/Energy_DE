@@ -1,0 +1,40 @@
+{
+  "cell": 256,
+  "icons": {
+    "storage": {
+      "col": 0,
+      "row": 0,
+      "file": "storage.png"
+    },
+    "wind": {
+      "col": 1,
+      "row": 0,
+      "file": "wind.png"
+    },
+    "solar": {
+      "col": 2,
+      "row": 0,
+      "file": "solar.png"
+    },
+    "hydro": {
+      "col": 3,
+      "row": 0,
+      "file": "hydro.png"
+    },
+    "gas": {
+      "col": 4,
+      "row": 0,
+      "file": "gas.png"
+    },
+    "bio": {
+      "col": 5,
+      "row": 0,
+      "file": "bio.png"
+    },
+    "diesel": {
+      "col": 6,
+      "row": 0,
+      "file": "diesel.png"
+    }
+  }
+}
