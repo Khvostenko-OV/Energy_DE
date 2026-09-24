@@ -87,6 +87,7 @@ from viz.header import (
     format_unit_count,
     scope_title,
 )
+from viz.icon_atlas import icon_data_uri
 from viz.map_builder import (
     build_boundary_layer,
     build_choropleth_layer,
@@ -101,14 +102,25 @@ from viz.viewport import fit_viewstate, geometry_points, should_refit
 # mirroring the canonical palette ordering reversed from SOURCE_LAYER_ORDER.
 SOURCE_DISPLAY_ORDER: tuple[str, ...] = tuple(reversed(SOURCE_LAYER_ORDER))
 
-# Colored bullet before each per-source checkbox label.  Label text is
-# sanitized markdown (no inline HTML), so the dots arrive as CSS keyed on the
-# widget's `st-key-<key>` class, painted with the source's palette color.
-SOURCE_BULLET_STYLES = "\n".join(
+# Per-source sprite shown before each checkbox label.  Label text is
+# sanitized markdown (no inline HTML), so the icons arrive as CSS keyed on the
+# widget's `st-key-<key>` class.  The sprites are white glyphs on transparency
+# (for the map's `mask=True` tinting), which would vanish on the white sidebar;
+# here the CSS `mask-image` cuts the glyph shape out of the source's palette
+# color — the HTML/CSS analogue of the deck.gl tint.  PNGs are inlined as data
+# URIs, since the distroless runtime has no static file serving.
+SOURCE_ICON_STYLES = "\n".join(
     (
         f"[data-testid='stSidebar'] .st-key-source_{source} "
         "[data-testid='stWidgetLabel'] p::before "
-        f"{{ content: '● '; color: {source_color(source)}; }}"
+        "{ content: ''; display: inline-block; width: 16px; height: 16px; "
+        f"margin-right: 0.4em; vertical-align: -0.22em; "
+        f"background-color: {source_color(source)}; "
+        f"-webkit-mask-image: url('{icon_data_uri(source)}'); "
+        f"-webkit-mask-repeat: no-repeat; -webkit-mask-position: center; "
+        f"-webkit-mask-size: contain; "
+        f"mask-image: url('{icon_data_uri(source)}'); "
+        f"mask-repeat: no-repeat; mask-position: center; mask-size: contain; }}"
     )
     for source in SOURCE_DISPLAY_ORDER
 )
@@ -118,7 +130,7 @@ st.set_page_config(page_title="German Energy Units", layout="wide")
 # Trim the main-area margins so the map window dominates the page instead of
 # floating in a large padded block; hide the Streamlit status bar / main menu
 # so it doesn't overlap the header; size the compact header strip (labels and
-# values on one line); then paint the per-source sidebar bullets.
+# values on one line); then paint the per-source sidebar icons.
 st.markdown(
     "<style>"
     ".block-container { padding: 0.25rem 2rem 0.5rem 2rem; }"
@@ -127,7 +139,7 @@ st.markdown(
     "align-items: baseline; margin: 0 0 0.25rem; }"
     ".hdr-label { color: #5f6368; font-size: 0.9rem; margin-right: 0.2rem; }"
     ".hdr-value { font-size: 1.2rem; font-weight: 600; margin-right: 1.5rem; }"
-    f"{SOURCE_BULLET_STYLES}"
+    f"{SOURCE_ICON_STYLES}"
     "</style>",
     unsafe_allow_html=True,
 )
