@@ -78,7 +78,7 @@ def _wind_cross(d: ImageDraw.ImageDraw, cell: int) -> None:
 
 
 def _solar_bullet(d: ImageDraw.ImageDraw, cell: int) -> None:
-    r = 0.26
+    r = 0.312
     d.ellipse((P(cell, 0.5 - r, 0.5 - r), P(cell, 0.5 + r, 0.5 + r)), fill=WHITE)
 
 
