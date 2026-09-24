@@ -16,7 +16,7 @@ from __future__ import annotations
 ENERGY_COLORS = {
     "bio": "#43a047",
     "gas": "#ef6c00",
-    "hydro": "#1e88e5",
+    "hydro": "#0d47a1",
     "solar": "#fdd835",
     "wind": "#9c27b0",
     "diesel": "#6d4c41",

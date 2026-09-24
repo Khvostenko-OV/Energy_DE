@@ -12,7 +12,7 @@ from viz.palette import DEFAULT_COLOR, SOURCE_LAYER_ORDER, source_color
 
 class TestSourceColor:
     def test_loaded_sources_get_their_palette_hex(self):
-        assert source_color("hydro") == "#1e88e5"
+        assert source_color("hydro") == "#0d47a1"
         assert source_color("storage") == "#4e342e"
         assert source_color("wind") == "#9c27b0"
 
