@@ -10,7 +10,7 @@ Implemented. The ETL pipeline (extract → staging → core → marts) runs end-
 (`python -m etl <stage>`, or `run-all` for the whole pass; Click hyphenates the `run_all`
 Python function name) and is covered by a full integration
 test suite (pytest, 327 tests against a PostGIS dev DB), and the Streamlit viz app
-(`viz/`, T1–T4, no-auth map with per-source scatter layers, area choropleth and header
+(`viz/`, T1–T4, no-auth map with per-source icon layers (IconLayer), area choropleth and header
 aggregates) runs in the containerized stack. Design work recorded in:
 
 - **Spec** — `TechnicalSpecification.md` (authoritative source of truth for data models and stages)

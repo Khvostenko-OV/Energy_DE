@@ -100,7 +100,7 @@ def attach_tooltips(units: pd.DataFrame) -> pd.DataFrame:
     `source_header` and `unit_tooltip` — the card contract this module
     documents — so ``attach_tooltips`` adapts the pandas frame for them
     (one dict per row via ``itertuples``) instead of re-formatting the card
-    a second time.  The frame keeps every original column, so the scatter
+    a second time.  The frame keeps every original column, so the unit
     layers still carry the raw values alongside the decorated ones.
     """
     out = units.copy()

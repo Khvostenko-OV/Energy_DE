@@ -1,6 +1,6 @@
 """Streamlit entrypoint for the German Energy Units map (issues #23-#26).
 
-T2 (#24): renders one scatter layer per checked energy source with
+T2 (#24): renders one IconLayer per checked energy source with
 active-units timescope filtering, a sidebar check-all toggle, per-source
 checkboxes, a date-range timescope, and a hover card for every unit.
 
@@ -15,10 +15,10 @@ T4 (#26): the administrative-level slice.  An area multiselect below the
 level selectbox picks the displayed areas at the active level (starts empty;
 empty selection means all areas), a choropleth GeoJsonLayer colors each area
 by its live capacity (per-area unit count on hover), computed from the same
-source/timescope filters as the scatter and header, and the camera refits to
+source/timescope filters as the unit layers and header, and the camera refits to
 the selected areas' bounding box only when the level or area selection
 changes — session-state camera survives every other rerun.  With a proper
-subset of areas picked, the scatter points and every header figure narrow to
+subset of areas picked, the unit points and every header figure narrow to
 those areas (units whose state/region/district names one of them); on
 the all-areas selection every active unit renders and counts, including
 offshore units that belong to no polygon at the active level.  At the country
@@ -240,7 +240,7 @@ else:
     )
     selected_names = tuple(selected_areas or area_names)
 
-# The scatter points and header metrics follow the selection only when it is a
+# The unit points and header metrics follow the selection only when it is a
 # proper subset of the level's areas: a unit's state/region/district
 # attribute must name one of the picked areas.  On the all-areas selection no
 # filter applies, so units that belong to no polygon at the active level still
@@ -284,7 +284,7 @@ _checkpoint_start = _timing_start
 # Every checked source resolves in at most two queries (core.generators once
 # for all generator sources, core.storages once for storage) and the frame
 # carries the active level's area attribute as `name`, so the same rows feed
-# the scatter layers, the per-area choropleth fill and the header totals.
+# the unit layers, the per-area choropleth fill and the header totals.
 units = fetch_units(
     engine,
     active_from=active_from,
@@ -379,7 +379,7 @@ _checkpoint_start = time.perf_counter()
 # Area fills paint below the unit points, so points stay legible on top of the
 # choropleth; the camera comes from the session state above.  At the country
 # level the choropleth gives way to the plain boundary layer (no fill).  Each
-# scatter layer reads the JSON-ready records of one energy_source group.
+# IconLayer reads the JSON-ready records of one energy_source group.
 area_layer = (
     build_boundary_layer(features)
     if level_label == "Germany"

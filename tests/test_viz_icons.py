@@ -10,6 +10,7 @@ stale committed artifact fails loudly instead of shipping silently.
 
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import struct
@@ -78,3 +79,26 @@ class TestAtlasDrift:
         regenerated = module.build_atlas(module.SOURCE_ICONS, cell)
         committed = Image.open(ATLAS).convert("RGBA")
         assert regenerated.tobytes() == committed.tobytes()
+
+
+class TestIconLoader:
+    """`viz.icon_atlas`: the data-URI loader the IconLayers are built from."""
+
+    def test_every_source_inlines_a_real_png(self):
+        from viz.icon_atlas import icon_data_uri
+
+        for source in SOURCE_ICONS:
+            uri = icon_data_uri(source)
+            assert uri.startswith("data:image/png;base64,"), uri[:40]
+            payload = base64.b64decode(uri.split(",", 1)[1])
+            assert payload[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_icon_size_matches_the_committed_cell(self):
+        from viz.icon_atlas import icon_data_uri, icon_png_path, icon_size_px
+
+        cell = load_manifest()["cell"]
+        for source in SOURCE_ICONS:
+            assert icon_size_px(source) == cell
+            assert icon_data_uri(source).split(",", 1)[1] == base64.b64encode(
+                icon_png_path(source).read_bytes()
+            ).decode("ascii")

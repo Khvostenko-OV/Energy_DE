@@ -1,7 +1,7 @@
 """Unit tests for the viz palette lookup (issue #24).
 
 The palette maps each canonical energy_source to a fixed hex color and a
-canonical paint order.  These tests read as the contract the scatter layers
+canonical paint order.  These tests read as the contract the unit layers
 and sidebar consume: `source_color` gives every loaded source its palette
 color, unknown sources fall back, and `SOURCE_LAYER_ORDER` fixes the
 bottom-to-top paint order.

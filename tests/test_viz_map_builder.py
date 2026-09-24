@@ -5,9 +5,10 @@ pydeck.Deck on the CARTO Light basemap, defaulting the view to the Germany
 overview.  The empty-deck case (no layers) is the deck the app shows in
 standby, when nothing is rendered but the basemap.
 
-`build_source_layers` (issue #24) turns per-source unit rows into one scatter
-layer per source — in the palette's canonical paint order, in the palette's
-color, pickable (so hovering works).
+`build_source_layers` (issue #24) turns per-source unit rows into one
+IconLayer per source — in the palette's canonical paint order, tinted with
+the palette's color from its per-source sprite atlas, pickable (so hovering
+works).
 """
 
 from viz.config import GERMANY_CENTER, INITIAL_ZOOM, LIGHT_MAP_STYLE, MAP_STYLES
@@ -84,7 +85,7 @@ class TestSourceLayers:
     def test_no_sources_builds_no_layers(self):
         assert build_source_layers({}) == []
 
-    def test_one_scatter_layer_per_source(self):
+    def test_one_icon_layer_per_source(self):
         layers = build_source_layers({"solar": [unit_row("solar")], "wind": [unit_row("wind")]})
         assert [layer.id for layer in layers] == ["wind-units", "solar-units"]
 
@@ -102,12 +103,24 @@ class TestSourceLayers:
 
     def test_layer_uses_the_sources_palette_color(self):
         layer = build_source_layers({"hydro": [unit_row("hydro")]})[0]
-        assert layer.get_fill_color == (30, 136, 229, 255)
+        assert layer.get_color == (30, 136, 229, 255)
 
     def test_layer_is_pickable_for_hovering(self):
         layer = build_source_layers({"solar": [unit_row("solar")]})[0]
-        assert layer.type == "ScatterplotLayer"
+        assert layer.type == "IconLayer"
         assert layer.pickable is True
+
+    def test_layer_icon_anchors_on_its_inlined_sprite(self):
+        layer = build_source_layers({"wind": [unit_row("wind")]})[0]
+        icon = layer.get_icon
+        assert icon["url"].startswith("data:image/png;base64,")
+        assert icon["width"] == icon["height"] > 0
+        assert icon["mask"] is True  # white glyph tinted by get_color
+
+    def test_layer_sizes_icons_in_pixels(self):
+        layer = build_source_layers({"bio": [unit_row("bio")]})[0]
+        assert layer.get_size > 0
+        assert layer.get_color[-1] == 255  # fully opaque tint
 
     def test_unknown_sources_paint_above_known_ones(self):
         layers = build_source_layers(

@@ -5,10 +5,10 @@ access, so the builder is unit-testable on synthetic layers.  The T1 tracer
 only needs the Germany overview on the CARTO Light basemap and the empty
 standby deck for the missing-tables case — a deck without layers, which is
 exactly what ``build_deck()`` produces by default.  T2 (#24) adds one
-pickable scatter layer per energy source, in the palette's color and paint
-order.  T4 (#26) adds `build_choropleth_layer`, a pickable GeoJsonLayer
-coloring every displayed area by the capacity fill injected into its
-properties, and `build_boundary_layer`, the country-scope counterpart that
+pickable IconLayer per energy source, tinted from the palette and painted in
+the palette's order.  T4 (#26) adds `build_choropleth_layer`, a pickable
+GeoJsonLayer coloring every displayed area by the capacity fill injected into
+its properties, and `build_boundary_layer`, the country-scope counterpart that
 strokes the polygon outlines without filling them — the choropleth's
 stand-in when the active level is "Germany".
 """
@@ -20,11 +20,12 @@ from typing import Any, Iterable, Mapping
 import pydeck as pdk
 
 from viz.config import GERMANY_CENTER, INITIAL_ZOOM, LIGHT_MAP_STYLE
+from viz.icon_atlas import icon_data_uri, icon_size_px
 from viz.palette import SOURCE_LAYER_ORDER, source_color
 
-# Fixed scatter radius (metres) for every unit layer.  Points are sized purely
-# for visibility at the country overview; sizing by capacity is not in scope.
-UNIT_RADIUS_M = 1500
+# Fixed on-screen icon size (pixels) for every unit layer.  Points are sized
+# purely for visibility; sizing by capacity is not in scope.
+UNIT_ICON_SIZE_PX = 12
 
 
 def build_deck(
@@ -62,27 +63,34 @@ def hex_to_rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
 
 
 def build_source_layers(units_by_source: Mapping[str, list[Mapping[str, Any]]]) -> list[pdk.Layer]:
-    """One pickable scatter layer per present source, in palette paint order.
+    """One pickable IconLayer per present source, in palette paint order.
 
     Painted bottom-to-top in ``SOURCE_LAYER_ORDER``; sources outside that
     list (an unexpected energy_source) are appended last so they stay visible
-    above every known one.
+    above every known one.  Each layer anchors on its own per-source sprite
+    (``viz.icon_atlas``, inlined as a base64 data URI) as a single-icon atlas,
+    tinted to the source's palette color via ``mask=True`` + ``get_color``, so
+    icons are white glyphs re-coloured per source rather than baked-in PNGs.
     """
+    def _icon_layer(source: str, rows: list[Mapping[str, Any]]) -> pdk.Layer:
+        atlas = icon_data_uri(source)
+        size = icon_size_px(source)
+        return pdk.Layer(
+            "IconLayer",
+            id=f"{source}-units",
+            data=list(rows),
+            get_position="[longitude, latitude]",
+            get_icon=dict(url=atlas, width=size, height=size, mask=True),
+            get_color=hex_to_rgba(source_color(source)),
+            get_size=UNIT_ICON_SIZE_PX,
+            icon_atlas=atlas,
+            pickable=True,
+        )
+
     sources = [
         source for source in SOURCE_LAYER_ORDER if source in units_by_source
     ] + [source for source in units_by_source if source not in SOURCE_LAYER_ORDER]
-    return [
-        pdk.Layer(
-            "ScatterplotLayer",
-            id=f"{source}-units",
-            data=list(units_by_source[source]),
-            get_position="[longitude, latitude]",
-            get_fill_color=hex_to_rgba(source_color(source)),
-            get_radius=UNIT_RADIUS_M,
-            pickable=True,
-        )
-        for source in sources
-    ]
+    return [_icon_layer(source, units_by_source[source]) for source in sources]
 
 
 # Accessor for the per-feature rgba fill injected by `viz.choropleth`.
