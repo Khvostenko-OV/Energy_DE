@@ -62,9 +62,15 @@ def _teardrop(d: ImageDraw.ImageDraw, cell: int, cx: float, cy: float, r: float,
 
 
 def _wind_cross(d: ImageDraw.ImageDraw, cell: int) -> None:
-    w = 0.16
-    d.rectangle((P(cell, 0.5 - w, 0.16), P(cell, 0.5 + w, 0.84)), fill=WHITE)
-    d.rectangle((P(cell, 0.16, 0.5 - w), P(cell, 0.84, 0.5 + w)), fill=WHITE)
+    # X: two diagonal bars, cut flush with the cell bounds.
+    hw = 0.08
+    off = hw / math.sqrt(2)
+    for (e1, e2) in (((0.18, 0.18), (0.82, 0.82)), ((0.18, 0.82), (0.82, 0.18))):
+        pts = (
+            (e1[0] - off, e1[1] + off), (e1[0] + off, e1[1] - off),
+            (e2[0] + off, e2[1] - off), (e2[0] - off, e2[1] + off),
+        )
+        d.polygon([P(cell, x, y) for x, y in pts], fill=WHITE)
 
 
 def _solar_bullet(d: ImageDraw.ImageDraw, cell: int) -> None:
@@ -99,7 +105,8 @@ def _diesel(d: ImageDraw.ImageDraw, cell: int) -> None:
 
 
 def _storage_diamond(d: ImageDraw.ImageDraw, cell: int) -> None:
-    d.polygon([P(cell, x, y) for x, y in ((0.5, 0.20), (0.80, 0.5), (0.5, 0.80), (0.20, 0.5))], fill=WHITE)
+    h = 0.36
+    d.polygon([P(cell, x, y) for x, y in ((0.5, 0.5 - h), (0.5 + h, 0.5), (0.5, 0.5 + h), (0.5 - h, 0.5))], fill=WHITE)
 
 
 DRAWERS = {
