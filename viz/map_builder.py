@@ -15,6 +15,7 @@ stand-in when the active level is "Germany".
 
 from __future__ import annotations
 
+import json
 from typing import Any, Iterable, Mapping
 
 import pydeck as pdk
@@ -67,25 +68,34 @@ def build_source_layers(units_by_source: Mapping[str, list[Mapping[str, Any]]]) 
 
     Painted bottom-to-top in ``SOURCE_LAYER_ORDER``; sources outside that
     list (an unexpected energy_source) are appended last so they stay visible
-    above every known one.  Each layer anchors on its own per-source sprite
-    (``viz.icon_atlas``, inlined as a base64 data URI), which deck.gl
-    auto-packs into that layer's atlas; no ``icon_atlas`` prop is set, because
-    with pre-packed ``iconAtlas`` deck.gl demands a matching ``iconMapping``
-    and silently renders zero-size icons without one.  The white glyph is
-    tinted to the source's palette color via ``mask=True`` + ``get_color``,
-    so icons are re-coloured per source rather than baked-in PNGs.
+    above every known one.  Each layer is pre-packed around its own per-source
+    sprite (``viz.icon_atlas``, inlined as a base64 data URI):
+
+    - ``icon_atlas`` is the sprite itself — one URI per layer, never per row,
+      so unit counts stay cheap;
+    - ``icon_mapping`` pins a single ``"icon"`` frame over the whole sprite
+      (``mask=True`` re-colours the white glyph to the source's palette tint
+      via ``get_color``);
+    - ``get_icon="icon"`` resolves to the row's icon id (a tiny constant per
+      row) — deck.gl requires ``getIcon`` to be a function accessor, so the
+      id must live in the data, not as a constant prop; a plain dict crashes
+      ``getIcon`` and a string ``iconAtlas`` without ``iconMapping`` renders
+      zero-size frames.
     """
     def _icon_layer(source: str, rows: list[Mapping[str, Any]]) -> pdk.Layer:
-        atlas = icon_data_uri(source)
         size = icon_size_px(source)
         return pdk.Layer(
             "IconLayer",
             id=f"{source}-units",
-            data=list(rows),
+            data=[dict(row, icon="icon") for row in rows],
             get_position="[longitude, latitude]",
-            get_icon=dict(url=atlas, width=size, height=size, mask=True),
+            get_icon="icon",
             get_color=hex_to_rgba(source_color(source)),
             get_size=UNIT_ICON_SIZE_PX,
+            # pydeck turns any plain string prop into "@@=..." (a function);
+            # JSON-quoting it makes the data URI travel verbatim.
+            icon_atlas=json.dumps(icon_data_uri(source)),
+            icon_mapping={"icon": {"x": 0, "y": 0, "width": size, "height": size, "mask": True}},
             pickable=True,
         )
 

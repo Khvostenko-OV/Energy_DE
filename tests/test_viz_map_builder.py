@@ -117,26 +117,39 @@ class TestSourceLayers:
 
     def test_layer_icon_anchors_on_its_inlined_sprite(self):
         layer = build_source_layers({"wind": [unit_row("wind")]})[0]
-        icon = layer.get_icon
-        assert icon["url"].startswith("data:image/png;base64,")
-        assert icon["width"] == icon["height"] == icon_size_px("wind")  # whole-sprite cell
-        assert icon["mask"] is True  # white glyph tinted by get_color
-        # No pre-packed iconAtlas: deck.gl then auto-packs the sprite, instead
-        # of demanding an iconMapping that would silently render zero-size icons.
-        assert not hasattr(layer, "icon_atlas")
+        assert layer.get_icon == "@@=icon"  # per-row id, resolved into a real accessor
+        assert layer.icon_atlas.startswith("data:image/png;base64,")
+        assert layer.data[0]["icon"] == "icon"  # tiny per-row payload, not the sprite
+        mapping_cell = layer.icon_mapping["icon"]
+        assert (mapping_cell["x"], mapping_cell["y"]) == (0, 0)
+        assert mapping_cell["width"] == mapping_cell["height"] == icon_size_px("wind")
+        assert mapping_cell["mask"] is True  # white glyph tinted by get_color
 
-    def test_serialized_spec_auto_packs_the_sprite(self):
+    def test_serialized_spec_prepacks_one_sprite_frame(self):
         layer = build_source_layers({"wind": [unit_row("wind")]})[0]
         serialized = json.loads(pdk.Deck(layers=[layer]).to_json())["layers"]
         assert len(serialized) == 1
-        assert "iconAtlas" not in serialized[0]
-        assert serialized[0]["getIcon"]["url"].startswith("data:image/png;base64,")
-        assert serialized[0]["getIcon"]["mask"] is True
+        assert serialized[0]["getIcon"] == "@@=icon"  # a function accessor, not a constant
+        assert serialized[0]["iconAtlas"].startswith("data:image/png;base64,")
+        cell = serialized[0]["iconMapping"]["icon"]
+        assert cell == {"x": 0, "y": 0, "width": cell["width"], "height": cell["width"],
+                        "mask": True}
+        assert serialized[0]["data"][0]["icon"] == "icon"
 
     def test_layer_sizes_icons_in_pixels(self):
         layer = build_source_layers({"bio": [unit_row("bio")]})[0]
         assert layer.get_size > 0
         assert layer.get_color[-1] == 255  # fully opaque tint
+
+    def test_layer_keeps_unit_rows_light(self):
+        # The sprite must be a per-layer prop (icon_atlas), never embedded per
+        # row: at ~100k units a copied base64 image would balloon the payload.
+        layer = build_source_layers({"solar": [unit_row("solar")] * 10})[0]
+        assert len(layer.data) == 10
+        assert all(row["icon"] == "icon" for row in layer.data)
+        assert len(layer.icon_atlas) > len(layer.data[0]["icon"])
+        # Nothing else per-row references the sprite either.
+        assert all(len(row["icon"]) == len("icon") for row in layer.data)
 
     def test_unknown_sources_paint_above_known_ones(self):
         layers = build_source_layers(
