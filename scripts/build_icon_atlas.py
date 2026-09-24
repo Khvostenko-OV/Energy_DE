@@ -5,7 +5,7 @@ Draws one flat glyph per canonical energy_source (``viz.palette.ENERGY_COLORS``
 keys, plus the cogeneration ``diesel`` slot) into a single sprite sheet used by
 deck.gl's ``IconLayer``, and also writes each icon as its own PNG.  The glyphs
 are deliberately simple geometric shapes — square (bio), triangle (gas),
-droplet (hydro), dot / scatter bullet (solar), cross (wind), diamond
+droplet (hydro), dot / scatter bullet (solar), 3-blade propeller (wind), diamond
 (storage) — so they stay legible at map pixel-sizes.
 
 The glyphs are drawn **white on a transparent background** (hydro keeps its
@@ -61,20 +61,27 @@ def _teardrop(d: ImageDraw.ImageDraw, cell: int, cx: float, cy: float, r: float,
     d.polygon(pts, fill=WHITE)
 
 
-def _wind_cross(d: ImageDraw.ImageDraw, cell: int) -> None:
-    # X: two diagonal bars crossing at the centre.
-    def bar(e1: tuple[float, float], e2: tuple[float, float]) -> None:
-        dx, dy = e2[0] - e1[0], e2[1] - e1[1]
-        length = math.hypot(dx, dy)
-        ox, oy = (dy / length) * 0.08, -(dx / length) * 0.08
-        pts = (
-            (e1[0] + ox, e1[1] + oy), (e1[0] - ox, e1[1] - oy),
-            (e2[0] - ox, e2[1] - oy), (e2[0] + ox, e2[1] + oy),
-        )
-        d.polygon([P(cell, x, y) for x, y in pts], fill=WHITE)
+def _wind_propeller(d: ImageDraw.ImageDraw, cell: int) -> None:
+    # A 3-blade propeller: three swept blades 120° apart around a hub circle.
+    # Each blade is a tapered quad leaning ~12° off its radial line, so the
+    # rotor reads as spinning rather than as a static Y.
+    step = 2 * math.pi / 3
+    sweep = 0.22
+    r0, r1 = 0.06, 0.40
+    hw0, hw1 = 0.045, 0.085
 
-    bar((0.18, 0.18), (0.82, 0.82))  # top-left → bottom-right
-    bar((0.18, 0.82), (0.82, 0.18))  # bottom-left → top-right
+    def pt(r: float, a: float, hw: float) -> tuple[int, int]:
+        ox, oy = -math.sin(a) * hw, math.cos(a) * hw
+        return P(cell, 0.5 + r * math.cos(a) + ox, 0.5 + r * math.sin(a) + oy)
+
+    for i in range(3):
+        a0 = -math.pi / 2 + i * step
+        d.polygon(
+            [pt(r0, a0, hw0), pt(r0, a0, -hw0), pt(r1, a0 + sweep, -hw1), pt(r1, a0 + sweep, hw1)],
+            fill=WHITE,
+        )
+    r = round(0.10 * cell)
+    d.ellipse((round(0.5 * cell) - r, round(0.5 * cell) - r, round(0.5 * cell) + r, round(0.5 * cell) + r), fill=WHITE)
 
 
 def _solar_bullet(d: ImageDraw.ImageDraw, cell: int) -> None:
@@ -114,7 +121,7 @@ def _storage_diamond(d: ImageDraw.ImageDraw, cell: int) -> None:
 
 
 DRAWERS = {
-    "wind": _wind_cross,
+    "wind": _wind_propeller,
     "solar": _solar_bullet,
     "hydro": _hydro,
     "bio": _bio_square,

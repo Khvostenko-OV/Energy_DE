@@ -108,7 +108,7 @@ class TestSourceLayers:
 
     def test_layer_uses_the_sources_palette_color(self):
         layer = build_source_layers({"hydro": [unit_row("hydro")]})[0]
-        assert layer.get_color == (30, 136, 229, 255)
+        assert layer.get_color == (13, 71, 161, 255)
 
     def test_layer_is_pickable_for_hovering(self):
         layer = build_source_layers({"solar": [unit_row("solar")]})[0]
