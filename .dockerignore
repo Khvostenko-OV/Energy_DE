@@ -24,4 +24,5 @@ docs/
 
 # Agentic tools
 .agents/
-*.json
+opencode.json
+skills-lock.json

@@ -65,7 +65,7 @@ def area_fills(units: pd.DataFrame) -> list[dict[str, Any]]:
     aggregates installed capacity ÷ 1000 → MW and the row count.  No spatial
     join — the frame IS the predicate-filtered active set, and the groupby
     drops units without an area attribute (offshore / no polygon at the
-    level), so the fills reconcile with the header and scatter by construction.
+    level), so the fills reconcile with the header and unit layers by construction.
 
     A frame without a ``name`` column (country level, render-opt) — or an
     empty frame — yields no fill rows.

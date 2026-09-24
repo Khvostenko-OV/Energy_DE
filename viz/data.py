@@ -15,7 +15,7 @@ pandas and caps the query count:
   `core.storages` (whose `energy_source` is the single ``"storage"`` value)
   for the storage category.  The projection broadcasts the active-level area
   attribute as ``name`` (`area_column AS name`) so the same frame feeds the
-  scatter layers, the per-area choropleth fill and the header totals.
+  unit layers, the per-area choropleth fill and the header totals.
 - `boundaries_query` / `fetch_boundaries` return **every** area at the level
   (name, km² `area`, pre-simplified GeoJSON geometry stored by the pipeline)
   in one query — the choropleth outlines all areas and fills only the
@@ -62,7 +62,7 @@ ACTIVE_UNIT_PREDICATE = (
     "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
 )
 
-# Columns every fetched unit row needs for the scatter layer and its hover
+# Columns every fetched unit row needs for the unit layer and its hover
 # card.  The location address reads state · district (region left the
 # card in #24) and storages add storage_capacity (kWh).  ``unit_id`` is
 # dropped: it only keyed the retired spatial fill's COUNT.
@@ -254,7 +254,7 @@ def _serializable_units(units: pd.DataFrame) -> pd.DataFrame:
 
     PyDeck's JSON serialization passes raw values to ``json.dumps``, which
     rejects ``datetime64``/``NaT`` and emits bare ``NaN`` tokens for floats — so
-    every projected value is normalized before the frames reach the scatter
+    every projected value is normalized before the frames reach the unit
     layers.
     """
     out = units.copy()
@@ -270,7 +270,7 @@ def _serializable_units(units: pd.DataFrame) -> pd.DataFrame:
 
 
 def unit_records(units: pd.DataFrame) -> list[dict[str, Any]]:
-    """JSON-ready unit dicts for one scatter layer (dates ISO, NaN → null)."""
+    """JSON-ready unit dicts for one unit layer (dates ISO, NaN → null)."""
     return _serializable_units(units).to_dict("records")
 
 

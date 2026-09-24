@@ -23,5 +23,4 @@ env/
 !.env.example
 
 # Data
-data/sources/
-data/boundaries/
+data/

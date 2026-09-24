@@ -1,6 +1,6 @@
 """Streamlit entrypoint for the German Energy Units map (issues #23-#26).
 
-T2 (#24): renders one scatter layer per checked energy source with
+T2 (#24): renders one IconLayer per checked energy source with
 active-units timescope filtering, a sidebar check-all toggle, per-source
 checkboxes, a date-range timescope, and a hover card for every unit.
 
@@ -15,10 +15,10 @@ T4 (#26): the administrative-level slice.  An area multiselect below the
 level selectbox picks the displayed areas at the active level (starts empty;
 empty selection means all areas), a choropleth GeoJsonLayer colors each area
 by its live capacity (per-area unit count on hover), computed from the same
-source/timescope filters as the scatter and header, and the camera refits to
+source/timescope filters as the unit layers and header, and the camera refits to
 the selected areas' bounding box only when the level or area selection
 changes — session-state camera survives every other rerun.  With a proper
-subset of areas picked, the scatter points and every header figure narrow to
+subset of areas picked, the unit points and every header figure narrow to
 those areas (units whose state/region/district names one of them); on
 the all-areas selection every active unit renders and counts, including
 offshore units that belong to no polygon at the active level.  At the country
@@ -87,6 +87,7 @@ from viz.header import (
     format_unit_count,
     scope_title,
 )
+from viz.icon_atlas import icon_data_uri
 from viz.map_builder import (
     build_boundary_layer,
     build_choropleth_layer,
@@ -101,14 +102,25 @@ from viz.viewport import fit_viewstate, geometry_points, should_refit
 # mirroring the canonical palette ordering reversed from SOURCE_LAYER_ORDER.
 SOURCE_DISPLAY_ORDER: tuple[str, ...] = tuple(reversed(SOURCE_LAYER_ORDER))
 
-# Colored bullet before each per-source checkbox label.  Label text is
-# sanitized markdown (no inline HTML), so the dots arrive as CSS keyed on the
-# widget's `st-key-<key>` class, painted with the source's palette color.
-SOURCE_BULLET_STYLES = "\n".join(
+# Per-source sprite shown before each checkbox label.  Label text is
+# sanitized markdown (no inline HTML), so the icons arrive as CSS keyed on the
+# widget's `st-key-<key>` class.  The sprites are white glyphs on transparency
+# (for the map's `mask=True` tinting), which would vanish on the white sidebar;
+# here the CSS `mask-image` cuts the glyph shape out of the source's palette
+# color — the HTML/CSS analogue of the deck.gl tint.  PNGs are inlined as data
+# URIs, since the distroless runtime has no static file serving.
+SOURCE_ICON_STYLES = "\n".join(
     (
         f"[data-testid='stSidebar'] .st-key-source_{source} "
         "[data-testid='stWidgetLabel'] p::before "
-        f"{{ content: '● '; color: {source_color(source)}; }}"
+        "{ content: ''; display: inline-block; width: 16px; height: 16px; "
+        f"margin-right: 0.4em; vertical-align: -0.22em; "
+        f"background-color: {source_color(source)}; "
+        f"-webkit-mask-image: url('{icon_data_uri(source)}'); "
+        f"-webkit-mask-repeat: no-repeat; -webkit-mask-position: center; "
+        f"-webkit-mask-size: contain; "
+        f"mask-image: url('{icon_data_uri(source)}'); "
+        f"mask-repeat: no-repeat; mask-position: center; mask-size: contain; }}"
     )
     for source in SOURCE_DISPLAY_ORDER
 )
@@ -118,7 +130,7 @@ st.set_page_config(page_title="German Energy Units", layout="wide")
 # Trim the main-area margins so the map window dominates the page instead of
 # floating in a large padded block; hide the Streamlit status bar / main menu
 # so it doesn't overlap the header; size the compact header strip (labels and
-# values on one line); then paint the per-source sidebar bullets.
+# values on one line); then paint the per-source sidebar icons.
 st.markdown(
     "<style>"
     ".block-container { padding: 0.25rem 2rem 0.5rem 2rem; }"
@@ -127,7 +139,7 @@ st.markdown(
     "align-items: baseline; margin: 0 0 0.25rem; }"
     ".hdr-label { color: #5f6368; font-size: 0.9rem; margin-right: 0.2rem; }"
     ".hdr-value { font-size: 1.2rem; font-weight: 600; margin-right: 1.5rem; }"
-    f"{SOURCE_BULLET_STYLES}"
+    f"{SOURCE_ICON_STYLES}"
     "</style>",
     unsafe_allow_html=True,
 )
@@ -240,7 +252,7 @@ else:
     )
     selected_names = tuple(selected_areas or area_names)
 
-# The scatter points and header metrics follow the selection only when it is a
+# The unit points and header metrics follow the selection only when it is a
 # proper subset of the level's areas: a unit's state/region/district
 # attribute must name one of the picked areas.  On the all-areas selection no
 # filter applies, so units that belong to no polygon at the active level still
@@ -284,7 +296,7 @@ _checkpoint_start = _timing_start
 # Every checked source resolves in at most two queries (core.generators once
 # for all generator sources, core.storages once for storage) and the frame
 # carries the active level's area attribute as `name`, so the same rows feed
-# the scatter layers, the per-area choropleth fill and the header totals.
+# the unit layers, the per-area choropleth fill and the header totals.
 units = fetch_units(
     engine,
     active_from=active_from,
@@ -379,7 +391,7 @@ _checkpoint_start = time.perf_counter()
 # Area fills paint below the unit points, so points stay legible on top of the
 # choropleth; the camera comes from the session state above.  At the country
 # level the choropleth gives way to the plain boundary layer (no fill).  Each
-# scatter layer reads the JSON-ready records of one energy_source group.
+# IconLayer reads the JSON-ready records of one energy_source group.
 area_layer = (
     build_boundary_layer(features)
     if level_label == "Germany"
