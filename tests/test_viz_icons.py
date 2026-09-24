@@ -13,11 +13,11 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
-import struct
 from pathlib import Path
 
 import pytest
 
+from viz.icon_atlas import png_size
 from viz.palette import SOURCE_LAYER_ORDER
 
 ICONS_DIR = Path(__file__).resolve().parent.parent / "viz" / "icons"
@@ -26,16 +26,6 @@ MANIFEST = ICONS_DIR / "manifest.json"
 
 # The generator's canonical set: palette paint order + the cogeneration slot.
 SOURCE_ICONS = list(SOURCE_LAYER_ORDER) + ["diesel"]
-
-
-def png_size(path: Path) -> tuple[int, int]:
-    """Decode a PNG's IHDR width/height header without Pillow."""
-    with path.open("rb") as fh:
-        assert fh.read(8) == b"\x89PNG\r\n\x1a\n", f"not a PNG: {path}"
-        fh.read(4)  # IHDR chunk length
-        assert fh.read(4) == b"IHDR"
-        width, height = struct.unpack(">II", fh.read(8))
-    return width, height
 
 
 def load_manifest() -> dict:

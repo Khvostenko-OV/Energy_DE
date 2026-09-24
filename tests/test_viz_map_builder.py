@@ -11,7 +11,12 @@ the palette's color from its per-source sprite atlas, pickable (so hovering
 works).
 """
 
+import json
+
+import pydeck as pdk
+
 from viz.config import GERMANY_CENTER, INITIAL_ZOOM, LIGHT_MAP_STYLE, MAP_STYLES
+from viz.icon_atlas import icon_size_px
 from viz.map_builder import (
     build_boundary_layer,
     build_choropleth_layer,
@@ -114,8 +119,19 @@ class TestSourceLayers:
         layer = build_source_layers({"wind": [unit_row("wind")]})[0]
         icon = layer.get_icon
         assert icon["url"].startswith("data:image/png;base64,")
-        assert icon["width"] == icon["height"] > 0
+        assert icon["width"] == icon["height"] == icon_size_px("wind")  # whole-sprite cell
         assert icon["mask"] is True  # white glyph tinted by get_color
+        # No pre-packed iconAtlas: deck.gl then auto-packs the sprite, instead
+        # of demanding an iconMapping that would silently render zero-size icons.
+        assert not hasattr(layer, "icon_atlas")
+
+    def test_serialized_spec_auto_packs_the_sprite(self):
+        layer = build_source_layers({"wind": [unit_row("wind")]})[0]
+        serialized = json.loads(pdk.Deck(layers=[layer]).to_json())["layers"]
+        assert len(serialized) == 1
+        assert "iconAtlas" not in serialized[0]
+        assert serialized[0]["getIcon"]["url"].startswith("data:image/png;base64,")
+        assert serialized[0]["getIcon"]["mask"] is True
 
     def test_layer_sizes_icons_in_pixels(self):
         layer = build_source_layers({"bio": [unit_row("bio")]})[0]

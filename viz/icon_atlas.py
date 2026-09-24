@@ -51,11 +51,17 @@ def _sprite_path(source: str) -> Path:
 
 
 def png_size(path: Path) -> tuple[int, int]:
-    """(width, height) of a PNG from its IHDR header, without Pillow."""
+    """(width, height) of a PNG from its IHDR header, without Pillow.
+
+    Raises ValueError instead of asserting, so the header checks survive
+    ``python -O`` runs.
+    """
     with path.open("rb") as fh:
-        assert fh.read(8) == b"\x89PNG\r\n\x1a\n", f"not a PNG: {path}"
+        if fh.read(8) != b"\x89PNG\r\n\x1a\n":
+            raise ValueError(f"not a PNG: {path}")
         fh.read(4)  # IHDR chunk length
-        assert fh.read(4) == b"IHDR"
+        if fh.read(4) != b"IHDR":
+            raise ValueError(f"corrupt PNG (no IHDR chunk): {path}")
         width, height = struct.unpack(">II", fh.read(8))
     return width, height
 
@@ -64,7 +70,8 @@ def png_size(path: Path) -> tuple[int, int]:
 def icon_size_px(source: str) -> int:
     """Edge length (px) of the per-source sprite — its IHDR width."""
     width, height = png_size(_sprite_path(source))
-    assert width == height, f"icon must be square: {source}"
+    if width != height:
+        raise ValueError(f"icon must be square: {source} ({width}x{height})")
     return width
 
 
@@ -72,9 +79,9 @@ def icon_size_px(source: str) -> int:
 def icon_data_uri(source: str) -> str:
     """Base64 ``data:image/png;base64,...`` URI of the source's sprite.
 
-    Inlined into the layer via ``iconAtlas``/``get_icon.url`` so the browser
-    never issues a separate request (and therefore never serves a stale cached
-    copy after the artwork is regenerated).
+    Inlined into the layer as ``get_icon.url`` so the browser never issues a
+    separate request (and therefore never serves a stale cached copy after the
+    artwork is regenerated).
     """
     encoded = base64.b64encode(_sprite_path(source).read_bytes()).decode("ascii")
     return f"data:image/png;base64,{encoded}"

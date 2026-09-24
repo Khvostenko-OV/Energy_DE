@@ -68,9 +68,12 @@ def build_source_layers(units_by_source: Mapping[str, list[Mapping[str, Any]]]) 
     Painted bottom-to-top in ``SOURCE_LAYER_ORDER``; sources outside that
     list (an unexpected energy_source) are appended last so they stay visible
     above every known one.  Each layer anchors on its own per-source sprite
-    (``viz.icon_atlas``, inlined as a base64 data URI) as a single-icon atlas,
-    tinted to the source's palette color via ``mask=True`` + ``get_color``, so
-    icons are white glyphs re-coloured per source rather than baked-in PNGs.
+    (``viz.icon_atlas``, inlined as a base64 data URI), which deck.gl
+    auto-packs into that layer's atlas; no ``icon_atlas`` prop is set, because
+    with pre-packed ``iconAtlas`` deck.gl demands a matching ``iconMapping``
+    and silently renders zero-size icons without one.  The white glyph is
+    tinted to the source's palette color via ``mask=True`` + ``get_color``,
+    so icons are re-coloured per source rather than baked-in PNGs.
     """
     def _icon_layer(source: str, rows: list[Mapping[str, Any]]) -> pdk.Layer:
         atlas = icon_data_uri(source)
@@ -83,7 +86,6 @@ def build_source_layers(units_by_source: Mapping[str, list[Mapping[str, Any]]]) 
             get_icon=dict(url=atlas, width=size, height=size, mask=True),
             get_color=hex_to_rgba(source_color(source)),
             get_size=UNIT_ICON_SIZE_PX,
-            icon_atlas=atlas,
             pickable=True,
         )
 
