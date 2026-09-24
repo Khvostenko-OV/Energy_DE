@@ -24,9 +24,16 @@ from viz.config import GERMANY_CENTER, INITIAL_ZOOM, LIGHT_MAP_STYLE
 from viz.icon_atlas import icon_data_uri, icon_size_px
 from viz.palette import SOURCE_LAYER_ORDER, source_color
 
-# Fixed on-screen icon size (pixels) for every unit layer.  Points are sized
-# purely for visibility; sizing by capacity is not in scope.
-UNIT_ICON_SIZE_PX = 12
+# Icon sizing for every unit layer, in world meters: with `size_units="meters"`
+# deck.gl anchors each icon to a fixed ground footprint, so icons grow as the
+# user zooms in and (shared with `size_min_pixels`) shrink to dots at the
+# Germany overview instead of staying a constant on-screen size and cluttering
+# the national view.  Chosen so a unit reads ~9px at the district-level zoom 9
+# (≈167 m/px at 51°N) and a visible dot even at the initial zoom 5.2.
+# sizing by capacity is not in scope.
+UNIT_ICON_SIZE_M = 900
+UNIT_ICON_MIN_PX = 4
+UNIT_ICON_MAX_PX = 64
 
 
 def build_deck(
@@ -80,7 +87,10 @@ def build_source_layers(units_by_source: Mapping[str, list[Mapping[str, Any]]]) 
       row) — deck.gl requires ``getIcon`` to be a function accessor, so the
       id must live in the data, not as a constant prop; a plain dict crashes
       ``getIcon`` and a string ``iconAtlas`` without ``iconMapping`` renders
-      zero-size frames.
+      zero-size frames;
+    - ``size_units="meters"`` (``get_size`` in world meters) makes the
+      icon size track zoom, clamped to `UNIT_ICON_MIN_PX`..`UNIT_ICON_MAX_PX`,
+      so the overview stays readable instead of a solid colour mass.
     """
     def _icon_layer(source: str, rows: list[Mapping[str, Any]]) -> pdk.Layer:
         size = icon_size_px(source)
@@ -91,9 +101,13 @@ def build_source_layers(units_by_source: Mapping[str, list[Mapping[str, Any]]]) 
             get_position="[longitude, latitude]",
             get_icon="icon",
             get_color=hex_to_rgba(source_color(source)),
-            get_size=UNIT_ICON_SIZE_PX,
+            get_size=UNIT_ICON_SIZE_M,
+            size_min_pixels=UNIT_ICON_MIN_PX,
+            size_max_pixels=UNIT_ICON_MAX_PX,
             # pydeck turns any plain string prop into "@@=..." (a function);
-            # JSON-quoting it makes the data URI travel verbatim.
+            # JSON-quoting makes the value travel verbatim (icon_atlas data
+            # URI and the sizeUnits enum alike).
+            size_units=json.dumps("meters"),
             icon_atlas=json.dumps(icon_data_uri(source)),
             icon_mapping={"icon": {"x": 0, "y": 0, "width": size, "height": size, "mask": True}},
             pickable=True,
