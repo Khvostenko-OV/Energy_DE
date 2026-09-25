@@ -1,8 +1,10 @@
 # AWS. Event driven ETL
 
 ## 1. Data source
-- All .gpkg files are landed in AWS S3 bucket
+- Project deployed on AWS ec2 instance under Ubuntu 26  
+- All .gpkg files landed in AWS s3 bucket
 - Boundaries files stored in their own folder from the very beginning
+- Link to boundaries folder leaves in .env
 - Boundaries extraction strats with *docker compose up* 
 - Source files are additionally loaded
 
