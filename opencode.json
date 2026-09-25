@@ -25,7 +25,7 @@
       "cat *": "allow",
       "tee *": "allow",
       "cut *": "allow",
-      "xxd *": "allpw",
+      "xxd *": "allow",
       "chmod *": "allow",
       "docker *": "allow",
       "echo *": "allow",
