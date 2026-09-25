@@ -19,8 +19,20 @@ A unit that stores energy (Battery, Pumped storage, Hydrogen storage) rather tha
 _Avoid_: Storage unit, Energy storage
 
 **Energy source**:
-The canonical type of a unit: Bio, Gas, Hydro, Solar, Wind, or Storage. Canonicalized from the varied labels in the source files (e.g. "Bioenergy", "Solar Energy", "Energy Storage").
+The canonical type of a unit: Bio, Gas, Hydro, Solar, Wind, or Storage. Canonicalized from the varied labels in source datasets (e.g. "Bioenergy", "Solar Energy", "Energy Storage").
 _Avoid_: Bioenergy, Solar Energy, Wind Energy, Hydropower (as values — keep only as original source attributes)
+
+**Source dataset**:
+The single homogeneous collection of units belonging to one Energy source, published as one GPKG. Its source label is carried in each unit's `energy_source` value and canonicalized during ingest.
+_Avoid_: Source file, energy source
+
+**Source snapshot**:
+The complete published contents of one Source dataset at one point in time, rather than an incremental change set. It is authoritative for both the values and Source membership of every unit it contains.
+_Avoid_: Delta, patch
+
+**Source membership**:
+A unit's presence in a particular complete Source snapshot, including rows that fail quality checks. It is lineage metadata and does not determine whether the unit is Active; a newer snapshot ending membership does not deactivate the Core unit.
+_Avoid_: Active, decommissioned
 
 **Storage type**:
 The technology class of a storage unit: Battery, Pumped storage, Hydrogen storage.
@@ -36,28 +48,36 @@ Usable energy storage capacity of a storage unit, in kilowatt-hours (kWh).
 The date a unit was put into operation.
 
 **Decommissioning date**:
-The date a unit was taken out of operation; null means the unit is still active.
+The date a unit was taken out of operation; null means no decommissioning date is recorded.
 
 **Active unit**:
-A unit whose decommissioning date is null or in the future. Only active units contribute to mart pivots.
+For a selected interval from `from` through `to`, a unit whose commissioning date is on or after `from` and on or before `to`, and whose decommissioning date is null or on or after `to`. Source membership does not affect Activity. Only Active units contribute to mart pivots for the selected interval.
+
+**Historical unit**:
+A Core unit retained across Source snapshot changes. Snapshot absence alone does not make it inactive; it remains Active until its dates say otherwise. Historical units remain visible for audit and visualization.
+_Avoid_: Deleted unit
 
 **Geo accuracy**:
 The precision of a unit's coordinates: 1 = exact location of the facility, 2 = centre of the municipality (imprecise). Geo accuracy 2 is a plain column, never a quality flag.
 _Avoid_: Accuracy, coordinate precision
 
 **Reference ID**:
-The identifier of the record in its original source dataset. Unique within and across all source files. Used to build the staging unit_id, not the core identity.
+The identifier of the record in its original source dataset. Unique within and across all source datasets. Used to build the staging unit_id, not the core identity.
 
 **Reference date**:
-Full-source timestamp of a record. In incremental load it is the freshness gate: a row updates core only when its reference_date is fresher than the stored row's.
+The full-source timestamp of a record. It is descriptive source metadata, not the freshness authority for an incremental load; Source snapshot publication order determines which values are current.
 
 **Synthetic identity**:
-A generated staging unit_id for units lacking a reference ID (39 solar rows), derived from the unit's own attributes and recognized by its hash prefix. Staging-only: core replaces it with a serial key and never flags it.
+A generated staging unit_id for units lacking a Reference ID (39 solar rows), derived only from stable unit attributes: Energy source, location, rounded coordinates, and geo accuracy. It is persisted across snapshots; a collision or ambiguity fails the snapshot. Staging-only: Core replaces it with a serial key and never flags it.
 
 ### Geography
 
 **Boundaries**:
 The single level-coded `service.boundaries` table of administrative and maritime polygons (0 country outline, 1 states + EEZ, 2 regions, 3 districts) used to assign each unit its state, region, and district by spatial join.
+
+**Boundary release**:
+A new published version of the polygons at one boundary level. It replaces every polygon at that level and requires every unit's administrative geography to be rederived.
+_Avoid_: Partial boundaries, full boundary rebuild
 
 **State**:
 A Bundesland (federal state) or, for offshore units, the sea/EEZ area they fall in. A unit that joins to no boundary row keeps a null state, is flagged `collision`, and is reported under the "outside" bucket in the marts.
@@ -81,14 +101,19 @@ _Avoid_: Position, Lat/lng
 **Raw version**:
 A dated snapshot table `raw.<source>_<YYYYMMDD>_<n>` produced by one extract load. Every load appends a new version; versions are never dropped or overwritten.
 
+**Ingestion run**:
+One processing lifecycle for one immutable S3 object version or local source file. It records the input identity, current stage, attempts, outcome, and any terminal error.
+_Avoid_: Load signature, SQS message
+
 **Load signature**:
-The `(filename, filesize, modified_at)` triplet recorded in `service.loaded_files`. A file whose signature is already logged is skipped on extract unless forced with `-f`; `-f` appends another raw version and log row.
+The immutable identity of successfully extracted input. For S3 ingestion it is `(bucket, object_key, version_id)`; for local ingestion it is `(filename, filesize, modified_at)`. A signature is logged only after extraction verification succeeds; duplicate input is skipped unless a local run is forced with `-f`.
+_Avoid_: Message ID, filename alone
 
 **Raw**:
 The extract layer: versioned per-source unit tables with secondary attributes folded into a `secondary_attributes` jsonb column. Records only — the load-signature log and the boundary reference layer live in the Service schema (see Service).
 
 **Service**:
-The operational-metadata schema, deliberately separate from the versioned raw datalake: the `loaded_files` log (see Load signature) and the non-versioned level-coded `boundaries` reference layer used by the transform spatial joins. Non-versioned by design; only the unit tables are versioned.
+The operational-metadata schema, deliberately separate from the versioned raw datalake: `ingestion_runs` for processing lifecycles, the `loaded_files` success log (see Load signature), and the non-versioned level-coded `boundaries` reference layer used by the transform spatial joins. Non-versioned by design; only the unit tables are versioned.
 
 **Staging**:
 The transform layer: raw rows enriched with state, region, and district via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`). Staging carries both the `geometry` point and explicit `x_coordinates` / `y_coordinates`.
@@ -110,7 +135,7 @@ _Avoid_: Properties (column name — now a table, not a column)
 ### Quality
 
 **Bad quality**:
-A staging flag on a record failing a transform-level check (installed_capacity ≤ 0 or null; decommissioning_date before commissioning_date; coordinates conflicting with geometry). The failing record is excluded from core, and a `bad_quality` property link carries the newline-joined descriptions. State-null is deliberately not a staging check — it is a load-stage collision.
+A staging flag on a record failing a transform-level check (installed_capacity ≤ 0 or null; decommissioning_date before commissioning_date; coordinates conflicting with geometry). The failing record remains a member of its Source snapshot but is excluded from Core, and a `bad_quality` property link carries the newline-joined descriptions. State-null is deliberately not a staging check — it is a load-stage collision.
 _Avoid_: Error, anomaly
 
 **Collision**:
