@@ -4,8 +4,13 @@ from pathlib import Path
 import click
 import time
 
-from etl.config import SOURCE_NAMES, boundaries_manifest, sources_data_dir
+from etl.config import SOURCE_NAMES, boundaries_manifest, get_engine, sources_data_dir
 from etl.extract import extract_boundaries, extract_source
+from etl.ingestion import (
+    Boto3S3Adapter,
+    BootstrapConfig,
+    bootstrap as bootstrap_ingestion,
+)
 from etl.load import load_generators, load_storages
 from etl.marts import build_marts
 from etl.transform import transform_sources
@@ -18,6 +23,32 @@ def cli(verbose: bool):
     """Energy DE ETL pipeline."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=level)
+
+
+def _s3_adapter() -> Boto3S3Adapter:
+    import boto3
+
+    return Boto3S3Adapter(boto3.client("s3"))
+
+
+@cli.command()
+@click.option("--bucket", envvar="S3_BUCKET", required=True, help="Versioned S3 data bucket.")
+def bootstrap(bucket: str):
+    result = bootstrap_ingestion(
+        BootstrapConfig(bucket=bucket),
+        engine=get_engine(),
+        s3=_s3_adapter(),
+    )
+    click.echo("\nBootstrap report:")
+    click.echo(f"  Metadata ready   : {'yes' if result.metadata_ready else 'no'}")
+    click.echo(
+        f"  Worker start     : {'allowed' if result.worker_start_allowed else 'blocked'}"
+    )
+    for check in result.checks:
+        requirement = "required" if check.required else "optional"
+        click.echo(f"  {check.key} ({requirement}): {check.message}")
+    if not result.worker_start_allowed:
+        raise SystemExit(1)
 
 
 @cli.command()

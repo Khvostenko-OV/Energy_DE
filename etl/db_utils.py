@@ -32,23 +32,51 @@ def _ensure_schema(engine: Engine, schema: str = RAW_SCHEMA) -> None:
         conn.commit()
 
 
-def _create_log_table(engine: Engine) -> None:
-    """Create the append-only loaded_files log if it does not exist."""
-    with engine.connect() as conn:
+def _create_log_table(engine: Engine, schema: str = SERVICE_SCHEMA) -> None:
+    """Create the loaded_files log and keep its current schema."""
+    with engine.begin() as conn:
         conn.execute(
             text(
                 f"""
-                CREATE TABLE IF NOT EXISTS {SERVICE_SCHEMA}.loaded_files (
-                    filename    TEXT,
-                    filesize    BIGINT,
-                    modified_at TIMESTAMPTZ,
-                    loaded_at   TIMESTAMPTZ,
-                    loaded_to   TEXT
+                CREATE TABLE IF NOT EXISTS {schema}.loaded_files (
+                    filename           TEXT,
+                    filesize           BIGINT,
+                    modified_at        TIMESTAMPTZ,
+                    loaded_at          TIMESTAMPTZ,
+                    loaded_to          TEXT,
+                    ingestion_run_id   UUID,
+                    bucket             TEXT,
+                    object_key         TEXT,
+                    object_version_id  TEXT,
+                    object_etag        TEXT,
+                    verified_at        TIMESTAMPTZ
                 )
                 """
             )
         )
-        conn.commit()
+        for column, definition in (
+            ("ingestion_run_id", "UUID"),
+            ("bucket", "TEXT"),
+            ("object_key", "TEXT"),
+            ("object_version_id", "TEXT"),
+            ("object_etag", "TEXT"),
+            ("verified_at", "TIMESTAMPTZ"),
+        ):
+            conn.execute(
+                text(
+                    f"ALTER TABLE {schema}.loaded_files "
+                    f"ADD COLUMN IF NOT EXISTS {column} {definition}"
+                )
+            )
+        conn.execute(
+            text(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS uq_loaded_files_s3_identity "
+                f"ON {schema}.loaded_files "
+                "(bucket, object_key, object_version_id) "
+                f"WHERE bucket IS NOT NULL AND object_key IS NOT NULL "
+                "AND object_version_id IS NOT NULL"
+            )
+        )
 
 
 def _create_staging_tables(engine: Engine, source: str) -> None:
