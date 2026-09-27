@@ -33,6 +33,60 @@ from etl.reports import ExtractionReport, LoadReport, TransformReport
 log = logging.getLogger(__name__)
 
 
+def _verify_membership_matches_staging(
+    engine: Engine, *, source: str, ingestion_run_id
+) -> tuple[list[str], dict[str, bool]]:
+    """Reconcile a snapshot's Source membership against its staging rows.
+
+    Membership and staging are written by the same transform, so they must agree
+    on which units the snapshot carried and on each unit's bad-quality flag. The
+    one home for that comparison: transform checks it as it writes staging, and
+    load checks it again before trusting either side.
+
+    Returns the errors plus the membership's per-unit bad-quality flags, which
+    load needs to reason about Core.
+    """
+    with engine.connect() as connection:
+        staging_count = int(
+            connection.execute(
+                text(f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.{source}")
+            ).scalar()
+        )
+        membership = connection.execute(
+            text(
+                f"SELECT unit_key, bad_quality, energy_source "
+                f"FROM {SERVICE_SCHEMA}.source_memberships "
+                "WHERE run_id = :run_id"
+            ),
+            {"run_id": str(ingestion_run_id)},
+        ).fetchall()
+        staging_quality = connection.execute(
+            text(f"SELECT unit_id, bad_quality FROM {STAGING_SCHEMA}.{source}")
+        ).fetchall()
+
+    errors: list[str] = []
+    if len(membership) != staging_count:
+        errors.append(
+            f"Source membership count {len(membership)} != staging {staging_count}"
+        )
+    wrong_source = [
+        str(unit_key)
+        for unit_key, _, energy_source in membership
+        if energy_source != source
+    ]
+    if wrong_source:
+        errors.append(f"Source membership has {len(wrong_source)} wrong-source rows")
+    membership_by_key = {str(unit_key): bool(bad) for unit_key, bad, _ in membership}
+    staging_by_key = {str(unit_id): bool(bad) for unit_id, bad in staging_quality}
+    if set(membership_by_key) != set(staging_by_key):
+        errors.append("Source membership keys differ from staging identities")
+    for unit_key, bad in staging_by_key.items():
+        if membership_by_key.get(unit_key) != bad:
+            errors.append(f"Source membership quality mismatch for {unit_key}")
+            break
+    return errors, membership_by_key
+
+
 def _verify_boundaries(engine: Engine) -> list[str]:
     """Verify the boundaries table carries levels 0-3, one level-0 row, and areas."""
     errors: list[str] = []
@@ -79,13 +133,14 @@ def _verify_boundaries(engine: Engine) -> list[str]:
 def _verify_extraction(engine: Engine, table_name: str, report: ExtractionReport) -> list[str]:
     """Verify the loaded versioned table against the extraction report.
 
-    Checks the loaded count is consistent with the pre-dedupe source rows and
-    matches the number of rows stored, and that no non-null reference_id
-    appears more than once in the stored table. Returns a list of error
-    strings, empty if verification passes.
+    Every source row must reach the raw table, because a snapshot with
+    duplicate identities is rejected before it is written rather than
+    deduplicated. Also checks the stored count and that no non-null
+    reference_id appears more than once. Returns a list of error strings,
+    empty if verification passes.
     """
     errors: list[str] = []
-    expected = report.source_row_count - report.duplicates_dropped
+    expected = report.source_row_count
     if report.rows_loaded != expected:
         errors.append(
             f"Row count mismatch: loaded {report.rows_loaded}, expected {expected}"

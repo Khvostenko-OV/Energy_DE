@@ -74,7 +74,12 @@ class TestEngineSelection:
         assert str(engine.url) == str(expected.url)
 
     def test_prefers_viz_database_url(self, monkeypatch):
-        monkeypatch.setenv("VIZ_DATABASE_URL", "postgresql://viz_reader@localhost:5432/energy_de")
+        # The driver is explicit because requirements-viz.txt installs psycopg2
+        # while SQLAlchemy 2.1 resolves a bare postgresql:// to psycopg3.
+        monkeypatch.setenv(
+            "VIZ_DATABASE_URL",
+            "postgresql+psycopg2://viz_reader@localhost:5432/energy_de",
+        )
         engine = get_viz_engine()
         assert engine.url.username == "viz_reader"
         assert engine.url.database == "energy_de"

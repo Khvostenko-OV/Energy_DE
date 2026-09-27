@@ -31,11 +31,11 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 
 ## ETL-pipeline description
 ### 1. Extract
-- Input: text file with names of files in the same directory to be extracted
+- Input: the raw unit-source GPKG files, each routed by the Energy source value in its content
+- Validate before writing: exactly one layer, the required schema and geometry, a non-null homogeneous Energy source, and unique non-null Reference IDs. A snapshot that fails any check is rejected whole and leaves the previous state intact
 - Check if the file was already loaded. If attribute force (-f) - load else skip
 - Read files to geopandas dataframes.
 - Type casting
-- Drop duplicates
 - Convert secondary properties to dictionary, place it to column 'secondary_attributes'
 - Save to PostGIS datalake. Table names should contain source type, date of load, number of load
 #### Load administrative and maritime boundaries
@@ -81,9 +81,11 @@ add property 'close_to' with reference to close unit
   3. storage_capacity <=0 or null (for storages)
 
 #### Incremental load 
+Each Unit table carries a complete Source snapshot and is therefore authoritative for the rows it holds, so no freshness gate is applied. `reference_date` is row provenance, not an ordering rule (issue #36, `CONTEXT.md`, ADR 0001).
 - Input: list of tables to be loaded
-- Append-or-update **generators** table with records from Units tables (using reference_id, reference_date for update)
-- Append-or-update **storages** table with records from Units table storage (using reference_id, reference_date for update)
+- Append-or-update **generators** table with records from Units tables, matching on record identity (`reference_id`, or the synthetic identity for rows without one) and updating every matched row
+- Append-or-update **storages** table with records from Units table storage, on the same match
+- Retain Core units that the snapshot omits, so historical units survive
 - Transfer primary keys for dimension tables
 - Quality check
 
@@ -165,6 +167,57 @@ Non-versioned operational metadata, deliberately separate from the versioned raw
 | area              | float        | km2                                                                      |
 | geometry          | multipolygon | WGS-84                                                                   |
 | geojson           | text         | geometry pre-simplified to `ST_AsGeoJSON(ST_SimplifyPreserveTopology(geometry, 0.001))` at load, served by the viz app (issue #31) |
+
+#### ingestion_runs - one processing lifecycle per accepted S3 object version
+Keyed by the immutable input identity `(bucket, object_key, object_version_id)`. Local CLI
+runs are tracked by the `loaded_files` load signature instead.
+
+| Column               | Data type    | Description                                                                    |
+|----------------------|--------------|--------------------------------------------------------------------------------|
+| run_id               | uuid         | pk                                                                            |
+| bucket               | str          | S3 bucket of the input                                                        |
+| object_key           | str          | S3 key of the input                                                           |
+| object_version_id    | str          | immutable S3 version; unique with bucket and key                              |
+| input_kind           | str          | `source` or `boundary`, resolved from the accepted key                        |
+| object_last_modified | timestamp    | `LastModified` S3 served for the processed version; rejects delayed versions  |
+| state                | str          | pending, running, succeeded, retryable, terminal, stale                       |
+| current_stage        | str          | stage reached, or the stage that failed                                       |
+| attempt_count        | int          | processing attempts so far                                                    |
+| terminal_error       | text         | error text for a failed or stale run                                          |
+| created_at           | timestamp    | when the run row was created                                                  |
+| started_at           | timestamp    | when processing started                                                       |
+| finished_at          | timestamp    | when the run reached a settled state                                          |
+
+#### stage_results - per-stage outcome for each Ingestion run
+Unique per `(run_id, attempt, target, stage)`.
+
+| Column           | Data type | Description                                                     |
+|------------------|-----------|-----------------------------------------------------------------|
+| stage_result_id  | bigserial | pk                                                             |
+| run_id           | uuid      | the Ingestion run this result belongs to                        |
+| attempt          | int       | the processing attempt the result was recorded for              |
+| target           | str       | table or object identity the stage acted on                    |
+| stage            | str       | extract, transform, load, marts, or bootstrap                   |
+| outcome          | str       | succeeded or failed                                            |
+| row_count        | int       | rows the stage produced, where available                        |
+| error            | text      | error text for a failed stage                                   |
+| details          | jsonb     | stage-specific detail (inserted/updated/retained, refreshed, …) |
+| started_at       | timestamp | when the stage started                                          |
+| finished_at      | timestamp | when the stage finished                                         |
+
+#### source_memberships - Source lineage per accepted Source snapshot
+One row per unit the snapshot contains, including units marked Bad quality. Membership
+is lineage metadata, not an Active flag: a newer snapshot can end a membership without
+deleting or deactivating the retained Core unit.
+
+| Column         | Data type | Description                                                         |
+|----------------|-----------|---------------------------------------------------------------------|
+| run_id         | uuid      | the Ingestion run of the snapshot that carried the row               |
+| energy_source  | str       | canonical Energy source the row was routed to                        |
+| unit_key       | str       | staging `unit_id` of the row, the key staging and membership join on |
+| reference_id   | str       | the row's Reference ID, when it has one                              |
+| bad_quality    | bool      | the row's bad-quality flag                                           |
+| recorded_at    | timestamp | when the membership was recorded                                     |
 
 
 ### 3. Staging

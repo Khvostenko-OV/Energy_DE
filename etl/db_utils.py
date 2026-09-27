@@ -12,8 +12,13 @@ from etl.config import (
 )
 
 
-def _table_exists(engine: Engine, table: str, schema: str = CORE_SCHEMA) -> bool:
-    """True if the named table exists in the given schema."""
+def _table_exists(engine: Engine, table: str, schema: str | None = None) -> bool:
+    """True if the named table exists in the given schema.
+
+    The default is resolved at call time rather than in the signature, so a
+    test that repoints CORE_SCHEMA is honoured by callers that omit `schema`.
+    """
+    schema = schema or CORE_SCHEMA
     with engine.connect() as conn:
         row = conn.execute(
             text(
@@ -25,8 +30,12 @@ def _table_exists(engine: Engine, table: str, schema: str = CORE_SCHEMA) -> bool
     return row is not None
 
 
-def _ensure_schema(engine: Engine, schema: str = RAW_SCHEMA) -> None:
-    """Create the given schema in the database if it does not exist."""
+def _ensure_schema(engine: Engine, schema: str | None = None) -> None:
+    """Create the given schema in the database if it does not exist.
+
+    The default is resolved at call time, as in `_table_exists`.
+    """
+    schema = schema or RAW_SCHEMA
     with engine.connect() as conn:
         conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
         conn.commit()

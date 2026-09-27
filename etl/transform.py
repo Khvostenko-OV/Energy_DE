@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import time
@@ -8,6 +7,8 @@ import time
 import geopandas as gpd
 import numpy
 import pandas
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
 
 from etl.config import SOURCE_NAMES, get_engine
 from etl.config import (
@@ -22,8 +23,9 @@ from etl.config import (
 )
 from etl.db_utils import _create_staging_tables, _ensure_schema, _table_exists
 from etl.reports import TransformReport
+from etl.source_data import SourceValidationError, synthetic_unit_ids
 from etl.utils import _latest_table_version
-from etl.verify import _verify_transform
+from etl.verify import _verify_membership_matches_staging, _verify_transform
 
 log = logging.getLogger(__name__)
 
@@ -57,15 +59,35 @@ def transform_sources(*sources: str) -> TransformReport:
     return _merge_transform_reports(sources, reports)
 
 
-def _transform_source(source: str) -> TransformReport:
-    """Transform the latest raw version of one source into its staging tables."""
+def transform_source_snapshot(
+    source: str,
+    raw_table: str,
+    *,
+    engine: Engine,
+    ingestion_run_id,
+) -> TransformReport:
+    return _transform_source(
+        source,
+        engine=engine,
+        raw_table=raw_table,
+        ingestion_run_id=ingestion_run_id,
+    )
+
+
+def _transform_source(
+    source: str,
+    *,
+    engine: Engine | None = None,
+    raw_table: str | None = None,
+    ingestion_run_id=None,
+) -> TransformReport:
     report = TransformReport(source=source)
     start = time.perf_counter()
     try:
-        engine = get_engine()
+        engine = engine or get_engine()
         _ensure_schema(engine, STAGING_SCHEMA)
 
-        raw_table = _latest_table_version(engine, source)
+        raw_table = raw_table or _latest_table_version(engine, source)
         if raw_table is None:
             report.errors.append(
                 f"raw tables missing for source {source!r}; "
@@ -170,9 +192,23 @@ def _transform_source(source: str) -> TransformReport:
         report.rows_written = len(df)
         log.info("Staging written, time %.3fs", time.perf_counter() - t)
 
+        if ingestion_run_id is not None:
+            _record_source_memberships(
+                engine,
+                source=source,
+                ingestion_run_id=ingestion_run_id,
+            )
+
         log.info("Verifying transform...")
         t = time.perf_counter()
         report.errors = _verify_transform(engine, source, report)
+        if ingestion_run_id is not None:
+            membership_errors, _ = _verify_membership_matches_staging(
+                engine,
+                source=source,
+                ingestion_run_id=ingestion_run_id,
+            )
+            report.errors.extend(membership_errors)
         log.info("Verification done, time %.3fs", time.perf_counter() - t)
 
     except Exception as e:
@@ -188,6 +224,45 @@ def _transform_source(source: str) -> TransformReport:
     log.info("Total time: %.3fs", report.total_time)
 
     return report
+
+
+def _record_source_memberships(
+    engine: Engine,
+    *,
+    source: str,
+    ingestion_run_id,
+) -> None:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                f"SELECT unit_id, reference_id, bad_quality "
+                f"FROM {STAGING_SCHEMA}.{source}"
+            )
+        ).mappings().all()
+    statement = text(
+        f"DELETE FROM {SERVICE_SCHEMA}.source_memberships WHERE run_id = :run_id"
+    )
+    with engine.begin() as connection:
+        connection.execute(statement, {"run_id": str(ingestion_run_id)})
+        if rows:
+            connection.execute(
+                text(
+                    f"INSERT INTO {SERVICE_SCHEMA}.source_memberships "
+                    "(run_id, energy_source, unit_key, reference_id, bad_quality) "
+                    "VALUES (:run_id, :energy_source, :unit_key, :reference_id, "
+                    ":bad_quality)"
+                ),
+                [
+                    {
+                        "run_id": str(ingestion_run_id),
+                        "energy_source": source,
+                        "unit_key": row["unit_id"],
+                        "reference_id": row["reference_id"],
+                        "bad_quality": row["bad_quality"],
+                    }
+                    for row in rows
+                ],
+            )
 
 
 def _merge_transform_reports(
@@ -234,34 +309,22 @@ def _merge_transform_reports(
 
 
 def _unit_ids(df: pandas.DataFrame, source: str) -> pandas.Series:
-    """Build the staging natural key per row.
-
-    Rows carrying a reference_id get '<source>_<reference_id>'; rows without
-    one (none in bio) get a synthetic hash identity derived from the row's own
-    attributes and recognized by the 'syn_' prefix (ADR 0001, staging-only).
-    """
-    ids = (source + "_" + df["reference_id"].astype("string")).astype("string")
     missing = df["reference_id"].isna()
-    if missing.any():
-        rows = df.loc[missing]
-        synthetic = rows.apply(
-            lambda r: _synthetic_unit_id(
-                source,
-                r["x_coordinates"],
-                r["y_coordinates"],
-                r["installed_capacity"],
-                r["commissioning_date"],
-            ),
-            axis=1,
+    locations = df["secondary_attributes"].map(json.loads).map(
+        lambda value: value.get("location")
+    )
+    if missing.any() and locations[missing].isna().any():
+        raise SourceValidationError(
+            "Rows without reference_id require a location"
         )
-        ids.loc[missing] = synthetic.to_numpy()
-    return ids
-
-
-def _synthetic_unit_id(source: str, x, y, capacity, commissioning) -> str:
-    """Stable synthetic identity from a unit's own attributes (ADR 0001)."""
-    payload = "|".join(str(v) for v in (source, x, y, capacity, commissioning))
-    return SYNTHETIC_ID_PREFIX + hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return synthetic_unit_ids(
+        source=source,
+        reference_ids=df["reference_id"],
+        locations=locations,
+        x=df["x_coordinates"],
+        y=df["y_coordinates"],
+        geo_accuracy=df["geo_accuracy"],
+    )
 
 
 def _quality_reasons(df: pandas.DataFrame) -> pandas.Series:

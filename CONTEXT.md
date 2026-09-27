@@ -113,7 +113,13 @@ _Avoid_: Message ID, filename alone
 The extract layer: versioned per-source unit tables with secondary attributes folded into a `secondary_attributes` jsonb column. Records only — the load-signature log and the boundary reference layer live in the Service schema (see Service).
 
 **Service**:
-The operational-metadata schema, deliberately separate from the versioned raw datalake: `ingestion_runs` for processing lifecycles, the `loaded_files` success log (see Load signature), and the non-versioned level-coded `boundaries` reference layer used by the transform spatial joins. Non-versioned by design; only the unit tables are versioned.
+The operational-metadata schema, deliberately separate from the versioned raw datalake: `ingestion_runs` for processing lifecycles, the `loaded_files` success log (see Load signature), `source_memberships` for Source lineage, and the non-versioned level-coded `boundaries` reference layer used by the transform spatial joins. Non-versioned by design; only the unit tables are versioned.
+
+**Unit key**:
+The staging `unit_id`, persisted under that column name in `source_memberships.unit_key` so lineage and staging can be joined without qualifying which Core table the unit belongs to.
+
+**Input kind**:
+What an Ingestion run was handed: `source` or `boundary`. It is derived from the accepted S3 key, not the file content, and is recorded on the run for reporting; which processor handles an object is decided by the accepted-key set and the processor the worker is given.
 
 **Staging**:
 The transform layer: raw rows enriched with state, region, and district via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`). Staging carries both the `geometry` point and explicit `x_coordinates` / `y_coordinates`.

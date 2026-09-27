@@ -15,11 +15,11 @@ from sqlalchemy import create_engine, text
 
 from etl.config import CORE_SCHEMA, MARTS_SCHEMA, OUTSIDE_STATE
 from etl.load import load_generators, load_storages
-from etl.marts import MART_DEFINITIONS, build_marts, verify_marts
+from etl.marts import _mart_definitions, build_marts, verify_marts
 
 ENGINE = create_engine(os.environ["DATABASE_URL"])
 
-MART_NAMES = tuple(MART_DEFINITIONS)
+MART_NAMES = tuple(_mart_definitions(CORE_SCHEMA))
 
 # (core_table, units_properties, properties) per unit-kind.
 GENERATOR_KIND = ("generators", "generator_units_properties", "generator_properties")

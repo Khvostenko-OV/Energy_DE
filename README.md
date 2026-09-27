@@ -66,7 +66,7 @@ defaults, so they run with **no arguments** — an explicit `TARGET` always wins
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `SOURCES_DATA_DIR` | `<repo>/data/sources` | folder scanned for `*_V<YYYYMMDD>.gpkg` unit-source files (the six sources in `SOURCE_NAMES` order; `Solar_Energy_Polygons` / `Cogeneration_Units` look-alikes are logged and skipped) |
+| `SOURCES_DATA_DIR` | `<repo>/data/sources` | folder scanned for `*.gpkg` unit-source files, each routed by the Energy source value in its GPKG content (the six sources in `SOURCE_NAMES` order; a file that is not a valid single-layer Energy source snapshot is logged and skipped) |
 | `BOUNDARIES_MANIFEST` | `<repo>/data/boundaries/boundaries.txt` | manifest listing the `germany_*.gpkg` boundary files, each file's `level` read from its data |
 
 Both are documented (commented) in `.env.example`. `run-all` uses the same

@@ -13,8 +13,8 @@ from etl.ingestion import (
 )
 from etl.load import load_generators, load_storages
 from etl.marts import build_marts
+from etl.source_data import SourceDataset, SourceValidationError, inspect_source_gpkg
 from etl.transform import transform_sources
-from etl.utils import _source_from_filename
 
 
 @click.group()
@@ -88,10 +88,11 @@ def extract(target: str | None, force: bool):
     """Extract unit sources found in a folder into versioned raw tables.
 
     TARGET is the sources folder (defaults to the configured sources folder).
-    Each *_V<YYYYMMDD>.gpkg matching one of the six unit sources is extracted
-    in SOURCE_NAMES order; look-alikes such as Solar_Energy_Polygons and
-    Cogeneration_Units, and any other files, are logged and skipped. Files
-    already logged in loaded_files are skipped unless --force is given.
+    Each *.gpkg whose single layer is a valid unit-source snapshot is extracted
+    in SOURCE_NAMES order, so discovery follows the file content rather than its
+    name. Look-alikes such as Solar_Energy_Polygons and Cogeneration_Units fail
+    snapshot validation and are logged and skipped. Files already logged in
+    loaded_files are skipped unless --force is given.
     """
     log = logging.getLogger(__name__)
 
@@ -103,30 +104,35 @@ def extract(target: str | None, force: bool):
         raise click.BadParameter(f"Sources folder not found: {data_dir}")
 
     log.info("Extracting energy sources from %s", data_dir.name)
-    by_source: dict[str, Path] = {}
+    by_source: dict[str, tuple[Path, SourceDataset]] = {}
     skipped: list[str] = []
     for f in sorted(data_dir.glob("*.gpkg")):
-        source = _source_from_filename(f.name)
-        if not source:
+        try:
+            dataset = inspect_source_gpkg(f)
+        except SourceValidationError as error:
+            log.info("Skipping %s: %s", f.name, error)
             skipped.append(f.name)
             continue
-        if source in by_source:
+        if dataset.source in by_source:
             log.warning(
                 "Multiple files map to source %s: keeping %s, ignoring %s",
-                source, by_source[source].name, f.name,
+                dataset.source, by_source[dataset.source][0].name, f.name,
             )
             continue
-        by_source[source] = f
+        by_source[dataset.source] = (f, dataset)
     if skipped:
         log.info("Skipping unrecognised file(s): %s", ", ".join(skipped))
 
-    filenames = [by_source[s] for s in SOURCE_NAMES if s in by_source]
-    log.info("Extracting %d source file(s) from %s", len(filenames), data_dir)
+    chosen = [by_source[s] for s in SOURCE_NAMES if s in by_source]
+    log.info("Extracting %d source file(s) from %s", len(chosen), data_dir)
 
-    reports = [extract_source(f, force=force) for f in filenames]
+    reports = [
+        extract_source(path, force=force, dataset=dataset)
+        for path, dataset in chosen
+    ]
 
     for r in reports:
-        click.echo(f"\nExtraction report ({r.source}):")
+        click.echo(f"\nExtraction report ({r.source or r.origin}):")
         click.echo(r.summary())
     click.echo(f"\nExtraction complete. Total time: {(time.perf_counter() - start):.2f} seconds.")
 
@@ -177,8 +183,9 @@ def load():
 
     Reads the good staging rows from all six sources and upserts generators
     into core.generators and storages into core.storages, each with a serial
-    surrogate key, collision checks, and property-link annotation.  The load
-    is incremental and idempotent.
+    surrogate key, collision checks, and property-link annotation.  The
+    staging tables are authoritative for the rows they carry, so the load is
+    repeatable and never deletes a core unit.
     """
     click.echo("\nRunning load stage for generators and storages...")
     start = time.perf_counter()
