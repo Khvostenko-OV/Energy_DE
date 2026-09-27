@@ -26,6 +26,7 @@
       "tee *": "allow",
       "cut *": "allow",
       "xxd *": "allow",
+      "date *": "allow",
       "chmod *": "allow",
       "docker *": "allow",
       "echo *": "allow",
