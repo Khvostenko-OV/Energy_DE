@@ -21,7 +21,12 @@ from etl.config import (
     STAGING_SCHEMA,
     SYNTHETIC_ID_PREFIX,
 )
-from etl.db_utils import _create_staging_tables, _ensure_schema, _table_exists
+from etl.db_utils import (
+    _create_staging_tables,
+    _drop_staging_tables,
+    _ensure_schema,
+    _table_exists,
+)
 from etl.reports import TransformReport
 from etl.source_data import SourceValidationError, synthetic_unit_ids
 from etl.utils import _latest_table_version
@@ -215,6 +220,9 @@ def _transform_source(
         report.errors.append(f"Transform failed: {e}")
         log.exception("Transform failed for %s", source)
 
+    if report.errors and ingestion_run_id is not None:
+        _discard_unverified_staging(engine, source)
+
     report.total_time = time.perf_counter() - start
     if report.errors:
         for err in report.errors:
@@ -224,6 +232,23 @@ def _transform_source(
     log.info("Total time: %.3fs", report.total_time)
 
     return report
+
+
+def _discard_unverified_staging(engine: Engine | None, source: str) -> None:
+    """Drop a Source's staging after a failed snapshot transform.
+
+    A snapshot load upserts every staging table of its Core kind, so a staging
+    table has to mean "the last transform of this Source was verified".
+    Otherwise a snapshot that was written but failed verification would reach
+    Core through the next successful Source of the same kind. Dropping it
+    leaves that Source's Core units retained until a good snapshot arrives.
+    """
+    if engine is None:
+        return
+    try:
+        _drop_staging_tables(engine, source)
+    except Exception:
+        log.exception("Could not discard unverified staging for %s", source)
 
 
 def _record_source_memberships(

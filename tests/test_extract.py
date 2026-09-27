@@ -162,6 +162,28 @@ def test_source_content_rejects_duplicate_non_null_reference_ids(tmp_path):
         inspect_source_gpkg(path)
 
 
+def test_source_content_rejects_duplicate_reference_ids_alongside_null_ones(tmp_path):
+    """A snapshot mixing null and duplicated Reference IDs still fails clearly.
+
+    Solar is the dataset that carries null Reference IDs, so this is the shape
+    a duplicated Solar publication takes. It must surface as a validation error,
+    which the worker records as a failed extract stage result with a clear
+    message, rather than an unexplained pandas indexing crash.
+    """
+    path = _write_gpkg(
+        _solar_frame(
+            reference_ids=(None, "solar-1", "solar-1"),
+            coordinates=((9.0, 49.0), (10.0, 50.0), (11.0, 51.0)),
+        ),
+        tmp_path / "duplicate-with-null-reference.gpkg",
+    )
+
+    with pytest.raises(
+        SourceValidationError, match=r"Duplicate non-null Reference IDs.*solar-1"
+    ):
+        inspect_source_gpkg(path)
+
+
 def test_source_synthetic_identity_uses_stable_attributes_across_snapshots(tmp_path):
     first = _write_gpkg(
         _solar_frame(reference_ids=(None,), capacity=100.0),

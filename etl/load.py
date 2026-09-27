@@ -47,6 +47,10 @@ from etl.verify import (
 log = logging.getLogger(__name__)
 
 
+# Value columns every Core kind is verified on after a snapshot load.
+_SHARED_VERIFIED_COLUMNS = ("installed_capacity", "reference_date")
+
+
 @dataclass(frozen=True)
 class _CoreKind:
     """Load context for one core unit-kind (generators or storages).
@@ -66,6 +70,9 @@ class _CoreKind:
     check_storage_capacity: bool
     verifier: Callable[[Engine, LoadReport], list[str]]
     create_table: Callable[[Engine], None]
+    # Staging value columns a snapshot load must carry into Core unchanged;
+    # checked row by row after an authoritative load (issue #4).
+    verified_columns: tuple[str, ...] = ()
 
 
 GENERATOR_KIND = _CoreKind(
@@ -94,6 +101,7 @@ GENERATOR_KIND = _CoreKind(
     check_storage_capacity=False,
     verifier=_verify_load_generators,
     create_table=_create_core_generators,
+    verified_columns=_SHARED_VERIFIED_COLUMNS,
 )
 
 STORAGE_KIND = _CoreKind(
@@ -124,6 +132,7 @@ STORAGE_KIND = _CoreKind(
     check_storage_capacity=True,
     verifier=_verify_load_storages,
     create_table=_create_core_storages,
+    verified_columns=(*_SHARED_VERIFIED_COLUMNS, "storage_type", "storage_capacity"),
 )
 
 
@@ -425,27 +434,28 @@ def _verify_authoritative_source(
     ingestion_run_id,
     known_before: frozenset[str],
 ) -> list[str]:
+    """Check that Core now reflects every good row of the snapshot.
+
+    Membership must match staging; every good unit must be in Core with its
+    source, Reference ID and the kind's ``verified_columns`` equal to the
+    staging values; and no bad-quality unit may have *created* a Core row.
+    """
     errors, _ = _verify_membership_matches_staging(
         engine, source=source, ingestion_run_id=ingestion_run_id
     )
+    columns = kind.verified_columns
+    staging_select = ", ".join(("unit_id", "bad_quality", "reference_id", *columns))
     with engine.connect() as connection:
         staging = connection.execute(
-            text(
-                f"SELECT unit_id, bad_quality, reference_id, "
-                f"installed_capacity, reference_date "
-                f"FROM {STAGING_SCHEMA}.{source}"
-            )
-        ).fetchall()
-    staging_by_key = {
-        str(unit_id): (bad, reference_id, capacity, reference_date)
-        for unit_id, bad, reference_id, capacity, reference_date in staging
-    }
+            text(f"SELECT {staging_select} FROM {STAGING_SCHEMA}.{source}")
+        ).mappings().all()
+    staging_by_key = {str(row["unit_id"]): row for row in staging}
 
     core_lookup, _ = _build_core_lookup(engine, kind)
     good_units = {
-        unit_key: values
-        for unit_key, values in staging_by_key.items()
-        if not values[0]
+        unit_key: row
+        for unit_key, row in staging_by_key.items()
+        if not row["bad_quality"]
     }
     missing = sorted(set(good_units) - set(core_lookup))
     if missing:
@@ -464,45 +474,60 @@ def _verify_authoritative_source(
     core_ids = [
         core_lookup[unit_key] for unit_key in good_units if unit_key in core_lookup
     ]
-    if core_ids:
-        with engine.connect() as connection:
-            core_rows = {
-                int(unit_id): (energy_source, reference_id, capacity, reference_date)
-                for unit_id, energy_source, reference_id, capacity, reference_date in connection.execute(
-                    text(
-                        f"SELECT unit_id, energy_source, reference_id, "
-                        f"installed_capacity, reference_date "
-                        f"FROM {CORE_SCHEMA}.{kind.core_table} "
-                        "WHERE unit_id = ANY(:ids)"
-                    ),
-                    {"ids": core_ids},
-                ).fetchall()
-            }
-        for unit_key, (_, reference_id, capacity, reference_date) in good_units.items():
-            core_unit_id = core_lookup.get(unit_key)
-            if core_unit_id not in core_rows:
-                continue
-            core_source, core_reference_id, core_capacity, core_reference_date = core_rows[core_unit_id]
-            if core_source != source:
-                errors.append(f"Core source mismatch for {unit_key}")
-                break
-            if core_reference_id != reference_id:
-                errors.append(f"Core Reference ID mismatch for {unit_key}")
-                break
-            if pandas.isna(capacity) != pandas.isna(core_capacity) or (
-                not pandas.isna(capacity)
-                and float(capacity) != float(core_capacity)
-            ):
-                errors.append(f"Core capacity mismatch for {unit_key}")
-                break
-            if pandas.isna(reference_date) != pandas.isna(core_reference_date) or (
-                not pandas.isna(reference_date)
-                and pandas.Timestamp(reference_date)
-                != pandas.Timestamp(core_reference_date)
-            ):
-                errors.append(f"Core reference date mismatch for {unit_key}")
-                break
+    if not core_ids:
+        return errors
+    core_select = ", ".join(
+        ("unit_id", "energy_source", "reference_id")
+        + tuple(kind.column_map[column] for column in columns)
+    )
+    with engine.connect() as connection:
+        core_rows = {
+            int(row["unit_id"]): row
+            for row in connection.execute(
+                text(
+                    f"SELECT {core_select} FROM {CORE_SCHEMA}.{kind.core_table} "
+                    "WHERE unit_id = ANY(:ids)"
+                ),
+                {"ids": core_ids},
+            ).mappings()
+        }
+    for unit_key, staged in good_units.items():
+        core_row = core_rows.get(core_lookup.get(unit_key))
+        if core_row is None:
+            continue
+        if core_row["energy_source"] != source:
+            errors.append(f"Core source mismatch for {unit_key}")
+            break
+        if core_row["reference_id"] != staged["reference_id"]:
+            errors.append(f"Core Reference ID mismatch for {unit_key}")
+            break
+        mismatched = next(
+            (
+                column
+                for column in columns
+                if not _same_value(staged[column], core_row[kind.column_map[column]])
+            ),
+            None,
+        )
+        if mismatched is not None:
+            errors.append(f"Core {mismatched} mismatch for {unit_key}")
+            break
     return errors
+
+
+def _same_value(staged, core) -> bool:
+    """Compare a scalar staging value with its Core copy; nulls compare equal.
+
+    Only for the scalar ``verified_columns`` (float, timestamp, text); JSON or
+    list values would make ``pandas.isna`` return an array.
+    """
+    if pandas.isna(staged) or pandas.isna(core):
+        return pandas.isna(staged) and pandas.isna(core)
+    if isinstance(staged, (int, float)) or isinstance(core, (int, float)):
+        return float(staged) == float(core)
+    if hasattr(staged, "year") or hasattr(core, "year"):
+        return pandas.Timestamp(staged) == pandas.Timestamp(core)
+    return staged == core
 
 
 # ------------------------------------------------------------------ #

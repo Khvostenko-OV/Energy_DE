@@ -123,9 +123,12 @@ def _normalized_reference_ids(values: pandas.Series) -> pandas.Series:
 
 
 def _validate_reference_ids(reference_ids: pandas.Series) -> None:
-    duplicated = reference_ids[reference_ids.notna()].duplicated(keep=False)
+    # Null Reference IDs are not identities, so only the non-null ones can
+    # collide; the mask is taken on that subset and must index that subset.
+    present = reference_ids[reference_ids.notna()]
+    duplicated = present.duplicated(keep=False)
     if duplicated.any():
-        duplicates = sorted(reference_ids[duplicated].astype(str).unique())
+        duplicates = sorted(present[duplicated].astype(str).unique())
         raise SourceValidationError(
             f"Duplicate non-null Reference IDs in Source snapshot: {duplicates}"
         )

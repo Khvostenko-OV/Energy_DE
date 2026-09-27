@@ -88,6 +88,17 @@ def _create_log_table(engine: Engine, schema: str = SERVICE_SCHEMA) -> None:
         )
 
 
+def _drop_staging_tables_in(conn, source: str) -> None:
+    for table in (f"{source}_units_properties", f"{source}_properties", source):
+        conn.execute(text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{table} CASCADE"))
+
+
+def _drop_staging_tables(engine: Engine, source: str) -> None:
+    """Drop the source's three staging tables, if they exist."""
+    with engine.begin() as conn:
+        _drop_staging_tables_in(conn, source)
+
+
 def _create_staging_tables(engine: Engine, source: str) -> None:
     """Drop and recreate the source's three staging tables with constraints."""
     storage_shape = ""
@@ -97,11 +108,7 @@ def _create_staging_tables(engine: Engine, source: str) -> None:
             f"{STORAGE_COLUMNS[1]}  DOUBLE PRECISION,\n"
         )
     with engine.begin() as conn:
-        conn.execute(
-            text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{source}_units_properties CASCADE")
-        )
-        conn.execute(text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{source}_properties CASCADE"))
-        conn.execute(text(f"DROP TABLE IF EXISTS {STAGING_SCHEMA}.{source} CASCADE"))
+        _drop_staging_tables_in(conn, source)
         conn.execute(
             text(
                 f"""

@@ -1,7 +1,9 @@
+import dataclasses
 import json
 import os
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import geopandas as gpd
 import pandas
@@ -11,6 +13,7 @@ from shapely.geometry import Point, box
 from sqlalchemy import create_engine, text
 
 from etl import db_utils, extract, ingestion, load, marts, transform, utils, verify
+from etl.config import SOURCE_NAMES, STAGING_GENERATOR_SOURCES
 import etl.__main__ as cli_module
 from etl.__main__ import cli
 
@@ -1621,3 +1624,747 @@ def test_worker_processes_authoritative_solar_snapshots_with_lineage(source_pipe
         f"WHERE run_id = :run_id",
         {"run_id": run_ids["version-2"]},
     )} >= {"extract", "transform", "load", "marts"}
+
+
+# ------------------------------------------------------------------ #
+#  Every Source dataset and both Core kinds (issue #4)                 #
+# ------------------------------------------------------------------ #
+
+FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+SOURCE_FIXTURE_DIR = os.path.join(FIXTURE_DIR, "sources")
+BOUNDARY_FIXTURE_MANIFEST = os.path.join(FIXTURE_DIR, "boundaries", "manifest.txt")
+
+# The Source column that carries a unit's capacity in the published GPKG.
+_CAPACITY_COLUMN = {
+    source: "gas_production_capacity" if source == "gas" else "installed_capacity"
+    for source in SOURCE_NAMES
+}
+
+# One decomposed property every fixture of the source carries, so the test
+# can prove the per-kind property tables are populated for every source.
+_SIGNATURE_PROPERTY = {
+    "bio": "biomass_type",
+    "gas": "technology",
+    "hydro": "hydro_type",
+    "solar": "solar_type",
+    "wind": "manufacturer",
+    "storage": "technology",
+}
+
+
+def _kind(source):
+    return load.STORAGE_KIND if source == "storage" else load.GENERATOR_KIND
+
+
+def _core_kind(source):
+    return _kind(source).core_table
+
+
+def _properties_tables(source):
+    kind = _kind(source)
+    return kind.units_properties_table, kind.properties_table
+
+
+def _fixture_frame(source):
+    return gpd.read_file(os.path.join(SOURCE_FIXTURE_DIR, f"{source}.gpkg"))
+
+
+def _frame_bytes(tmp_path, name, frame):
+    """Publish a frame as a single-layer GPKG whose layer name says nothing."""
+    path = tmp_path / name
+    frame.to_file(path, layer="published", driver="GPKG")
+    return path.read_bytes()
+
+
+def _records_message(handle, records):
+    """One SQS message carrying one S3 record per (source, version) pair."""
+    return ingestion.SqsMessage(
+        receipt_handle=handle,
+        body=json.dumps(
+            {
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "s3": {
+                            "bucket": {"name": "energy-data"},
+                            "object": {
+                                "key": f"sources/{source}.gpkg",
+                                "versionId": version_id,
+                            },
+                        },
+                    }
+                    for source, version_id in records
+                ]
+            }
+        ),
+    )
+
+
+class CountingProcessor(ingestion.SourceSnapshotProcessor):
+    """The real processor, counting how often the shared marts refresh runs."""
+
+    def __init__(self, engine, *, s3):
+        super().__init__(engine, s3=s3)
+        self.finalized = 0
+
+    def finalize(self):
+        self.finalized += 1
+        return super().finalize()
+
+
+@pytest.fixture
+def fixture_boundaries(source_pipeline):
+    """Replace the single test box with the committed boundary fixtures.
+
+    The Source fixtures sit inside these polygons, so every unit gets a real
+    state/region/district and the marts pivot on real state names.
+    """
+    report = extract.extract_boundaries(Path(BOUNDARY_FIXTURE_MANIFEST), force=True)
+    assert report.passed, report.errors
+    return source_pipeline
+
+
+def _deliver(pipeline, tmp_path, source, version_id, frame):
+    """Publish a frame as a new object version and process its S3 event."""
+    s3 = pipeline["s3"]
+    s3.put(
+        f"sources/{source}.gpkg",
+        version_id,
+        _frame_bytes(tmp_path, f"{version_id}.gpkg", frame),
+    )
+    return ingestion.process_one_message(
+        _records_message(f"receipt-{version_id}", [(source, version_id)]),
+        engine=ENGINE,
+        s3=s3,
+        sqs=pipeline["sqs"],
+        sns=FakeSNS(),
+        processor=pipeline["processor"],
+    )
+
+
+def _raw_versions(schemas, source):
+    """Raw snapshot tables extracted for one Source."""
+    return len(
+        _query(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = :schema AND table_name LIKE :prefix",
+            {"schema": schemas["raw"], "prefix": f"{source}\\_%"},
+        )
+    )
+
+
+def _query(sql, parameters=None):
+    with ENGINE.connect() as connection:
+        return connection.execute(text(sql), parameters or {}).mappings().all()
+
+
+def _run_ids(schemas, version_id):
+    return {
+        row["object_key"]: str(row["run_id"])
+        for row in _query(
+            f"SELECT run_id, object_key FROM {schemas['service']}.ingestion_runs "
+            "WHERE object_version_id = :version_id",
+            {"version_id": version_id},
+        )
+    }
+
+
+def _good_members(schemas, run_id):
+    """Unit keys of the good-quality members of one Source snapshot."""
+    source = _query(
+        f"SELECT energy_source FROM {schemas['service']}.source_memberships "
+        "WHERE run_id = :run_id LIMIT 1",
+        {"run_id": run_id},
+    )[0]["energy_source"]
+    return {
+        _unit_key(row["reference_id"], row["x_coordinates"], row["y_coordinates"])
+        for row in _query(
+            f"SELECT m.reference_id, s.x_coordinates, s.y_coordinates "
+            f"FROM {schemas['service']}.source_memberships m "
+            f"JOIN {schemas['stage']}.{source} s ON s.unit_id = m.unit_key "
+            "WHERE m.run_id = :run_id AND NOT m.bad_quality",
+            {"run_id": run_id},
+        )
+    }
+
+
+def _unit_key(reference_id, x, y):
+    """A stable key for a unit: its Reference ID, or where it is when null."""
+    if reference_id is None or pandas.isna(reference_id):
+        return f"@{round(float(x), 6)},{round(float(y), 6)}"
+    return str(reference_id)
+
+
+def _frame_keys(frame):
+    return [
+        _unit_key(r, x, y)
+        for r, x, y in zip(
+            frame["reference_id"], frame["x_coordinates"], frame["y_coordinates"]
+        )
+    ]
+
+
+def _core_units(schemas, source):
+    """unit key -> (core unit_id, capacity) for one source's Core rows."""
+    return {
+        _unit_key(row["reference_id"], row["longitude"], row["latitude"]): (
+            row["unit_id"],
+            row["installed_capacity"],
+        )
+        for row in _query(
+            f"SELECT unit_id, reference_id, longitude, latitude, installed_capacity "
+            f"FROM {schemas['core']}.{_core_kind(source)} "
+            "WHERE energy_source = :source",
+            {"source": source},
+        )
+    }
+
+
+def test_worker_publishes_every_source_dataset_into_its_core_kind(
+    fixture_boundaries, tmp_path
+):
+    """One message carrying all six Source datasets loads both Core kinds.
+
+    Each record is routed from its GPKG content, transformed from the exact raw
+    table its own extraction wrote, and loaded into the Core kind it belongs to;
+    the three marts are refreshed once for the message and reconcile to Core.
+    """
+    s3 = fixture_boundaries["s3"]
+    sqs = fixture_boundaries["sqs"]
+    schemas = fixture_boundaries["schemas"]
+    processor = CountingProcessor(ENGINE, s3=s3)
+    frames = {source: _fixture_frame(source) for source in SOURCE_NAMES}
+    for source, frame in frames.items():
+        s3.put(
+            f"sources/{source}.gpkg",
+            f"{source}-v1",
+            _frame_bytes(tmp_path, f"{source}.gpkg", frame),
+        )
+
+    result = ingestion.process_one_message(
+        _records_message("batch-1", [(s, f"{s}-v1") for s in SOURCE_NAMES]),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=processor,
+    )
+
+    assert result.acknowledged
+    assert result.states == (ingestion.RunState.SUCCEEDED,) * len(SOURCE_NAMES)
+    assert processor.finalized == 1
+    assert sqs.deleted == ["batch-1"]
+
+    for source, frame in frames.items():
+        run_id = _run_ids(schemas, f"{source}-v1")[f"sources/{source}.gpkg"]
+        stages = {
+            row["stage"]: row
+            for row in _query(
+                f"SELECT stage, outcome, details FROM {schemas['service']}.stage_results "
+                "WHERE run_id = :run_id",
+                {"run_id": run_id},
+            )
+        }
+        assert set(stages) == {"extract", "transform", "load", "marts"}, source
+        assert {row["outcome"] for row in stages.values()} == {"succeeded"}, source
+        # Routed by content: the record's key names the source, but the
+        # extracted table is named from the Energy source value in the GPKG.
+        raw_table = stages["extract"]["details"]["raw_table"]
+        assert stages["extract"]["details"]["energy_source"] == source
+        assert raw_table.startswith(f"{source}_")
+        assert stages["transform"]["details"]["raw_table"] == raw_table
+        assert stages["load"]["details"]["inserted"] >= 0
+
+        # Core holds exactly the good members of the snapshot, in its kind.
+        good = _good_members(schemas, run_id)
+        core = _core_units(schemas, source)
+        assert set(core) == good, source
+        assert good, f"{source} fixture has no good rows"
+
+        # Capacity reaches Core under the kind's capacity column, including
+        # gas, whose Source column has a different name.
+        expected = dict(zip(_frame_keys(frame), frame[_CAPACITY_COLUMN[source]]))
+        for unit_key, (_, capacity) in core.items():
+            assert capacity == pytest.approx(float(expected[unit_key])), (
+                source,
+                unit_key,
+            )
+
+        # The per-kind property tables carry the source's decomposed attributes.
+        links, properties = _properties_tables(source)
+        linked = _query(
+            f"SELECT DISTINCT p.name FROM {schemas['core']}.{_core_kind(source)} u "
+            f"JOIN {schemas['core']}.{links} up ON up.unit_id = u.unit_id "
+            f"JOIN {schemas['core']}.{properties} p ON p.prop_id = up.prop_id "
+            "WHERE u.energy_source = :source",
+            {"source": source},
+        )
+        assert _SIGNATURE_PROPERTY[source] in {row["name"] for row in linked}, source
+
+    # Generators never land in storages and vice versa.
+    assert {
+        row["energy_source"]
+        for row in _query(f"SELECT DISTINCT energy_source FROM {schemas['core']}.generators")
+    } == set(STAGING_GENERATOR_SOURCES)
+    assert {
+        row["energy_source"]
+        for row in _query(f"SELECT DISTINCT energy_source FROM {schemas['core']}.storages")
+    } == {"storage"}
+
+    # Storage keeps its type and capacity per unit.
+    storage_frame = frames["storage"].set_index("reference_id")
+    for row in _query(
+        f"SELECT reference_id, storage_type, storage_capacity "
+        f"FROM {schemas['core']}.storages"
+    ):
+        assert row["storage_type"] == storage_frame.loc[row["reference_id"], "storage_type"]
+        assert row["storage_capacity"] == pytest.approx(
+            float(storage_frame.loc[row["reference_id"], "storage_capacity"])
+        )
+
+    # The three marts were refreshed after all the source work and reconcile.
+    assert marts.verify_marts(ENGINE) == []
+    counts = {
+        row["energy_source"]: int(row["total"])
+        for row in _query(
+            f"SELECT energy_source, SUM(installation_count) AS total "
+            f"FROM {schemas['marts']}.installation_counts GROUP BY energy_source"
+        )
+    }
+    assert set(counts) == set(SOURCE_NAMES)
+    storage_total = _query(
+        f"SELECT COALESCE(SUM(storage_capacity), 0) AS total "
+        f"FROM {schemas['marts']}.storage_capacity"
+    )[0]["total"]
+    core_storage_total = _query(
+        f"SELECT COALESCE(SUM(storage_capacity), 0) AS total "
+        f"FROM {schemas['core']}.storages "
+        "WHERE decommissioning_date IS NULL OR decommissioning_date > CURRENT_DATE"
+    )[0]["total"]
+    assert float(storage_total) == pytest.approx(float(core_storage_total))
+    # Generation capacity reconciles to the good fixture rows, computed here
+    # independently of the mart SQL (all fixture units are active).
+    generation = {
+        row["energy_source"]: float(row["total"])
+        for row in _query(
+            f"SELECT energy_source, SUM(generation_capacity) AS total "
+            f"FROM {schemas['marts']}.generation_capacity GROUP BY energy_source"
+        )
+    }
+    for source in STAGING_GENERATOR_SOURCES:
+        run_id = _run_ids(schemas, f"{source}-v1")[f"sources/{source}.gpkg"]
+        good = _good_members(schemas, run_id)
+        frame = frames[source]
+        expected_total = sum(
+            float(capacity)
+            for key, capacity in zip(_frame_keys(frame), frame[_CAPACITY_COLUMN[source]])
+            if key in good
+        )
+        assert generation[source] == pytest.approx(expected_total), source
+
+
+@pytest.mark.parametrize("source", SOURCE_NAMES)
+def test_worker_keeps_core_history_and_identity_for_every_source(
+    fixture_boundaries, tmp_path, source
+):
+    """Every Source dataset has the same complete-snapshot Core semantics.
+
+    A newer snapshot updates the units it carries, leaves the units it omits in
+    Core with their identity, a redelivered or republished identical snapshot
+    changes nothing, and an omitted unit that reappears keeps its Core unit_id.
+    """
+    s3 = fixture_boundaries["s3"]
+    sqs = fixture_boundaries["sqs"]
+    schemas = fixture_boundaries["schemas"]
+    processor = fixture_boundaries["processor"]
+    key = f"sources/{source}.gpkg"
+    capacity_column = _CAPACITY_COLUMN[source]
+
+    def publish(version_id, frame):
+        result = _deliver(fixture_boundaries, tmp_path, source, version_id, frame)
+        assert result.acknowledged, version_id
+        assert result.states == (ingestion.RunState.SUCCEEDED,), version_id
+        return _run_ids(schemas, version_id)[key]
+
+    full = _fixture_frame(source)
+    publish("v1", full)
+    initial = _core_units(schemas, source)
+    assert len(initial) >= 2, f"{source} fixture needs two good units"
+    omitted, changed = sorted(initial)[:2]
+
+    keys = pandas.Series(_frame_keys(full), index=full.index)
+    newer = full[keys != omitted].copy()
+    is_changed = keys[newer.index] == changed
+    newer.loc[is_changed, capacity_column] = (
+        float(full.loc[keys == changed, capacity_column].iloc[0]) + 1.5
+    )
+    newer_run = publish("v2", newer)
+    after_newer = _core_units(schemas, source)
+
+    # The omitted unit is retained with its identity; it just is not a member.
+    assert after_newer[omitted] == initial[omitted]
+    assert omitted not in _good_members(schemas, newer_run)
+    # The carried unit is updated in place from the authoritative snapshot.
+    assert after_newer[changed][0] == initial[changed][0]
+    assert after_newer[changed][1] == pytest.approx(initial[changed][1] + 1.5)
+    # No unit was re-created: identities are stable across snapshots.
+    assert {r: ids[0] for r, ids in after_newer.items()} == {
+        r: ids[0] for r, ids in initial.items()
+    }
+
+    # Republishing identical content under a new version is idempotent.
+    publish("v3", newer)
+    assert _core_units(schemas, source) == after_newer
+    # A duplicate delivery of an already-loaded version is not re-extracted.
+    duplicate = ingestion.process_one_message(
+        _records_message("receipt-v3-again", [(source, "v3")]),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=processor,
+    )
+    assert duplicate.acknowledged
+    assert duplicate.states == (ingestion.RunState.SUCCEEDED,)
+    # One raw version per accepted object version (v1-v3), none for the redelivery.
+    assert _raw_versions(schemas, source) == 3
+
+    # The omitted unit reappears under its original Core identity.
+    publish("v4", full)
+    reappeared = _core_units(schemas, source)
+    assert reappeared[omitted][0] == initial[omitted][0]
+    assert len(reappeared) == len(initial)
+    assert marts.verify_marts(ENGINE) == []
+
+
+def _with_rows(frame, source, rows):
+    """Append variations of the fixture's first row, keeping x/y and geometry equal."""
+    base = frame.iloc[0].to_dict()
+    capacity_column = _CAPACITY_COLUMN[source]
+    records = []
+    for row in rows:
+        record = dict(base)
+        x, y = row.get("coordinates", (base["x_coordinates"], base["y_coordinates"]))
+        record.update(
+            {
+                "reference_id": row.get("reference_id"),
+                "x_coordinates": x,
+                "y_coordinates": y,
+                "geometry": Point(x, y),
+                "geo_accuracy": row.get("geo_accuracy", base["geo_accuracy"]),
+                "location": row.get("location", "Fixture site"),
+                capacity_column: row.get("capacity", base[capacity_column]),
+            }
+        )
+        if source == "storage":
+            record["storage_capacity"] = row.get(
+                "storage_capacity", base["storage_capacity"]
+            )
+        records.append(record)
+    widened = frame.copy()
+    if "location" not in widened.columns:
+        widened["location"] = "Fixture site"
+    return gpd.GeoDataFrame(
+        pandas.concat([widened, pandas.DataFrame(records)], ignore_index=True),
+        geometry="geometry",
+        crs=frame.crs,
+    )
+
+
+def _collision_reasons(schemas, source, reference_id):
+    links, properties = _properties_tables(source)
+    return {
+        row["value"]
+        for row in _query(
+            f"SELECT p.value FROM {schemas['core']}.{_core_kind(source)} u "
+            f"JOIN {schemas['core']}.{links} up ON up.unit_id = u.unit_id "
+            f"JOIN {schemas['core']}.{properties} p ON p.prop_id = up.prop_id "
+            "WHERE p.name = 'collision' AND u.energy_source = :source "
+            "AND u.reference_id = :reference_id",
+            {"source": source, "reference_id": reference_id},
+        )
+    }
+
+
+@pytest.mark.parametrize("source", SOURCE_NAMES)
+def test_worker_applies_quality_collision_and_identity_rules_for_every_source(
+    fixture_boundaries, tmp_path, source
+):
+    """Bad quality, collisions, synthetic identity and membership agree across kinds.
+
+    Every source — generator or storage — keeps a bad-quality row as Source
+    membership only, gives a null-Reference-ID row a stable synthetic identity,
+    keeps an outside-location unit in Core flagged as a collision, and rejects
+    an ambiguous snapshot before changing the database.
+    """
+    schemas = fixture_boundaries["schemas"]
+    key = f"sources/{source}.gpkg"
+    frame = _fixture_frame(source)
+    base_x, base_y = frame.iloc[0][["x_coordinates", "y_coordinates"]]
+
+    def send(version_id, published):
+        return _deliver(fixture_boundaries, tmp_path, source, version_id, published)
+
+    snapshot = _with_rows(
+        frame,
+        source,
+        [
+            {"reference_id": "bad-quality", "capacity": None},
+            # geo_accuracy 2 keeps it out of the close-location pair check.
+            {"reference_id": None, "location": "Unnamed site", "geo_accuracy": 2},
+            {"reference_id": "outside", "coordinates": (0.5, 0.5)},
+            # Inside the fixture's North Sea polygon.
+            {"reference_id": "at-sea", "coordinates": (7.0, 54.0)},
+            # Two precisely located units ~1 m apart.
+            {"reference_id": "near-a", "coordinates": (10.5, 48.5), "geo_accuracy": 1},
+            {
+                "reference_id": "near-b",
+                "coordinates": (10.50001, 48.5),
+                "geo_accuracy": 1,
+            },
+        ]
+        + (
+            [{"reference_id": "no-storage-capacity", "storage_capacity": None}]
+            if source == "storage"
+            else []
+        ),
+    )
+    result = send("v1", snapshot)
+    assert result.acknowledged
+    assert result.states == (ingestion.RunState.SUCCEEDED,)
+    run_id = _run_ids(schemas, "v1")[key]
+
+    members = {
+        row["unit_key"]: row
+        for row in _query(
+            f"SELECT unit_key, reference_id, bad_quality, energy_source "
+            f"FROM {schemas['service']}.source_memberships WHERE run_id = :run_id",
+            {"run_id": run_id},
+        )
+    }
+    # Membership carries every row of the snapshot, bad quality included.
+    assert len(members) == len(snapshot)
+    assert {row["energy_source"] for row in members.values()} == {source}
+    assert members[f"{source}_bad-quality"]["bad_quality"] is True
+    synthetic = [k for k, row in members.items() if row["reference_id"] is None]
+    assert synthetic and all(k.startswith("syn_") for k in synthetic)
+
+    core = _core_units(schemas, source)
+    # Bad quality never reaches Core; the synthetic unit and the outside unit do.
+    assert "bad-quality" not in core
+    assert _unit_key(None, base_x, base_y) in core
+    assert "outside" in core
+    outside = _query(
+        f"SELECT collision, state FROM {schemas['core']}.{_core_kind(source)} "
+        "WHERE energy_source = :source AND reference_id = 'outside'",
+        {"source": source},
+    )[0]
+    assert outside["collision"] is True and outside["state"] is None
+    assert any(
+        "outside location" in reason
+        for reason in _collision_reasons(schemas, source, "outside")
+    )
+    for reference_id in ("near-a", "near-b"):
+        assert any(
+            "close location" in reason
+            for reason in _collision_reasons(schemas, source, reference_id)
+        ), reference_id
+    at_sea = _collision_reasons(schemas, source, "at-sea")
+    # Wind may stand at sea; every other source, storage included, may not.
+    assert any("onshore unit in the sea" in r for r in at_sea) == (source != "wind")
+    if source == "storage":
+        zero = frame.loc[frame["storage_capacity"] <= 0, "reference_id"].iloc[0]
+        for reference_id in (zero, "no-storage-capacity"):
+            assert any(
+                "storage_capacity <= 0 or null" in reason
+                for reason in _collision_reasons(schemas, source, reference_id)
+            ), reference_id
+
+    # The synthetic identity is stable: republishing keeps the same Core row.
+    synthetic_core_id = core[_unit_key(None, base_x, base_y)][0]
+    assert send("v2", snapshot).acknowledged
+    assert _core_units(schemas, source)[_unit_key(None, base_x, base_y)][0] == (
+        synthetic_core_id
+    )
+
+    # Ambiguous snapshots are rejected before any write, for every kind.
+    before = _core_units(schemas, source)
+    raw_before = _raw_versions(schemas, source)
+    collision = _with_rows(
+        frame,
+        source,
+        [
+            {"reference_id": None, "location": "Twin", "geo_accuracy": 2},
+            {"reference_id": None, "location": "Twin", "geo_accuracy": 2},
+        ],
+    )
+    duplicate = _with_rows(frame, source, [{"reference_id": "twin"}] * 2)
+    for version_id, published, message in (
+        ("v-collision", collision, "Synthetic identity collision"),
+        ("v-duplicate", duplicate, "Duplicate non-null Reference IDs"),
+    ):
+        rejected = send(version_id, published)
+        assert not rejected.acknowledged
+        assert rejected.states == (ingestion.RunState.RETRYABLE,)
+        stage = _query(
+            f"SELECT stage, outcome, error FROM {schemas['service']}.stage_results "
+            "WHERE run_id = :run_id",
+            {"run_id": _run_ids(schemas, version_id)[key]},
+        )
+        assert [(row["stage"], row["outcome"]) for row in stage] == [
+            ("extract", "failed")
+        ]
+        assert message in stage[0]["error"]
+    assert _core_units(schemas, source) == before
+    assert _raw_versions(schemas, source) == raw_before
+
+
+@pytest.mark.parametrize("dropped", ["storage_type", "storage_capacity"])
+def test_worker_verifies_storage_type_and_capacity_reach_core(
+    source_pipeline, tmp_path, monkeypatch, dropped
+):
+    """The storage load is verified on its own columns, not only the shared ones.
+
+    If an in-place update stopped carrying storage_type or storage_capacity,
+    the load must fail verification rather than mark stale storage values as a
+    verified snapshot.
+    """
+    s3 = source_pipeline["s3"]
+    sqs = source_pipeline["sqs"]
+    processor = source_pipeline["processor"]
+    schemas = source_pipeline["schemas"]
+
+    s3.put(
+        "sources/storage.gpkg",
+        "storage-1",
+        _write_storage_snapshot(
+            tmp_path, "s1.gpkg", [{"reference_id": "bess-1", "storage_capacity": 4.0}]
+        ),
+    )
+    assert ingestion.process_one_message(
+        _storage_message("storage-1"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=processor,
+    ).acknowledged
+
+    original_update = load._update_core_row
+
+    def update_without_storage_columns(conn, row, kind):
+        if kind.core_table == "storages":
+            kind = dataclasses.replace(
+                kind,
+                column_map={k: v for k, v in kind.column_map.items() if k != dropped},
+            )
+        original_update(conn, row, kind)
+
+    monkeypatch.setattr(load, "_update_core_row", update_without_storage_columns)
+    s3.put(
+        "sources/storage.gpkg",
+        "storage-2",
+        _write_storage_snapshot(
+            tmp_path,
+            "s2.gpkg",
+            [
+                {
+                    "reference_id": "bess-1",
+                    "storage_capacity": 7.0,
+                    "storage_type": "Pumped hydro",
+                }
+            ],
+        ),
+    )
+    result = ingestion.process_one_message(
+        _storage_message("storage-2"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=processor,
+    )
+
+    assert not result.acknowledged
+    assert result.states == (ingestion.RunState.RETRYABLE,)
+    load_stage = _query(
+        f"SELECT outcome, error FROM {schemas['service']}.stage_results "
+        "WHERE stage = 'load' AND run_id = (SELECT run_id FROM "
+        f"{schemas['service']}.ingestion_runs WHERE object_version_id = 'storage-2')"
+    )
+    assert [row["outcome"] for row in load_stage] == ["failed"]
+    assert f"{dropped} mismatch" in load_stage[0]["error"]
+
+
+def test_worker_never_loads_a_failed_sources_staging_through_another_source(
+    fixture_boundaries, tmp_path, monkeypatch
+):
+    """A Source whose transform failed must not reach Core via its kind's next load.
+
+    The whole-kind load reads every staging table of the kind, so a snapshot
+    that was written to staging but failed verification would otherwise be
+    upserted by the next successful generator Source.
+    """
+    s3 = fixture_boundaries["s3"]
+    sqs = fixture_boundaries["sqs"]
+    schemas = fixture_boundaries["schemas"]
+    processor = fixture_boundaries["processor"]
+
+    def send(source, version_id, frame):
+        s3.put(
+            f"sources/{source}.gpkg",
+            version_id,
+            _frame_bytes(tmp_path, f"{version_id}.gpkg", frame),
+        )
+        return ingestion.process_one_message(
+            _records_message(f"receipt-{version_id}", [(source, version_id)]),
+            engine=ENGINE,
+            s3=s3,
+            sqs=sqs,
+            sns=FakeSNS(),
+            processor=processor,
+        )
+
+    gas = _fixture_frame("gas")
+    assert send("gas", "gas-v1", gas).acknowledged
+    verified_gas = _core_units(schemas, "gas")
+
+    unverified = gas.copy()
+    unverified["gas_production_capacity"] = 999.0
+    original_verify = transform._verify_transform
+
+    def failing_gas_verification(engine, source, report):
+        if source == "gas":
+            return ["forced gas verification failure"]
+        return original_verify(engine, source, report)
+
+    monkeypatch.setattr(transform, "_verify_transform", failing_gas_verification)
+    rejected = send("gas", "gas-v2", unverified)
+    assert rejected.states == (ingestion.RunState.RETRYABLE,)
+
+    # The failing gas retry and a good wind snapshot share one message: wind
+    # still succeeds, the marts refresh once, and the message is kept.
+    counting = CountingProcessor(ENGINE, s3=s3)
+    s3.put(
+        "sources/wind.gpkg",
+        "wind-v1",
+        _frame_bytes(tmp_path, "wind-v1.gpkg", _fixture_frame("wind")),
+    )
+    mixed = ingestion.process_one_message(
+        _records_message("receipt-mixed", [("gas", "gas-v2"), ("wind", "wind-v1")]),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=counting,
+    )
+    assert mixed.states == (
+        ingestion.RunState.RETRYABLE,
+        ingestion.RunState.SUCCEEDED,
+    )
+    assert not mixed.acknowledged
+    assert counting.finalized == 1
+
+    assert _core_units(schemas, "gas") == verified_gas
+    assert _core_units(schemas, "wind")
+    assert marts.verify_marts(ENGINE) == []

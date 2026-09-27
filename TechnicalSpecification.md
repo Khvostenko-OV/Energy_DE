@@ -65,6 +65,7 @@ Properties to decompose:
   2. decommissioning_date <= commissioning_date
   3. x_coordinates, y_coordinates and geometry do not match
 - Save tables to PostGIS
+- A Source snapshot whose transform fails is removed from staging, because a snapshot load reads every staging table of its Core kind: a present staging table always means the Source's last transform was verified, and the failed Source's Core units stay retained until a good snapshot arrives
 ### 3. Load
 #### First load
 - Input: list of tables to be loaded
@@ -88,6 +89,7 @@ Each Unit table carries a complete Source snapshot and is therefore authoritativ
 - Retain Core units that the snapshot omits, so historical units survive
 - Transfer primary keys for dimension tables
 - Quality check
+- Verify every good snapshot row reached Core unchanged: Energy source, Reference ID, `installed_capacity` and `reference_date` for both kinds, plus `storage_type` and `storage_capacity` for **storages**; a bad-quality row must not have created a Core row
 
 ### Creating Materialized Views
 - Number of units pivot table (state / energy_source)
