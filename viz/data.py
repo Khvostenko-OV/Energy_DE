@@ -58,7 +58,7 @@ STORAGE_SOURCE = "storage"
 # that is still running at ``:to`` (not decommissioned before ``:to``).  Used
 # verbatim by the unit fetch, so map and header always resolve the same set.
 ACTIVE_UNIT_PREDICATE = (
-    "commissioning_date >= :from "
+    "commissioning_date BETWEEN :from AND :to "
     "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
 )
 

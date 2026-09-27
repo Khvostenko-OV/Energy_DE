@@ -8,6 +8,8 @@ Light basemap style, and the Germany-overview view state.  Widgets in
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 from datetime import date
 from pathlib import Path
@@ -73,6 +75,10 @@ LEVEL_UNIT_AREA_COLUMN = {
 # sources, generators first (bio → wind) then storage.  All checked by default.
 DEFAULT_SOURCES = ("bio", "gas", "hydro", "solar", "wind", "storage")
 
+# Whether the choropleth fill is shown by default (the boundary outline is
+# always present).
+DEFAULT_CHOROPLETH = True
+
 # Active-units timescope default: every unit commissioned up to today counts,
 # and nothing is excluded for decommissioning before the epoch default.
 TIMESCOPE_START = date(1900, 1, 1)
@@ -86,9 +92,40 @@ def default_timescope() -> tuple[date, date]:
 # CARTO Light (Positron GL) basemap style, reachable without a style token.
 LIGHT_MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
-# Chooser label → style URL.  Satellite / Topographic styles join later;
-# today "Light" is the single (and default) entry.
-MAP_STYLES = {"Light": LIGHT_MAP_STYLE}
+
+def _raster_style_data_uri(tiles: list[str], attribution: str) -> str:
+    style = json.dumps(
+        {
+            "version": 8,
+            "sources": {
+                "basemap": {
+                    "type": "raster",
+                    "tiles": tiles,
+                    "tileSize": 256,
+                    "attribution": attribution,
+                }
+            },
+            "layers": [{"id": "basemap", "type": "raster", "source": "basemap"}],
+        }
+    ).encode()
+    return f"data:application/json;base64,{base64.b64encode(style).decode()}"
+
+
+SATELLITE_MAP_STYLE = _raster_style_data_uri(
+    ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    "Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics",
+)
+
+TOPOGRAPHIC_MAP_STYLE = _raster_style_data_uri(
+    ["https://a.tile.opentopomap.org/{z}/{x}/{y}.png"],
+    "© OpenStreetMap contributors, style CC-BY-SA",
+)
+
+MAP_STYLES = {
+    "Light": LIGHT_MAP_STYLE,
+    "Satellite": SATELLITE_MAP_STYLE,
+    "Topographic": TOPOGRAPHIC_MAP_STYLE,
+}
 
 # Default viewport for the country overview.
 GERMANY_CENTER = {"lon": 10.4, "lat": 51.1}

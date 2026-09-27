@@ -9,6 +9,7 @@ from datetime import date
 
 from viz.config import (
     CORE_SCHEMA,
+    DEFAULT_CHOROPLETH,
     DEFAULT_SOURCES,
     GERMANY_CENTER,
     INITIAL_LEVEL,
@@ -106,6 +107,11 @@ class TestBasemapDefaults:
         assert LIGHT_MAP_STYLE.startswith(
             "https://basemaps.cartocdn.com/gl/positron-gl-style/"
         )
+
+
+class TestChoroplethDefault:
+    def test_choropleth_on_by_default(self):
+        assert DEFAULT_CHOROPLETH is True
 
 
 class TestSchemaConstants:

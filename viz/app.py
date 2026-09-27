@@ -62,6 +62,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from viz.choropleth import area_fills, areas_feature_collection
 from viz.config import (
+    DEFAULT_CHOROPLETH,
     LEVEL_INDEX,
     LEVEL_UNIT_AREA_COLUMN,
     MAP_HEIGHT,
@@ -264,6 +265,15 @@ area_filter_names: tuple[str, ...] | None = (
     else None
 )
 
+# ── Sidebar: choropleth toggle ──────────────────────────────────────────── #
+
+#st.sidebar.header("Choropleth")
+show_choropleth = st.sidebar.toggle(
+    "Show capacity fill",
+    value=DEFAULT_CHOROPLETH,
+    key="show_choropleth",
+)
+
 # ── Sidebar: timescope ─────────────────────────────────────────────────── #
 
 st.sidebar.header("Timescope")
@@ -390,12 +400,15 @@ _checkpoint_start = time.perf_counter()
 
 # Area fills paint below the unit points, so points stay legible on top of the
 # choropleth; the camera comes from the session state above.  At the country
-# level the choropleth gives way to the plain boundary layer (no fill).  Each
-# IconLayer reads the JSON-ready records of one energy_source group.
+# level the choropleth gives way to the plain boundary layer (no fill), and the
+# sidebar toggle switches between the filled choropleth and the outline-only
+# boundary layer at every other level.  Each IconLayer reads the JSON-ready
+# records of one energy_source group.
+use_choropleth = show_choropleth and level_label != "Germany"
 area_layer = (
-    build_boundary_layer(features)
-    if level_label == "Germany"
-    else build_choropleth_layer(features)
+    build_choropleth_layer(features)
+    if use_choropleth
+    else build_boundary_layer(features)
 )
 source_records = {
     source: unit_records(group)
@@ -421,11 +434,12 @@ print(f"[timing] pydeck_chart: {time.perf_counter() - _checkpoint_start:.2f}s")
 _checkpoint_start = time.perf_counter()
 
 # The colorbar floats over the map's right edge whenever the choropleth paints
-# a real capacity ramp (Germany has no choropleth, and an all-zero or empty
-# fill has nothing to scale) — the top label is the largest area fill across
-# the displayed scope, matching the ramp's high end.
+# a real capacity ramp (Germany has no choropleth, the toggle can switch it
+# off, and an all-zero or empty fill has nothing to scale) — the top label is
+# the largest area fill across the displayed scope, matching the ramp's high
+# end.
 colorbar_max = max((row["capacity_mw"] for row in fills), default=0.0)
-if level_label != "Germany" and colorbar_max > 0:
+if use_choropleth and colorbar_max > 0:
     st.markdown(colorbar_html(colorbar_max), unsafe_allow_html=True)
 
 print(f"[timing] colorbar: {time.perf_counter() - _checkpoint_start:.2f}s")
