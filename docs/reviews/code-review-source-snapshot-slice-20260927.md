@@ -1,4 +1,4 @@
-# Code review — Source snapshot slice (issue #36)
+# Code review — Source snapshot slice (issue #3)
 
 - **Date:** 2026-09-27
 - **Fixed point:** `739ec6e` (branch base) — uncommitted working tree
@@ -12,10 +12,14 @@
   `README.md`, `tests/test_ingestion.py`, `tests/test_extract.py`,
   `tests/test_load_generators.py`, `tests/test_load_storages.py`,
   `tests/test_marts.py`, `tests/test_viz_data.py`
-- **Spec:** issue #36, *Source snapshot* slice only (stories 1, 3, 6, 8-13,
-  35-49, 54, 55, 62-67). Boundary releases, bootstrap enqueueing/redrive, retry +
-  DLQ + SNS, CloudWatch, Terraform, the worker entrypoint and the compose
-  changes are separate later slices and were out of scope here.
+- **Spec:** issue #3, *Process a Source snapshot through Core and marts with
+  lineage semantics* — the Source snapshot slice of parent #1, whose body is
+  identical to upstream #36 ("Replace batch-only ETL with an S3/SQS event-driven
+  workflow") and supplied the requirement detail behind #3's eight acceptance
+  criteria. Sibling slices (#4-#11) were out of scope here: the remaining Source
+  datasets and Core kinds, Boundary releases, mixed-message ordering, retry/DLQ/
+  SNS/visibility, operator startup and Compose, visualization timescopes,
+  Terraform, and end-to-end documentation reconciliation.
 - **Standards sources:** `AGENTS.md`, `CONTEXT.md`, `docs/agents/domain.md`,
   `docs/adr/*`, `TechnicalSpecification.md`, prior reports in `docs/reviews/`
 - **Verification:** `.venv/bin/python -m pytest tests/` — **361 passed** (0 failed,
@@ -156,8 +160,8 @@ resolves a bare `postgresql://` to **psycopg3**, which the viz image does not
 install — so a freshly built viz container would fail to connect, and the smoke
 test would not catch it. `tests/test_viz_data.py` was pinned to
 `postgresql+psycopg2://` for that reason. The seed script, the smoke assertion
-and `.env.example` need the same treatment, but that is containerization work
-(issue #28's surface), so it is filed rather than changed inside #36.
+and `.env.example` need the same treatment, but that belongs to the operator
+startup and Compose slice (#8), so it is reported here rather than changed.
 
 ## Summary
 
