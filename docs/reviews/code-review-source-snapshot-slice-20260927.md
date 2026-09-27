@@ -23,7 +23,8 @@
 - **Standards sources:** `AGENTS.md`, `CONTEXT.md`, `docs/agents/domain.md`,
   `docs/adr/*`, `TechnicalSpecification.md`, prior reports in `docs/reviews/`
 - **Verification:** `.venv/bin/python -m pytest tests/` — **361 passed** (0 failed,
-  0 skipped), plus `python -m compileall -q etl tests viz`.
+  0 skipped) against the pinned `sqlalchemy==2.0.52`, plus
+  `python -m compileall -q etl tests viz`.
 
 ## Standards
 
@@ -151,17 +152,23 @@ Confirmed working, with the code path named:
   rows, the raw tables and the run ledger untouched
   (`test_worker_rejects_an_invalid_snapshot_without_touching_the_database`).
 
-### Out-of-scope defect found while reviewing (not fixed here)
+### Out-of-scope defect found while reviewing (resolved by a pin)
 
 `scripts/seed_data_volume.sh:60` writes `VIZ_DATABASE_URL=postgresql://…` with
 no explicit driver, and `scripts/smoke_etl_container.sh:185` asserts that bare
-prefix. `requirements-viz.txt` installs `psycopg2-binary`, but SQLAlchemy ≥2.1
-resolves a bare `postgresql://` to **psycopg3**, which the viz image does not
-install — so a freshly built viz container would fail to connect, and the smoke
-test would not catch it. `tests/test_viz_data.py` was pinned to
-`postgresql+psycopg2://` for that reason. The seed script, the smoke assertion
-and `.env.example` need the same treatment, but that belongs to the operator
-startup and Compose slice (#8), so it is reported here rather than changed.
+prefix. `requirements-viz.txt` installs `psycopg2-binary`, so this only works
+while SQLAlchemy's bare `postgresql://` defaults to **psycopg2** — which is true
+on 2.0.x but not on ≥2.1, where it resolves to **psycopg3**, a driver the viz
+image does not install. A freshly built viz container on 2.1 would fail to
+connect, and the smoke test would not catch it.
+
+Resolved outside this slice by `e219381`, which pins `sqlalchemy==2.0.52` in both
+`requirements.txt` and `requirements-viz.txt`; the full suite was re-run against
+that pin (361 passed). `tests/test_viz_data.py` was still made explicit
+(`postgresql+psycopg2://`) so the test no longer depends on which driver the
+library happens to default to. Worth doing in the operator startup and Compose
+slice (#8): make the driver explicit in the seed script and the smoke assertion
+too, so a future SQLAlchemy bump cannot silently reintroduce the failure.
 
 ## Summary
 
