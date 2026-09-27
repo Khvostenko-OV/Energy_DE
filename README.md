@@ -9,7 +9,8 @@ and commissioning date, and a Streamlit + PyDeck map app that visualises the mar
 Implemented. The ETL pipeline (extract → staging → core → marts) runs end-to-end via the CLI
 (`python -m etl <stage>`, or `run-all` for the whole pass; Click hyphenates the `run_all`
 Python function name) and is covered by a full integration
-test suite (pytest, 327 tests against a PostGIS dev DB), and the Streamlit viz app
+test suite (pytest, 374 tests against a dedicated scratch PostGIS database), and the
+Streamlit viz app
 (`viz/`, T1–T4, no-auth map with per-source icon layers (IconLayer), area choropleth and header
 aggregates) runs in the containerized stack. Design work recorded in:
 
@@ -106,6 +107,25 @@ cp .env.example .env          # set DATABASE_URL (and VIZ_DATABASE_URL) to your 
 python -m etl run-all         # extract → staging → core → marts
 .venv/bin/streamlit run viz/app.py
 ```
+
+### Tests
+
+The suite is hermetic: it needs its own database and nothing else — no raw data, no
+pre-seeded dev database, and it never reads `data/`.
+
+```sh
+.venv/bin/python -m pytest                                 # 374 tests, ~11s
+```
+
+Set `TEST_DATABASE_URL` in `.env` (see `.env.example`) to any throwaway database name —
+nothing needs creating up front. The suite creates the database if it is missing (the
+role needs `CREATEDB`), installs the PostGIS extension, and drops the contents of the
+pipeline schemas every session. It **refuses to run** if `TEST_DATABASE_URL` points at
+the same database as `DATABASE_URL`, and with `TEST_DATABASE_URL` unset it overwrites
+`DATABASE_URL` with an unreachable placeholder, so no test can fall back to dev.
+
+Source and boundary inputs are the small committed fixtures in `tests/fixtures/`;
+regenerate them with `python scripts/make_test_fixtures.py` after editing that script.
 
 ### Reset / clean slate
 

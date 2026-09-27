@@ -49,18 +49,26 @@ Gotchas:
 
 ## Verification
 pytest is the only test runner (`.venv/bin/python -m pytest`); there are no linters or
-typecheckers. The full integration suite is the verification bar — it needs a PostGIS dev DB
-(`DATABASE_URL` via `.env`) and the raw data files. The viz unit seams
-(`tests/test_viz_*.py`) take no database but do need `requirements-viz.txt` installed.
-The containerized stack has its own smoke
+typecheckers. The full integration suite is the verification bar, and it is hermetic: it
+needs a scratch PostGIS database named by `TEST_DATABASE_URL`, and nothing else — no raw
+data, no pre-seeded dev database. It never reads `data/`; the Source and boundary inputs
+are the small committed fixtures in `tests/fixtures/` (regenerate with
+`python scripts/make_test_fixtures.py`, #12). The session creates the database if it is
+missing, installs PostGIS, and drops the contents of the pipeline schemas, so a name that
+does not exist yet is enough. The suite **refuses to run** if `TEST_DATABASE_URL` points
+at the same database as `DATABASE_URL`, and with `TEST_DATABASE_URL` unset it overwrites
+`DATABASE_URL` with an unreachable placeholder so no test can reach dev data. The viz
+unit seams (`tests/test_viz_*.py`) take no database but do need `requirements-viz.txt`
+installed. The containerized stack has its own smoke
 seam (`scripts/smoke_etl_container.sh`, #13; extended by #28 for db + pipeline + viz).
-CI (`.github/workflows/ci.yml`, #14) runs cheap gates only — byte-compile
-(`python -m compileall`) + pipeline/viz image builds — and must never require the raw
-data or run the integration suite; the publish workflow
+CI (`.github/workflows/ci.yml`, #14) does *not* run the integration suite — it runs
+cheap gates only (byte-compile via `python -m compileall` + pipeline/viz image builds),
+because it has no PostGIS service — and must never require the raw data. The publish
+workflow
 (`.github/workflows/publish-docker.yml`) pushes both images to Docker Hub
 (`khvostenko/energy-etl`, `khvostenko/energy-viz`) on `main`, which `compose.yaml`
 pulls (`build_compose.yaml`/`local_compose.yaml` still build from source).
-The raw data and the suite stay private either way.
+The raw data stays private either way.
 
 ## Agent skills
 

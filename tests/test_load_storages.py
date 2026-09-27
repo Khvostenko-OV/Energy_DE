@@ -13,9 +13,12 @@ from sqlalchemy import create_engine, text
 
 from etl.config import (
     BAD_QUALITY_PROPERTY,
+    COLLISION_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
+    SEA_REGIONS,
     STAGING_SCHEMA,
+    STORAGE_CAPACITY_COLLISION_REASON,
 )
 from etl.load import load_storages
 
@@ -367,8 +370,24 @@ class TestCollisions:
         )
         assert bad_capacity == staging_bad_capacity
 
+    def test_storage_capacity_rule_actually_fires(self, _loaded_core):
+        """Absolute count, unlike the reconciliation above.
+
+        `test_storage_capacity_collision_flagged` compares core against staging,
+        so it passes just as happily when no storage trips the rule at all. The
+        fixture deliberately carries one unit with storage_capacity 0 and a
+        positive installed capacity, so pin that it is still there.
+        """
+        # The property dimension is UNIQUE on (name, value), so this counts the
+        # distinct reason string, not the units carrying it.
+        assert _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storage_properties "
+            f"WHERE name = '{COLLISION_PROPERTY}' "
+            f"AND value LIKE '%{STORAGE_CAPACITY_COLLISION_REASON}%'"
+        ) == 1
+
     def test_onshore_in_sea_flagged(self, _loaded_core):
-        sea_states = "'North Sea', 'Baltic Sea', 'Kattegat'"
+        sea_states = ", ".join(f"'{region}'" for region in SEA_REGIONS)
         onshore_sea = _scalar(
             f"SELECT COUNT(*) FROM {CORE_SCHEMA}.storages "
             f"WHERE state IN ({sea_states}) AND collision"

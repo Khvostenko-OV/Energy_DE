@@ -15,7 +15,10 @@ from etl.source_data import SourceValidationError, inspect_source_gpkg
 
 
 class TestBoundariesFailLoudlyWithoutLevel:
-    def test_gpkg_lacking_level_column_is_an_error(self, tmp_path):
+    def test_gpkg_lacking_level_column_is_an_error(self, tmp_path, _test_database):
+        # `_test_database` is a real dependency, not a formality: `extract_boundaries`
+        # opens a connection, and without a working database this asserts on a
+        # connection error instead and would pass for the wrong reason.
         gdf = gpd.GeoDataFrame(
             {
                 "name": ["Test"],

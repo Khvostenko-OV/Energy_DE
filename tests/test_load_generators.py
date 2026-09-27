@@ -13,8 +13,12 @@ from sqlalchemy import create_engine, text
 
 from etl.config import (
     BAD_QUALITY_PROPERTY,
+    CLOSE_LOCATION_REASON,
+    COLLISION_PROPERTY,
     CORE_SCHEMA,
     DECOMPOSED_PROPERTIES,
+    ONSHORE_IN_SEA_COLLISION_REASON,
+    OUTSIDE_LOCATION_COLLISION_REASON,
     STAGING_SCHEMA,
     STAGING_GENERATOR_SOURCES,
 )
@@ -420,6 +424,66 @@ class TestCollisions:
             f")"
         )
         assert asymmetric == 0
+
+
+# ------------------------------------------------------------------ #
+#  Fixture coverage — the collisions above are all relative assertions #
+# ------------------------------------------------------------------ #
+
+
+class TestFixtureCoversEveryCollisionRule:
+    """Pin the counts each collision rule actually fires on.
+
+    Every other collision test in this file compares core against staging, so
+    they hold whether or not a rule fires at all — a fixture that never trips
+    a rule still passes them. These absolute counts are the guard: if a fixture
+    is edited so that, say, the close pair drifts past COLLISION_CLOSE_DISTANCE_M
+    or the sea polygon disappears, the rule goes untested and *these* fail.
+    """
+
+    def test_each_generator_rule_fires(self, _loaded_core):
+        # Counts the deduplicated property *dimension*, which is UNIQUE on
+        # (name, value): a count of 1 means the rule produced exactly this one
+        # reason string. It is deliberately not a unit count — the close pair
+        # and the outside-location rows attach the same reason value to several
+        # units, and that multiplicity is what test_close_pair_is_reciprocated
+        # and the storage/generator reconciliation tests are for.
+        fired = {
+            reason: _scalar(
+                f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generator_properties "
+                f"WHERE name = '{COLLISION_PROPERTY}' AND value LIKE '%{reason}%'"
+            )
+            for reason in (
+                CLOSE_LOCATION_REASON,
+                ONSHORE_IN_SEA_COLLISION_REASON,
+                OUTSIDE_LOCATION_COLLISION_REASON,
+            )
+        }
+        assert fired == {
+            CLOSE_LOCATION_REASON: 1,
+            ONSHORE_IN_SEA_COLLISION_REASON: 1,
+            OUTSIDE_LOCATION_COLLISION_REASON: 1,
+        }, f"a collision rule stopped firing: {fired}"
+
+    def test_close_pair_is_reciprocated(self, _loaded_core):
+        # The close pair is two wind units, so both carry close_to.
+        assert _scalar(
+            f"SELECT COUNT(*) FROM {CORE_SCHEMA}.generators "
+            f"WHERE secondary_attributes::jsonb ? 'close_to'"
+        ) == 2
+
+    def test_quality_gate_covers_the_null_capacity_reason(self, _loaded_core):
+        # The real solar file's only bad-capacity reason is a null capacity
+        # (12 nulls, 0 non-positive), so the fixture must include one or the
+        # null branch of the gate goes untested.
+        assert _scalar(
+            f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.solar "
+            f"WHERE bad_quality AND installed_capacity IS NULL"
+        ) == 1
+        # ...and the coordinate-mismatch reason alongside it.
+        assert _scalar(
+            f"SELECT COUNT(*) FROM {STAGING_SCHEMA}.solar WHERE bad_quality"
+        ) == 2
 
 
 # ------------------------------------------------------------------ #
