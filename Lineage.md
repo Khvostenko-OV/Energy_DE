@@ -100,9 +100,9 @@ flowchart TB
     subgraph svcL["service — operational metadata (ADR 0007)"]
         S1["loaded_files<br/>load-signature log"]
         S2["boundaries<br/>level 0-3 polygons"]
-        S3["ingestion_runs<br/>one per S3 object version"]
-        S4["stage_results<br/>per stage, per attempt"]
-        S5["source_memberships<br/>snapshot lineage"]
+        RUNS["ingestion_runs<br/>one per S3 object version"]
+        RESULTS["stage_results<br/>per stage, per attempt"]
+        MEMB["source_memberships<br/>snapshot lineage"]
     end
 
     subgraph stgL["stage — verified working copy"]
@@ -145,9 +145,9 @@ flowchart TB
     C1 --> M2
     C2 --> M2
     C2 --> M3
-    S3 -.->|"run_id"| S4
-    S3 -.->|"run_id"| S5
-    S5 -.->|"unit_key → staging unit_id"| T1
+    RUNS -.->|"run_id"| RESULTS
+    RUNS -.->|"run_id"| MEMB
+    MEMB -.->|"unit_key → staging unit_id"| T1
 ```
 
 ### 2.2 raw — versioned datalake
@@ -186,22 +186,51 @@ erDiagram
     INGESTION_RUNS ||--o{ STAGE_RESULTS : "run_id"
     INGESTION_RUNS ||--o{ SOURCE_MEMBERSHIPS : "run_id"
     SOURCE_MEMBERSHIPS }o--|| STAGING : "unit_key"
-    STAGING ||--o{ GENERATORS : "reference_id / synthetic identity"
-    STAGING ||--o{ STORAGES : "reference_id / synthetic identity"
+    STAGING ||--o{ GENERATORS : "reference_id or synthetic identity"
+    STAGING ||--o{ STORAGES : "reference_id or synthetic identity"
     GENERATORS ||--o{ GENERATOR_UNITS_PROPERTIES : unit_id
     GENERATOR_UNITS_PROPERTIES }o--|| GENERATOR_PROPERTIES : prop_id
     STORAGES ||--o{ STORAGE_UNITS_PROPERTIES : unit_id
     STORAGE_UNITS_PROPERTIES }o--|| STORAGE_PROPERTIES : prop_id
-    BOUNDARIES }o--|| STAGING : "spatial join: state, region, district"
-    BOUNDARIES }o--|| CORE : "spatial join: state, region, district"
+    BOUNDARIES }o--|| STAGING : "spatial join sets state, region, district"
+    BOUNDARIES }o--|| CORE : "spatial join sets state, region, district"
     GENERATORS }o--|| MART_INSTALLATION_COUNTS : "pivot energy_source"
     GENERATORS }o--|| MART_GENERATION_CAPACITY : "pivot energy_source"
     STORAGES }o--|| MART_STORAGE_CAPACITY : "pivot source_type"
 
-    INGESTION_RUNS { uuid run_id PK; str bucket; str object_key; str object_version_id; str input_kind; str state; int attempt_count }
-    STAGE_RESULTS { bigserial stage_result_id PK; uuid run_id FK; int attempt; str target; str stage; str outcome; int row_count }
-    SOURCE_MEMBERSHIPS { uuid run_id FK; str energy_source; str unit_key FK; str reference_id; bool bad_quality }
-    BOUNDARIES { str country_iso; str name; int level; float area; geometry geometry; str geojson }
+    INGESTION_RUNS {
+        uuid run_id PK
+        str bucket
+        str object_key
+        str object_version_id
+        str input_kind
+        str state
+        int attempt_count
+    }
+    STAGE_RESULTS {
+        bigserial stage_result_id PK
+        uuid run_id FK
+        int attempt
+        str target
+        str stage
+        str outcome
+        int row_count
+    }
+    SOURCE_MEMBERSHIPS {
+        uuid run_id FK
+        str energy_source
+        str unit_key FK
+        str reference_id
+        bool bad_quality
+    }
+    BOUNDARIES {
+        str country_iso
+        str name
+        int level
+        float area
+        geometry geometry
+        str geojson
+    }
 ```
 
 ### 2.4 stage — the verified working copy
