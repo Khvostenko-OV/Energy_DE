@@ -55,12 +55,11 @@ CORE_VIS_TABLES = ("generators", "storages")
 STORAGE_SOURCE = "storage"
 
 # The single active-units predicate (issue #9): commissioned inside the
-# selected interval — on/after ``:from`` and on/before ``:to`` — that is still
-# running at ``:to`` (not decommissioned before ``:to``).  Used verbatim by
-# the unit fetch, so map and header always resolve the same set.
+# selected interval — ``BETWEEN :from AND :to``, inclusive on both ends — that
+# is still running at ``:to`` (not decommissioned before ``:to``).  Used
+# verbatim by the unit fetch, so map and header always resolve the same set.
 ACTIVE_UNIT_PREDICATE = (
-    "commissioning_date >= :from "
-    "AND commissioning_date <= :to "
+    "commissioning_date BETWEEN :from AND :to "
     "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
 )
 

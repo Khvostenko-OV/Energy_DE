@@ -163,8 +163,7 @@ class TestUnitsQuery:
             "decommissioning_date, longitude, latitude, state, district "
             "FROM core.generators "
             "WHERE energy_source = ANY(:sources) "
-            "AND commissioning_date >= :from "
-            "AND commissioning_date <= :to "
+            "AND commissioning_date BETWEEN :from AND :to "
             "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
         )
         assert params == {
@@ -195,8 +194,7 @@ class TestUnitsQuery:
             active_from=date(1990, 1, 1),
             active_to=date(2010, 1, 1),
         )
-        assert "commissioning_date >= :from" in sql
-        assert "commissioning_date <= :to" in sql
+        assert "commissioning_date BETWEEN :from AND :to" in sql
         assert "decommissioning_date IS NULL OR decommissioning_date >= :to" in sql
         assert params == {
             "sources": ["solar"],
@@ -309,15 +307,13 @@ class TestFetchUnits:
             "decommissioning_date, longitude, latitude, state, district, "
             "state AS name FROM core.generators "
             "WHERE energy_source = ANY(:sources) "
-            "AND commissioning_date >= :from "
-            "AND commissioning_date <= :to "
+            "AND commissioning_date BETWEEN :from AND :to "
             "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)",
             "SELECT energy_source, installed_capacity, commissioning_date, "
             "decommissioning_date, longitude, latitude, state, district, "
             "storage_capacity, state AS name FROM core.storages "
             "WHERE energy_source = ANY(:sources) "
-            "AND commissioning_date >= :from "
-            "AND commissioning_date <= :to "
+            "AND commissioning_date BETWEEN :from AND :to "
             "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)",
         ]
         assert [params for _, params in calls] == [
@@ -350,8 +346,7 @@ class TestFetchUnits:
             "decommissioning_date, longitude, latitude, state, district "
             "FROM core.generators "
             "WHERE energy_source = ANY(:sources) "
-            "AND commissioning_date >= :from "
-            "AND commissioning_date <= :to "
+            "AND commissioning_date BETWEEN :from AND :to "
             "AND (decommissioning_date IS NULL OR decommissioning_date >= :to)"
         ]
 
