@@ -109,8 +109,17 @@ The event-driven path runs the stages above per uploaded object instead of by ha
 - Independence: each record is its own Ingestion run, with its own attempts, stage results, and terminal error. One failing record never keeps the other records of the same message from progressing, and each Source record uses exactly the raw table(s) that record produced
 - Downstream rebuild once per message: after the last record the geography is rebuilt and the three marts are refreshed and verified once, not once per record
 - Acknowledgement: the message is deleted from the queue only when every record is successful, terminally skipped, or stale. A retryable record keeps the message, and redelivery repeats only the records that are not settled yet — a record that already succeeded is not applied again
-- Today every failure is retryable, including a deterministically invalid file; making such a record terminal, with retries, DLQ, and SNS alerts, is issue #7
-- The Boundary release rules are described under Extract. Retries, DLQ, SNS alerts, and visibility timeout handling follow in issue #7
+- The Boundary release rules are described under Extract
+
+### Retries, rejection, DLQ, and alerting (issue #7)
+The worker separates the failures that can never succeed from the ones that can, because only one of the two is worth another delivery.
+
+- **Rejected object version (terminal):** a failure that is a property of the immutable bytes, not of the moment they were processed. That is the object's own content validation failing — an unreadable or non-homogeneous Source GPKG, a snapshot the inspect step rejects, a row the transform cannot give an identity to, a Boundary level that does not match its key. Validating the same version again cannot answer differently, so the run becomes `terminal`, the run's error is stored in `terminal_error`, and the stage that rejected it records a failed stage result next to the stages that passed. The version is not retried: the operator fixes the file by uploading a **new version**, which is a new Ingestion run. A Boundary release is the one batch that is all-or-nothing, so when one level of it is rejected every level of that release settles with it: the levels are only valid as a set, and a partly-applied geography is not a state the pipeline has
+- **Retryable:** everything else — the database, S3, the queue, the marts refresh, and any other infrastructure error. These are properties of the environment at that moment, and are retried on the next delivery
+- **Alerting (direct, once):** a terminal rejection publishes one SNS alert naming the key, the version, the error, and how to recover (upload a new version). The alert is tied to the run, and the run is recorded terminal *before* the alert is sent, so a redelivery of the same message never repeats it. A failed alert is logged and does not hold up the rest of the message
+- **No direct alert for exhaustion:** a message whose records are still retryable after the queue's delivery limit is not announced by the worker; it is dead-lettered, and the DLQ alarm publishes that. Infrastructure problems are therefore reported once, by one path
+- **Delivery limit:** the queue is configured with `maxReceiveCount = 5` to match `MAX_DELIVERY_ATTEMPTS`. The worker's attempt number comes from SQS's own `ApproximateReceiveCount`, not from a counter of its own, so a redelivery after a worker crash counts as a delivery too. On the fifth delivery the run stays `retryable` (it is never deleted), its `terminal_error` records the cause followed by the exhaustion, and the message is left on the queue for the redrive policy to move. `retryable` rather than `terminal` is deliberate: the run has to be resumable, so an operator who redrives the message from the DLQ after fixing the cause continues the same run instead of finding it settled and ignored
+- **Visibility:** while a message is being processed the worker extends its visibility timeout to the six-hour SQS maximum, and re-extends it every minute for as long as the work runs, so a long ingest is not handed to a second worker. When the work is over the worker hands the message back (`VisibilityTimeout: 0`) unless it acknowledged it, because SQS decides on redelivery and on the redrive to the DLQ when a message becomes visible — a kept message must not sit behind the six hours it was just granted. A worker that is killed outright cannot hand anything back, so its message returns when the last timeout lapses: the run is `running` with a recorded attempt, and the redelivery starts the next attempt, which is what makes the work resumable
 
 ## Serving
 ### 1. Visualization
@@ -215,7 +224,7 @@ Unique per `(run_id, attempt, target, stage)`.
 | run_id           | uuid      | the Ingestion run this result belongs to                        |
 | attempt          | int       | the processing attempt the result was recorded for              |
 | target           | str       | table or object identity the stage acted on                    |
-| stage            | str       | extract, transform, load, marts, or bootstrap                   |
+| stage            | str       | processing, extract, transform, load, marts, or bootstrap       |
 | outcome          | str       | succeeded or failed                                            |
 | row_count        | int       | rows the stage produced, where available                        |
 | error            | text      | error text for a failed stage                                   |

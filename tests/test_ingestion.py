@@ -1,6 +1,8 @@
 import dataclasses
 import json
 import os
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -78,9 +80,13 @@ class VersionedS3:
 class FakeSQS:
     def __init__(self):
         self.deleted = []
+        self.visibility = []
 
     def delete_message(self, receipt_handle: str) -> None:
         self.deleted.append(receipt_handle)
+
+    def change_message_visibility(self, receipt_handle: str, timeout_seconds: int):
+        self.visibility.append((receipt_handle, timeout_seconds))
 
 
 class ScriptedSQS(FakeSQS):
@@ -108,6 +114,10 @@ class FakeSNS:
 
     def publish(self, subject: str, message: str) -> None:
         self.messages.append((subject, message))
+
+    @property
+    def bodies(self) -> str:
+        return "\n".join(message for _, message in self.messages)
 
 
 class FakeProcessor:
@@ -832,9 +842,9 @@ def test_worker_rejects_an_invalid_snapshot_without_touching_the_database(
         processor=processor,
     )
 
-    assert not result.acknowledged
-    assert result.states == (ingestion.RunState.RETRYABLE,)
-    assert "receipt-bad-1" not in sqs.deleted
+    assert result.acknowledged
+    assert result.states == (ingestion.RunState.TERMINAL,)
+    assert sqs.deleted == ["receipt-good-1", "receipt-bad-1"]
     with ENGINE.connect() as connection:
         core = connection.execute(
             text(
@@ -867,7 +877,7 @@ def test_worker_rejects_an_invalid_snapshot_without_touching_the_database(
         {"reference_id": "keep", "installed_capacity": 100.0}
     ]
     assert len(raw_tables) == 1
-    assert dict(bad_run)["state"] == "retryable"
+    assert dict(bad_run)["state"] == "terminal"
     assert dict(bad_run)["current_stage"] == "extract"
     # The rejection is explained by a stage result, not a bare retry.
     assert [row["stage"] for row in bad_stages] == ["extract"]
@@ -1172,27 +1182,21 @@ def test_worker_ignores_events_for_unaccepted_keys(source_pipeline, tmp_path):
     assert sqs.deleted == ["receipt-stray"]
 
 
-def test_worker_marks_a_redelivered_version_stale_after_a_newer_one_loaded(
+def test_worker_marks_a_delayed_version_stale_after_a_newer_one_loaded(
     source_pipeline, tmp_path
 ):
+    """A queued event for an older version never overwrites a newer snapshot.
+
+    A lifecycle rule can remove the version that was ingested, leaving the older
+    one current again, so S3 starts serving it; the event for it that was still
+    queued arrives afterwards and is marked stale rather than loaded on top.
+    """
     s3 = source_pipeline["s3"]
     sqs = source_pipeline["sqs"]
     processor = source_pipeline["processor"]
     schemas = source_pipeline["schemas"]
     s3.last_modified["v-old"] = datetime(2026, 1, 1, tzinfo=timezone.utc)
     s3.last_modified["v-new"] = datetime(2026, 2, 3, tzinfo=timezone.utc)
-
-    broken = _write_mixed_source_snapshot(tmp_path, "broken.gpkg")
-    s3.put("sources/solar.gpkg", "v-old", broken)
-    first = ingestion.process_one_message(
-        _source_message("v-old"),
-        engine=ENGINE,
-        s3=s3,
-        sqs=sqs,
-        sns=FakeSNS(),
-        processor=processor,
-    )
-    assert first.states == (ingestion.RunState.RETRYABLE,)
 
     current = _write_source_snapshot(
         tmp_path, "current.gpkg", [{"reference_id": "row", "installed_capacity": 2.0}]
@@ -1208,9 +1212,13 @@ def test_worker_marks_a_redelivered_version_stale_after_a_newer_one_loaded(
     )
     assert second.states == (ingestion.RunState.SUCCEEDED,)
 
-    s3.current["sources/solar.gpkg"] = "v-old"
+    # v-new is gone, so S3 serves the older version and its event turns up.
+    older = _write_source_snapshot(
+        tmp_path, "older.gpkg", [{"reference_id": "row", "installed_capacity": 1.0}]
+    )
+    s3.put("sources/solar.gpkg", "v-old", older)
     reads_before = len(s3.reads)
-    redelivered = ingestion.process_one_message(
+    delayed = ingestion.process_one_message(
         _source_message("v-old"),
         engine=ENGINE,
         s3=s3,
@@ -1219,8 +1227,8 @@ def test_worker_marks_a_redelivered_version_stale_after_a_newer_one_loaded(
         processor=processor,
     )
 
-    assert redelivered.acknowledged
-    assert redelivered.states == (ingestion.RunState.STALE,)
+    assert delayed.acknowledged
+    assert delayed.states == (ingestion.RunState.STALE,)
     assert len(s3.reads) == reads_before
     with ENGINE.connect() as connection:
         old_run = connection.execute(
@@ -2176,8 +2184,8 @@ def test_worker_applies_quality_collision_and_identity_rules_for_every_source(
         ("v-duplicate", duplicate, "Duplicate non-null Reference IDs"),
     ):
         rejected = send(version_id, published)
-        assert not rejected.acknowledged
-        assert rejected.states == (ingestion.RunState.RETRYABLE,)
+        assert rejected.acknowledged
+        assert rejected.states == (ingestion.RunState.TERMINAL,)
         stage = _query(
             f"SELECT stage, outcome, error FROM {schemas['service']}.stage_results "
             "WHERE run_id = :run_id",
@@ -2610,8 +2618,8 @@ def test_boundary_batch_with_an_invalid_level_changes_nothing(
         fixture_boundaries, tmp_path, {2: regions, 3: wrong_level}, "bad-batch"
     )
 
-    assert not result.acknowledged
-    assert result.states == (ingestion.RunState.RETRYABLE,) * 2
+    assert result.acknowledged
+    assert result.states == (ingestion.RunState.TERMINAL,) * 2
     assert _boundary_snapshot(schemas) == before
     assert _geography(schemas, "core", "generators") == core_before
     assert _query(
@@ -2724,6 +2732,9 @@ class FakeSqsClient:
     def receive_message(self, **kwargs):
         self.calls.append(kwargs)
         return self.replies.pop(0) if self.replies else {}
+
+    def change_message_visibility(self, **kwargs):
+        self.calls.append(kwargs)
 
     def delete_message(self, **kwargs):
         self.calls.append(kwargs)
@@ -3014,12 +3025,11 @@ def test_boundary_and_source_records_in_one_message_apply_in_ingestion_order(
 def test_a_rejected_snapshot_does_not_block_the_other_records(
     fixture_boundaries, tmp_path
 ):
-    """A snapshot that fails validation is explained and skipped, not retried in place.
+    """A snapshot that fails validation is explained and settled, not retried.
 
     The valid record in the same message still runs its whole chain, so one
-    malformed upload cannot hold up the files beside it. The message itself
-    stays undeleted while the rejected record has no settled state yet (issue #7
-    makes the rejection terminal and announces it).
+    malformed upload cannot hold up the files beside it, and the message is
+    acknowledged once every record has a settled state.
     """
     s3 = fixture_boundaries["s3"]
     sqs = fixture_boundaries["sqs"]
@@ -3047,9 +3057,9 @@ def test_a_rejected_snapshot_does_not_block_the_other_records(
         processor=fixture_boundaries["processor"],
     )
 
-    assert result.states == (ingestion.RunState.RETRYABLE, ingestion.RunState.SUCCEEDED)
-    assert not result.acknowledged
-    assert sqs.deleted == []
+    assert result.states == (ingestion.RunState.TERMINAL, ingestion.RunState.SUCCEEDED)
+    assert result.acknowledged
+    assert sqs.deleted == ["solar-bad"]
 
     # The healthy record progressed all the way, against its own run.
     bio_run = _run_ids(schemas, "bio-v1")["sources/bio.gpkg"]
@@ -3089,7 +3099,8 @@ def test_a_rejected_boundary_release_does_not_block_the_source_records(
     """A Boundary record rejected by validation leaves the geography as it was.
 
     The Source records behind it in the same message are enriched against the
-    unchanged boundaries, so a bad release cannot half-apply itself.
+    unchanged boundaries, so a bad release cannot half-apply itself, and the
+    rejected level settles the message instead of holding it up.
     """
     s3 = fixture_boundaries["s3"]
     sqs = fixture_boundaries["sqs"]
@@ -3123,9 +3134,9 @@ def test_a_rejected_boundary_release_does_not_block_the_source_records(
         processor=fixture_boundaries["processor"],
     )
 
-    assert result.states == (ingestion.RunState.RETRYABLE, ingestion.RunState.SUCCEEDED)
-    assert not result.acknowledged
-    assert sqs.deleted == []
+    assert result.states == (ingestion.RunState.TERMINAL, ingestion.RunState.SUCCEEDED)
+    assert result.acknowledged
+    assert sqs.deleted == ["boundary-bad"]
 
     # Nothing of the release was written, not even the load ledger.
     assert _boundary_snapshot(schemas) == before
@@ -3231,3 +3242,674 @@ def test_redelivery_of_a_message_processes_only_the_unsettled_records(
         )
     ] == [1]
     assert marts.verify_marts(ENGINE) == []
+
+# ------------------------------------------------------------------ #
+#  Retry, DLQ, SNS, visibility, and recovery (issue #7)             #
+# ------------------------------------------------------------------ #
+
+
+def _runs_for_key(schemas, key):
+    return [
+        dict(row)
+        for row in _query(
+            f"SELECT state, attempt_count, terminal_error "
+            f"FROM {schemas['service']}.ingestion_runs "
+            f"WHERE object_key = :key",
+            {"key": key},
+        )
+    ]
+
+
+def _deliver_attempt(pipeline, message, *, sns, attempt=1):
+    """Process one delivery of a message, as SQS would hand it to the worker."""
+    return ingestion.process_one_message(
+        ingestion.SqsMessage(
+            receipt_handle=message.receipt_handle,
+            body=message.body,
+            attempt=attempt,
+        ),
+        engine=ENGINE,
+        s3=pipeline["s3"],
+        sqs=pipeline["sqs"],
+        sns=sns,
+        processor=pipeline["processor"],
+    )
+
+
+def test_a_rejected_snapshot_is_terminal_and_alerts_once(
+    fixture_boundaries, tmp_path
+):
+    """A file that fails its own validation is settled, not retried five times.
+
+    The object version is immutable, so validating it again cannot produce a
+    different answer: the run is terminal, the operator is told once, and the
+    message is acknowledged so the files behind it are not held up by it.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    sqs = pipeline["sqs"]
+    schemas = pipeline["schemas"]
+    sns = FakeSNS()
+    s3.put(
+        "sources/solar.gpkg",
+        "solar-bad",
+        _write_mixed_source_snapshot(tmp_path, "mixed.gpkg"),
+    )
+
+    result = _deliver_attempt(pipeline, _message("solar-bad", [("sources/solar.gpkg", "solar-bad")]), sns=sns)
+
+    assert result.states == (ingestion.RunState.TERMINAL,)
+    assert result.acknowledged
+    assert sqs.deleted == ["solar-bad"]
+    assert _runs_for_key(schemas, "sources/solar.gpkg") == [
+        {
+            "state": "terminal",
+            "attempt_count": 1,
+            "terminal_error": (
+                "extract failed: Source GPKG requires homogeneous Energy source"
+            ),
+        }
+    ]
+    # The alert names the file, its version, and how to get it ingested.
+    assert [subject for subject, _ in sns.messages] == [
+        "Rejected sources/solar.gpkg"
+    ]
+    alert = " ".join(sns.bodies.split())
+    assert "solar-bad" in alert
+    assert "energy-data" in alert
+    assert "Upload a new version of the file to ingest it" in alert
+    # The rejected version left nothing behind: no raw table, and no Core
+    # either, because nothing in this message got far enough to build one.
+    assert _raw_versions(schemas, "solar") == 0
+    assert _query(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = :schema AND table_name LIKE 'solar\\_%'",
+        {"schema": schemas["raw"]},
+    ) == []
+
+
+def test_a_failed_alert_does_not_hold_up_the_rest_of_the_message(
+    fixture_boundaries, tmp_path
+):
+    """An alert that cannot be sent is logged; the file is still settled.
+
+    The rejection is decided by the pipeline, not by the alerting path, so a
+    broken SNS topic cannot leave a rejected version redelivered forever or
+    stop the healthy record behind it from running.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    sqs = pipeline["sqs"]
+    schemas = pipeline["schemas"]
+
+    class BrokenSNS:
+        def publish(self, subject: str, message: str) -> None:
+            raise RuntimeError("topic unreachable")
+
+    s3.put(
+        "sources/solar.gpkg",
+        "solar-bad",
+        _write_mixed_source_snapshot(tmp_path, "mixed.gpkg"),
+    )
+    s3.put(
+        "sources/bio.gpkg",
+        "bio-good",
+        _write_source_snapshot(
+            tmp_path, "good.gpkg", [{"reference_id": "keep", "installed_capacity": 5.0}]
+        ),
+    )
+
+    result = _deliver_attempt(
+        pipeline,
+        _message(
+            "mixed",
+            [
+                ("sources/solar.gpkg", "solar-bad"),
+                ("sources/bio.gpkg", "bio-good"),
+            ],
+        ),
+        sns=BrokenSNS(),
+    )
+
+    assert result.states == (ingestion.RunState.TERMINAL, ingestion.RunState.SUCCEEDED)
+    assert result.acknowledged
+    assert sqs.deleted == ["mixed"]
+    assert _runs_for_key(schemas, "sources/solar.gpkg") == [
+        {
+            "state": "terminal",
+            "attempt_count": 1,
+            "terminal_error": (
+                "extract failed: Source GPKG requires homogeneous Energy source"
+            ),
+        }
+    ]
+    # The healthy record still reached Core.
+    assert _query(
+        f"SELECT reference_id FROM {schemas['core']}.generators"
+    ) == [{"reference_id": "keep"}]
+
+
+def test_a_rejection_found_later_in_the_chain_is_also_terminal(
+    fixture_boundaries, tmp_path
+):
+    """The inspect step is not the only validator, so neither is it the only door.
+
+    A row that has neither a Reference ID nor a location cannot be given a
+    synthetic identity, and the transform says so — after the file has been
+    extracted. That verdict is just as much a property of the bytes, so it
+    settles the run and alerts instead of being redelivered four more times.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    sqs = pipeline["sqs"]
+    schemas = pipeline["schemas"]
+    sns = FakeSNS()
+    s3.put(
+        "sources/solar.gpkg",
+        "solar-v1",
+        _write_source_snapshot(
+            tmp_path, "no-identity.gpkg", [{"reference_id": None, "location": None}]
+        ),
+    )
+
+    result = _deliver_attempt(
+        pipeline, _message("solar-1", [("sources/solar.gpkg", "solar-v1")]), sns=sns
+    )
+
+    assert result.states == (ingestion.RunState.TERMINAL,)
+    assert result.acknowledged
+    assert sqs.deleted == ["solar-1"]
+    assert _runs_for_key(schemas, "sources/solar.gpkg") == [
+        {
+            "state": "terminal",
+            "attempt_count": 1,
+            "terminal_error": (
+                "transform failed: Rows without reference_id require a location"
+            ),
+        }
+    ]
+    # The rejection names the stage that found it, and the extract it did finish.
+    assert _query(
+        f"SELECT stage, outcome, error FROM {schemas['service']}.stage_results "
+        "WHERE run_id = :run_id ORDER BY stage",
+        {"run_id": _run_ids(schemas, "solar-v1")["sources/solar.gpkg"]},
+    ) == [
+        {
+            "stage": "extract",
+            "outcome": "succeeded",
+            "error": None,
+        },
+        {
+            "stage": "transform",
+            "outcome": "failed",
+            "error": "Rows without reference_id require a location",
+        },
+    ]
+    assert [subject for subject, _ in sns.messages] == ["Rejected sources/solar.gpkg"]
+
+
+def test_an_unacknowledged_message_is_handed_back_to_the_queue(
+    fixture_boundaries, tmp_path
+):
+    """A message the worker keeps is made visible again, not parked for six hours.
+
+    SQS applies its redrive policy when a message becomes visible, so a message
+    left retryable has to be returned promptly: otherwise the retry, and the move
+    to the DLQ once the deliveries run out, waits out the visibility timeout the
+    heartbeat had just granted.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    schemas = pipeline["schemas"]
+    s3.put(
+        "sources/bio.gpkg",
+        "bio-v1",
+        _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")),
+    )
+    s3.read_failures["sources/bio.gpkg"] = 1
+    sqs = ScriptedSQS(
+        ingestion.SqsMessage(
+            receipt_handle="bio-1",
+            body=_message(
+                "bio-1", [("sources/bio.gpkg", "bio-v1")]
+            ).body,
+        )
+    )
+
+    processed = ingestion.run_worker(
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=pipeline["processor"],
+        max_messages=1,
+        idle_sleep=lambda seconds: None,
+    )
+
+    assert processed == 1
+    assert sqs.deleted == []
+    # Granted the maximum while the work ran, then handed straight back.
+    assert sqs.visibility == [
+        ("bio-1", ingestion.VISIBILITY_TIMEOUT_SECONDS),
+        ("bio-1", 0),
+    ]
+    assert _runs_for_key(schemas, "sources/bio.gpkg")[0]["state"] == "retryable"
+
+
+def test_a_rejected_file_alerts_once_across_redeliveries(
+    fixture_boundaries, tmp_path
+):
+    """The alert is tied to the run, so a redelivery does not repeat it.
+
+    The message survives the first delivery only because the second record is
+    still retryable; the rejected record is settled and must stay silent.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    sqs = pipeline["sqs"]
+    schemas = pipeline["schemas"]
+    sns = FakeSNS()
+    s3.put(
+        "sources/solar.gpkg",
+        "solar-bad",
+        _write_mixed_source_snapshot(tmp_path, "mixed.gpkg"),
+    )
+    s3.put("sources/bio.gpkg", "bio-v1", _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")))
+    s3.read_failures["sources/bio.gpkg"] = 1
+    message = _message(
+        "mixed-bad",
+        [("sources/solar.gpkg", "solar-bad"), ("sources/bio.gpkg", "bio-v1")],
+    )
+
+    first = _deliver_attempt(pipeline, message, sns=sns)
+
+    assert first.states == (ingestion.RunState.TERMINAL, ingestion.RunState.RETRYABLE)
+    assert not first.acknowledged
+    assert sqs.deleted == []
+    assert len(sns.messages) == 1
+
+    second = _deliver_attempt(pipeline, message, sns=sns, attempt=2)
+
+    # The rejected record stays settled, the readable one is ingested.
+    assert second.states == (ingestion.RunState.TERMINAL, ingestion.RunState.SUCCEEDED)
+    assert second.acknowledged
+    assert sqs.deleted == ["mixed-bad"]
+    # One alert for one rejected file, not one per delivery.
+    assert len(sns.messages) == 1
+    assert _runs_for_key(schemas, "sources/solar.gpkg")[0]["attempt_count"] == 1
+    assert _runs_for_key(schemas, "sources/bio.gpkg") == [
+        {"state": "succeeded", "attempt_count": 2, "terminal_error": None}
+    ]
+
+
+def test_an_infrastructure_failure_stays_retryable_and_settles_on_redelivery(
+    fixture_boundaries, tmp_path
+):
+    """A failure that is not the file's fault keeps the message for redelivery.
+
+    An S3 read that fails is infrastructure, not input: the run stays retryable,
+    nothing is alerted, and the next delivery of the same version is processed
+    from where the pipeline is idempotent.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    sqs = pipeline["sqs"]
+    schemas = pipeline["schemas"]
+    sns = FakeSNS()
+    s3.put("sources/bio.gpkg", "bio-v1", _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")))
+    s3.read_failures["sources/bio.gpkg"] = 1
+    message = _message("bio-1", [("sources/bio.gpkg", "bio-v1")])
+
+    first = _deliver_attempt(pipeline, message, sns=sns)
+
+    assert first.states == (ingestion.RunState.RETRYABLE,)
+    assert not first.acknowledged
+    assert sqs.deleted == []
+    assert sns.messages == []
+    assert _runs_for_key(schemas, "sources/bio.gpkg") == [
+        {
+            "state": "retryable",
+            "attempt_count": 1,
+            "terminal_error": "transient S3 read failure for sources/bio.gpkg",
+        }
+    ]
+    assert _raw_versions(schemas, "bio") == 0
+
+    second = _deliver_attempt(pipeline, message, sns=sns, attempt=2)
+
+    assert second.states == (ingestion.RunState.SUCCEEDED,)
+    assert second.acknowledged
+    assert sqs.deleted == ["bio-1"]
+    # The DLQ alarm is the only terminal infrastructure alert.
+    assert sns.messages == []
+    assert set(_core_units(schemas, "bio")) == _good_members(
+        schemas, _run_ids(schemas, "bio-v1")["sources/bio.gpkg"]
+    )
+
+
+def test_delivery_attempts_are_exhausted_into_the_dlq(
+    fixture_boundaries, tmp_path
+):
+    """The fifth delivery is the last: the run says so and the queue DLQs it.
+
+    The worker neither deletes the message (the redrive policy needs it) nor
+    alerts (the DLQ alarm is the single terminal infrastructure alert), so the
+    operator finds the message in the DLQ and its state in the run.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    sqs = pipeline["sqs"]
+    schemas = pipeline["schemas"]
+    sns = FakeSNS()
+    s3.put("sources/bio.gpkg", "bio-v1", _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")))
+    message = _message("bio-1", [("sources/bio.gpkg", "bio-v1")])
+
+    for attempt in range(1, ingestion.MAX_DELIVERY_ATTEMPTS):
+        s3.read_failures["sources/bio.gpkg"] = 1
+        result = _deliver_attempt(pipeline, message, sns=sns, attempt=attempt)
+
+        # Before the last attempt the run is an ordinary retryable failure.
+        assert result.states == (ingestion.RunState.RETRYABLE,), attempt
+        assert _runs_for_key(schemas, "sources/bio.gpkg")[0]["attempt_count"] == attempt
+
+    s3.read_failures["sources/bio.gpkg"] = 1
+    exhausted = _deliver_attempt(
+        pipeline, message, sns=sns, attempt=ingestion.MAX_DELIVERY_ATTEMPTS
+    )
+
+    # Still unsettled, so the message is not deleted and SQS moves it to the DLQ.
+    assert exhausted.states == (ingestion.RunState.RETRYABLE,)
+    assert not exhausted.acknowledged
+    assert sqs.deleted == []
+    assert sns.messages == []
+    run = _runs_for_key(schemas, "sources/bio.gpkg")[0]
+    assert run["state"] == "retryable"
+    assert run["attempt_count"] == ingestion.MAX_DELIVERY_ATTEMPTS
+    assert "DLQ" in run["terminal_error"]
+    # The exhaustion is a per-table result of its own, not just a state.
+    assert [
+        dict(row)
+        for row in _query(
+            f"SELECT target, stage, outcome, error, details "
+            f"FROM {schemas['service']}.stage_results "
+            f"WHERE run_id = :run_id AND stage = 'processing' AND attempt = :attempt",
+            {
+                "run_id": _run_ids(schemas, "bio-v1")["sources/bio.gpkg"],
+                "attempt": ingestion.MAX_DELIVERY_ATTEMPTS,
+            },
+        )
+    ] == [
+        {
+            "target": "sources/bio.gpkg",
+            "stage": "processing",
+            "outcome": "failed",
+            # The cause is kept, so the operator reads what actually failed
+            # before the "and now it is in the DLQ" part.
+            "error": (
+                "transient S3 read failure for sources/bio.gpkg; delivery "
+                "attempts exhausted after 5 deliveries, so the message goes to "
+                "the DLQ"
+            ),
+            "details": {"delivery_attempt": 5, "delivery_attempts": 5, "exhausted": True},
+        }
+    ]
+
+
+def test_a_crashed_message_resumes_on_redelivery(
+    fixture_boundaries, tmp_path, monkeypatch
+):
+    """A worker that dies mid-record leaves the run resumable, not stuck.
+
+    The crash is not an exception the pipeline can catch, so the run keeps its
+    running state and the half-finished work; the next delivery claims the same
+    run, counts the attempt, and finishes it.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    schemas = pipeline["schemas"]
+    sns = FakeSNS()
+    s3.put("sources/bio.gpkg", "bio-v1", _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")))
+    message = _message("bio-1", [("sources/bio.gpkg", "bio-v1")])
+    crashed = pipeline["processor"]
+
+    def crash_after_extract(*_args, **_kwargs):
+        raise KeyboardInterrupt("the worker was stopped mid-record")
+
+    # The extract is already committed when the worker dies, so the crash leaves
+    # a raw version behind and the run open.
+    original_transform = ingestion.transform_source_snapshot
+    monkeypatch.setattr(ingestion, "transform_source_snapshot", crash_after_extract)
+    worker_sqs = ScriptedSQS(
+        ingestion.SqsMessage(
+            receipt_handle="bio-1",
+            body=message.body,
+            attempt=1,
+        )
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        ingestion.run_worker(
+            engine=ENGINE,
+            s3=s3,
+            sqs=worker_sqs,
+            sns=sns,
+            processor=crashed,
+            max_messages=1,
+            idle_sleep=lambda seconds: None,
+        )
+
+    # The run is still open, so nothing is acknowledged and nothing alerted, and
+    # the message is handed back rather than left behind the granted timeout.
+    assert worker_sqs.deleted == []
+    assert worker_sqs.visibility[-1] == ("bio-1", 0)
+    assert sns.messages == []
+    assert _runs_for_key(schemas, "sources/bio.gpkg") == [
+        {"state": "running", "attempt_count": 1, "terminal_error": None}
+    ]
+    assert _raw_versions(schemas, "bio") == 1
+    monkeypatch.setattr(ingestion, "transform_source_snapshot", original_transform)
+
+    resumed = _deliver_attempt(pipeline, message, sns=sns, attempt=2)
+
+    assert resumed.states == (ingestion.RunState.SUCCEEDED,)
+    assert resumed.acknowledged
+    assert _runs_for_key(schemas, "sources/bio.gpkg") == [
+        {"state": "succeeded", "attempt_count": 2, "terminal_error": None}
+    ]
+    # The snapshot was ingested once, not twice: the redelivery picked up the
+    # version the crashed attempt had already extracted.
+    assert _raw_versions(schemas, "bio") == 1
+    # Both attempts are in the history, so the crash is visible after the fact.
+    assert _query(
+        f"SELECT attempt, stage, outcome FROM {schemas['service']}.stage_results "
+        f"WHERE run_id = :run_id ORDER BY attempt, stage",
+        {"run_id": _run_ids(schemas, "bio-v1")["sources/bio.gpkg"]},
+    ) == [
+        {"attempt": 2, "stage": "extract", "outcome": "succeeded"},
+        {"attempt": 2, "stage": "load", "outcome": "succeeded"},
+        {"attempt": 2, "stage": "marts", "outcome": "succeeded"},
+        {"attempt": 2, "stage": "transform", "outcome": "succeeded"},
+    ]
+
+
+def test_runs_and_stage_results_distinguish_the_four_outcomes(
+    fixture_boundaries, tmp_path
+):
+    """One schema, four outcomes: an operator can read what happened per attempt.
+
+    A rejected file is terminal, a failing read is retryable, a superseded
+    version is stale, and a good file succeeds — each with the attempt history
+    that produced it.
+    """
+    pipeline = fixture_boundaries
+    s3 = pipeline["s3"]
+    schemas = pipeline["schemas"]
+    sns = FakeSNS()
+    s3.put("sources/solar.gpkg", "solar-bad", _write_mixed_source_snapshot(tmp_path, "mixed.gpkg"))
+    s3.put("sources/gas.gpkg", "gas-v1", _frame_bytes(tmp_path, "gas-v1.gpkg", _fixture_frame("gas")))
+    s3.read_failures["sources/gas.gpkg"] = 1
+    s3.put("sources/bio.gpkg", "bio-v1", _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")))
+    s3.put("sources/hydro.gpkg", "hydro-v1", _frame_bytes(tmp_path, "hydro-v1.gpkg", _fixture_frame("hydro")))
+
+    # The first delivery ingests the bio snapshot and fails the gas read; the
+    # rejected solar file settles in the first pass already.
+    _deliver_attempt(
+        pipeline,
+        _message(
+            "batch-1",
+            [
+                ("sources/solar.gpkg", "solar-bad"),
+                ("sources/gas.gpkg", "gas-v1"),
+                ("sources/bio.gpkg", "bio-v1"),
+            ],
+        ),
+        sns=sns,
+    )
+    # S3 now serves a newer hydro version, so the queued one is stale when it
+    # finally arrives, and the gas read works this time.
+    s3.put("sources/hydro.gpkg", "hydro-v2", _frame_bytes(tmp_path, "hydro-v2.gpkg", _fixture_frame("hydro")))
+    _deliver_attempt(
+        pipeline,
+        _message(
+            "batch-2",
+            [("sources/gas.gpkg", "gas-v1"), ("sources/hydro.gpkg", "hydro-v1")],
+        ),
+        sns=sns,
+        attempt=2,
+    )
+
+    runs = {
+        row["object_key"]: row
+        for row in _query(
+            f"SELECT object_key, state, attempt_count, terminal_error "
+            f"FROM {schemas['service']}.ingestion_runs"
+        )
+    }
+
+    assert {key: row["state"] for key, row in runs.items()} == {
+        "sources/solar.gpkg": "terminal",
+        "sources/gas.gpkg": "succeeded",
+        "sources/bio.gpkg": "succeeded",
+        "sources/hydro.gpkg": "stale",
+    }
+    assert runs["sources/solar.gpkg"]["attempt_count"] == 1
+    assert runs["sources/gas.gpkg"]["attempt_count"] == 2
+    assert runs["sources/hydro.gpkg"]["terminal_error"].startswith(
+        "Superseded object version"
+    )
+    # The failed first attempt of the retryable run is kept as its own row.
+    assert [
+        (row["attempt"], row["stage"], row["outcome"])
+        for row in _query(
+            f"SELECT attempt, stage, outcome FROM {schemas['service']}.stage_results "
+            f"WHERE run_id = :run_id ORDER BY attempt, stage",
+            {"run_id": _run_ids(schemas, "gas-v1")["sources/gas.gpkg"]},
+        )
+    ] == [
+        (1, "processing", "failed"),
+        (2, "extract", "succeeded"),
+        (2, "load", "succeeded"),
+        (2, "marts", "succeeded"),
+        (2, "transform", "succeeded"),
+    ]
+    # The rejected file's failure is a per-table result of the extract stage.
+    assert [
+        (row["stage"], row["outcome"])
+        for row in _query(
+            f"SELECT stage, outcome FROM {schemas['service']}.stage_results "
+            f"WHERE run_id = :run_id",
+            {"run_id": _run_ids(schemas, "solar-bad")["sources/solar.gpkg"]},
+        )
+    ] == [("extract", "failed")]
+
+
+def test_boto3_sqs_reports_the_delivery_attempt_and_extends_visibility():
+    client = FakeSqsClient(
+        {
+            "Messages": [
+                {
+                    "MessageId": "id-1",
+                    "ReceiptHandle": "receipt-1",
+                    "Body": '{"Records": []}',
+                    "Attributes": {"ApproximateReceiveCount": "4"},
+                }
+            ]
+        }
+    )
+    sqs = ingestion.Boto3SQSAdapter(client, queue_url="https://sqs.eu/queue")
+
+    message = sqs.receive_message()
+
+    # The attempt count is what the worker counts retries with.
+    assert message.attempt == 4
+    assert client.calls[0]["AttributeNames"] == ["ApproximateReceiveCount"]
+    # A message without the attribute is the first delivery.
+    assert ingestion.Boto3SQSAdapter(
+        FakeSqsClient({"Messages": [{"ReceiptHandle": "r", "Body": "{}"}]}),
+        queue_url="https://sqs.eu/queue",
+    ).receive_message().attempt == 1
+
+    sqs.change_message_visibility("receipt-1", ingestion.VISIBILITY_TIMEOUT_SECONDS)
+
+    assert client.calls[-1] == {
+        "QueueUrl": "https://sqs.eu/queue",
+        "ReceiptHandle": "receipt-1",
+        "VisibilityTimeout": ingestion.VISIBILITY_TIMEOUT_SECONDS,
+    }
+    # SQS will not grant more than six hours.
+    assert ingestion.VISIBILITY_TIMEOUT_SECONDS == 6 * 60 * 60
+
+
+def test_a_slow_message_keeps_its_visibility_extended(source_pipeline, monkeypatch):
+    """Long work would outlive the queue's visibility timeout without a heartbeat.
+
+    A Boundary release re-enriches the whole country and can take minutes; the
+    worker refreshes the six-hour visibility while it holds the message, so the
+    queue does not hand the same message to a second worker.
+    """
+    holding = threading.Event()
+    released = threading.Event()
+
+    class SlowSQS(ScriptedSQS):
+        def change_message_visibility(self, receipt_handle, timeout_seconds):
+            super().change_message_visibility(receipt_handle, timeout_seconds)
+            released.set()
+
+    s3 = source_pipeline["s3"]
+    s3.put("sources/solar.gpkg", "version-42", b"version-42-content")
+    sqs = SlowSQS(_message("slow-1", [("sources/solar.gpkg", "version-42")]))
+    processor = FakeProcessor()
+
+    def slow_finalize():
+        holding.wait(5)
+        return FakeProcessor.finalize(processor)
+
+    processor.finalize = slow_finalize
+    monkeypatch.setattr(ingestion, "VISIBILITY_HEARTBEAT_SECONDS", 0.01)
+
+    def run():
+        ingestion.run_worker(
+            engine=source_pipeline["engine"],
+            s3=s3,
+            sqs=sqs,
+            sns=FakeSNS(),
+            processor=processor,
+            max_messages=1,
+            idle_sleep=lambda seconds: None,
+        )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert released.wait(5), "the worker never extended the message's visibility"
+    time.sleep(0.05)  # long enough for several beats at the patched interval
+    holding.set()
+    worker.join(10)
+
+    assert not worker.is_alive()
+    assert processor.objects, "the worker never processed the message"
+    # The beat repeats while the work runs, and every beat asks for the maximum.
+    assert len(sqs.visibility) >= 2, "the heartbeat did not repeat"
+    assert {timeout for _, timeout in sqs.visibility} == {
+        ingestion.VISIBILITY_TIMEOUT_SECONDS
+    }
+    assert sqs.deleted == ["slow-1"]

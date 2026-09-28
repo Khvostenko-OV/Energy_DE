@@ -113,6 +113,14 @@ _Avoid_: Load signature, SQS message
 One SQS message — the event-driven worker's unit of work, called a *message* in the docs and the code. It carries every S3 record the queue batched for it; those records are processed independently but in one order — Boundary records as a single release first, then Source records — and the message is acknowledged only once every record is successful, terminally skipped, or stale. Anything retryable is left for redelivery, which repeats only the unsettled records.
 _Avoid_: Ingestion run, batch, file
 
+**Rejected object version**:
+An object version whose own content fails validation — a non-homogeneous Source GPKG, a row the transform cannot give an identity to, a Boundary level published under the wrong key. Because the version is immutable, re-reading it can only reach the same verdict, so its Ingestion run is *terminal* rather than retryable: the operator uploads a new version, which is a new run. The worker announces it once, on SNS. Deliberately narrow: only failures that are a property of the bytes, never a property of the environment.
+_Avoid_: Failed run, rejected file, broken file, poison message
+
+**Delivery attempt**:
+One handing of a message to the worker, counted by SQS (`ApproximateReceiveCount`) rather than by the worker, so a redelivery after a crash counts as an attempt. An Ingestion run has at most five of them, matching the queue's `maxReceiveCount`; the fifth leaves the run *retryable* and the message destined for the DLQ, which is alarmed once by the DLQ alarm instead of by the worker.
+_Avoid_: Attempt counter, try
+
 **Load signature**:
 The immutable identity of successfully extracted input. For S3 ingestion it is `(bucket, object_key, version_id)`; for local ingestion it is `(filename, filesize, modified_at)`. A signature is logged only after extraction verification succeeds; duplicate input is skipped unless a local run is forced with `-f`.
 _Avoid_: Message ID, filename alone

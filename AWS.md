@@ -24,7 +24,14 @@
 - Records are processed independently: each one is its own Ingestion run with its own result, and a failing record never blocks the others in the same message
 - The geography rebuild and the three materialized views are refreshed **once** per message, after the last record
 - The message is deleted only when every record is successful, terminally skipped, or stale. If one record is still retryable the message stays, and redelivery processes only the records that are not settled yet
-- Every failure is retryable today, including a deterministically invalid file; retries, DLQ redrive, and SNS alerts are issue #7. The topic is read from `SNS_TOPIC_ARN` and the queue from `SQS_QUEUE_URL`, the bucket from `S3_BUCKET`
+- The topic is read from `SNS_TOPIC_ARN`, the queue from `SQS_QUEUE_URL`, the bucket from `S3_BUCKET`
+
+### Retries, rejection, DLQ, and alerting (issue #7)
+- **Rejected object version → terminal, alerted once.** A file that fails its own content validation can never be ingested as it stands, because an S3 version is immutable and validating it again gives the same answer. The worker does not spend five deliveries finding that out: the run becomes `terminal`, one SNS alert names the key, version, and the fix (upload a new version), and the message is deleted so the files behind it are not held up. A redelivery of the same message does not alert again
+- **Infrastructure failure → retried, then DLQ.** Database, S3, and marts failures are retried on the next delivery, up to the queue's `maxReceiveCount = 5`. The worker takes the attempt number from SQS's `ApproximateReceiveCount`, so a redelivery after a crashed worker also counts
+- **Exhaustion is not alerted by the worker.** On the fifth delivery the run stays `retryable`, its `terminal_error` records that the message is going to the DLQ, and the message is left for the redrive policy. The DLQ CloudWatch alarm is then the single alert for infrastructure trouble — the worker only ever alerts directly on a rejected object version, so each problem is reported once by exactly one path
+- **Queue settings the worker relies on:** `maxReceiveCount = 5` (matching the worker's `MAX_DELIVERY_ATTEMPTS`) and a redrive policy onto the DLQ. The IAM role needs `sqs:ChangeMessageVisibility`, which the worker uses
+- **Visibility.** While a message is processed its visibility timeout is extended to the six-hour SQS maximum and re-extended every minute, so a long ingest is not picked up by a second worker. When the work is over the worker hands the message back — `ChangeMessageVisibility: 0` — unless it was acknowledged, because SQS applies the redrive policy when a message becomes visible: a message that is kept would otherwise wait out the six hours it was just granted. A worker that is killed outright (`SIGKILL`, a lost node) cannot hand anything back, so that message waits for the last timeout it was given, and the next delivery resumes its runs from their recorded stage results
 
 ## 3. Logging
 - All ETL logs are sent to CloudWatch Logs

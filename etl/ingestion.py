@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -10,7 +11,7 @@ from pathlib import Path
 import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol
+from typing import NamedTuple, Protocol
 from urllib.parse import unquote_plus
 
 from sqlalchemy import text
@@ -48,6 +49,18 @@ ACCEPTED_KEYS = frozenset(BOUNDARY_KEYS + SOURCE_KEYS)
 # the loop once a receive has come back empty.
 LONG_POLL_SECONDS = 20
 IDLE_POLL_SECONDS = 5.0
+
+# How many deliveries one message gets before SQS moves it to the DLQ, which is
+# the queue's redrive `maxReceiveCount`: the worker has to count the same way or
+# it would keep working a message the queue has already given up on.
+MAX_DELIVERY_ATTEMPTS = 5
+
+# The visibility timeout is how long the queue keeps a message invisible to
+# other workers while this one holds it. Six hours is the SQS maximum, and the
+# worker refreshes it on a heartbeat for as long as it works: one Boundary
+# release re-enriches the whole country and outlives a shorter timeout.
+VISIBILITY_TIMEOUT_SECONDS = 6 * 60 * 60
+VISIBILITY_HEARTBEAT_SECONDS = 60.0
 
 log = logging.getLogger(__name__)
 
@@ -101,9 +114,26 @@ class StaleObjectError(RuntimeError):
 
 
 class SourceSnapshotError(RuntimeError):
+    """A pipeline stage refused the input.
+
+    Retryable by default, because most stage failures are about the state
+    around the file — the database, the tables a previous run left, the
+    boundaries — and not about the file itself. `RejectedObjectError` is the
+    exception: that one is about the object version and can never succeed.
+    """
+
     def __init__(self, results: Sequence[StageResult], message: str):
         super().__init__(message)
         self.results = tuple(results)
+
+
+class RejectedObjectError(SourceSnapshotError):
+    """The object version failed its own content validation.
+
+    An S3 object version is immutable, so validating it again returns the same
+    rejection: the run is settled as terminal and the operator is alerted
+    instead of the queue spending five deliveries on it.
+    """
 
 
 @dataclass(frozen=True)
@@ -120,6 +150,8 @@ class StageResult:
 class SqsMessage:
     receipt_handle: str
     body: str
+    attempt: int = 1
+    """How many times the queue has delivered this message, first delivery 1."""
 
 
 @dataclass(frozen=True)
@@ -136,6 +168,10 @@ class S3Adapter(Protocol):
 
 class SQSAdapter(Protocol):
     def receive_message(self) -> SqsMessage | None: ...
+
+    def change_message_visibility(
+        self, receipt_handle: str, timeout_seconds: int
+    ) -> None: ...
 
     def delete_message(self, receipt_handle: str) -> None: ...
 
@@ -201,12 +237,27 @@ class Boto3SQSAdapter:
             QueueUrl=self.queue_url,
             MaxNumberOfMessages=1,
             WaitTimeSeconds=LONG_POLL_SECONDS,
+            AttributeNames=["ApproximateReceiveCount"],
         )
         messages = response.get("Messages") or []
         if not messages:
             return None
         message = messages[0]
-        return SqsMessage(message["ReceiptHandle"], message["Body"])
+        attributes = message.get("Attributes") or {}
+        return SqsMessage(
+            message["ReceiptHandle"],
+            message["Body"],
+            attempt=int(attributes.get("ApproximateReceiveCount", 1)),
+        )
+
+    def change_message_visibility(
+        self, receipt_handle: str, timeout_seconds: int
+    ) -> None:
+        self.client.change_message_visibility(
+            QueueUrl=self.queue_url,
+            ReceiptHandle=receipt_handle,
+            VisibilityTimeout=timeout_seconds,
+        )
 
     def delete_message(self, receipt_handle: str) -> None:
         self.client.delete_message(
@@ -225,6 +276,36 @@ class Boto3SNSAdapter:
         self.client.publish(
             TopicArn=self.topic_arn, Subject=subject, Message=message
         )
+
+
+def _rejection(
+    object_id: S3ObjectId,
+    stage: str,
+    error: SourceValidationError,
+    results: Sequence[StageResult] = (),
+) -> RejectedObjectError:
+    """Report a content-validation error as a failed stage of a rejected version.
+
+    A file that fails its own validation is a deterministic input error, so it
+    gets a stage result like any other stage outcome rather than surfacing as an
+    unexplained exception — and, since the version is immutable, it settles the
+    run as terminal rather than asking the queue to deliver it again. The stage
+    that caught it is named, because a rejection found by the transform is a
+    different kind of bad file than one found by the inspect, and the stages that
+    did pass are kept, so the attempt history says how far the file got.
+    """
+    return RejectedObjectError(
+        [
+            *results,
+            StageResult(
+                target=object_id.key,
+                stage=stage,
+                outcome="failed",
+                error=str(error),
+            ),
+        ],
+        f"{stage} failed: {error}",
+    )
 
 
 class PipelineProcessor:
@@ -246,15 +327,18 @@ class PipelineProcessor:
             path.unlink(missing_ok=True)
 
         run_id = self._run_id(object_id)
-        extraction = extract_source_snapshot(
-            dataset,
-            engine=self.engine,
-            filename=object_id.key,
-            bucket=object_id.bucket,
-            object_key=object_id.key,
-            object_version_id=object_id.version_id,
-            ingestion_run_id=run_id,
-        )
+        try:
+            extraction = extract_source_snapshot(
+                dataset,
+                engine=self.engine,
+                filename=object_id.key,
+                bucket=object_id.bucket,
+                object_key=object_id.key,
+                object_version_id=object_id.version_id,
+                ingestion_run_id=run_id,
+            )
+        except SourceValidationError as error:
+            raise _rejection(object_id, "extract", error) from error
         result = StageResult(
             target=object_id.key,
             stage="extract",
@@ -277,12 +361,15 @@ class PipelineProcessor:
         if raw_table is None:
             raise SourceSnapshotError(results, "extract produced no raw version")
 
-        transform = transform_source_snapshot(
-            dataset.source,
-            raw_table,
-            engine=self.engine,
-            ingestion_run_id=run_id,
-        )
+        try:
+            transform = transform_source_snapshot(
+                dataset.source,
+                raw_table,
+                engine=self.engine,
+                ingestion_run_id=run_id,
+            )
+        except SourceValidationError as error:
+            raise _rejection(object_id, "transform", error, results) from error
         results.append(
             StageResult(
                 target=dataset.source,
@@ -302,11 +389,14 @@ class PipelineProcessor:
                 results, f"transform failed: {'; '.join(transform.errors)}"
             )
 
-        load = load_source_snapshot(
-            dataset.source,
-            engine=self.engine,
-            ingestion_run_id=run_id,
-        )
+        try:
+            load = load_source_snapshot(
+                dataset.source,
+                engine=self.engine,
+                ingestion_run_id=run_id,
+            )
+        except SourceValidationError as error:
+            raise _rejection(object_id, "load", error, results) from error
         results.append(
             StageResult(
                 target=load.target,
@@ -363,7 +453,7 @@ class PipelineProcessor:
             )
         if failures:
             rejected = ", ".join(sorted(failures))
-            raise SourceSnapshotError(
+            raise RejectedObjectError(
                 [
                     StageResult(
                         target=object_id.key,
@@ -460,26 +550,11 @@ class PipelineProcessor:
         return (result,)
 
     def _inspect(self, object_id: S3ObjectId, path: Path) -> SourceDataset:
-        """Validate the GPKG, reporting a rejection as a failed extract stage.
-
-        A rejected snapshot is a deterministic input error, so it gets a stage
-        result like any other stage outcome rather than surfacing as an
-        unexplained exception.
-        """
+        """Validate the GPKG, reporting a rejection as a failed extract stage."""
         try:
             return inspect_source_gpkg(path)
         except SourceValidationError as error:
-            raise SourceSnapshotError(
-                (
-                    StageResult(
-                        target=object_id.key,
-                        stage="extract",
-                        outcome="failed",
-                        error=str(error),
-                    ),
-                ),
-                f"extract failed: {error}",
-            ) from error
+            raise _rejection(object_id, "extract", error) from error
 
     def _run_id(self, object_id: S3ObjectId) -> str:
         with self.engine.connect() as connection:
@@ -880,6 +955,113 @@ def _record_retryable(
     _record_failure(engine, run_id, RunState.RETRYABLE, error, stage)
 
 
+def _record_terminal(
+    engine: Engine,
+    run_id: uuid.UUID,
+    error: Exception,
+    stage: str = "processing",
+) -> None:
+    _record_failure(engine, run_id, RunState.TERMINAL, error, stage)
+
+
+def _alert_rejected(
+    sns: SNSAdapter,
+    object_id: S3ObjectId,
+    run_id: uuid.UUID,
+    error: Exception,
+) -> None:
+    """Tell the operator that a file will never be ingested as it stands.
+
+    This is the one direct alert the worker sends. A message that runs out of
+    deliveries is not announced here: it lands in the DLQ, and the DLQ alarm
+    publishes that, so an infrastructure problem is reported once. The run is
+    already recorded terminal when this is called, so a worker that dies here
+    loses the alert but never sends it twice; a failed send is logged and does
+    not hold up the other records in the message.
+    """
+    log.error("Rejected %s: %s", object_id.key, error)
+    try:
+        sns.publish(
+            f"Rejected {object_id.key}",
+            f"Ingestion run {run_id} rejected {object_id.key} "
+            f"version {object_id.version_id} from {object_id.bucket}: {error}\n"
+            "The object version is immutable, so it is not retried. Upload a new "
+            "version of the file to ingest it; the run and its per-table results "
+            "are in service.ingestion_runs and service.stage_results.",
+        )
+    except Exception:
+        log.exception("Could not alert about the rejected %s", object_id.key)
+
+
+def _settle_failure(
+    engine: Engine,
+    run_id: uuid.UUID,
+    attempt: int,
+    object_id: S3ObjectId,
+    results: Sequence[StageResult],
+    error: Exception,
+    *,
+    delivery_attempt: int,
+    sns: SNSAdapter,
+) -> RunState:
+    """Settle one record that failed, and return the state the run is left in.
+
+    A rejection of the object version itself is terminal: it is alerted once and
+    never retried, because the version is immutable. Anything else is about the
+    state around the file and stays retryable, and once the queue has spent its
+    deliveries the run records that it was given up on.
+    """
+    if isinstance(error, RejectedObjectError):
+        _record_stage_results(engine, run_id, attempt, results)
+        _record_terminal(engine, run_id, error, _failing_stage_of(results))
+        _alert_rejected(sns, object_id, run_id, error)
+        return RunState.TERMINAL
+    exhausted = delivery_attempt >= MAX_DELIVERY_ATTEMPTS
+    if exhausted:
+        # The run stays unsettled on purpose: an unsettled record is what keeps
+        # the message from being acknowledged, and the redrive policy needs the
+        # message to move it to the DLQ, where the DLQ alarm alerts.
+        error = RuntimeError(
+            f"{error}; delivery attempts exhausted after {delivery_attempt} "
+            "deliveries, so the message goes to the DLQ"
+        )
+        log.error(
+            "Giving up on %s after %s deliveries; the message goes to the DLQ",
+            object_id.key,
+            delivery_attempt,
+        )
+    if results:
+        _record_stage_results(engine, run_id, attempt, results)
+    else:
+        # A failure before any stage ran still leaves a row of its own, so the
+        # attempt history of a run is complete in stage_results and not only on
+        # the run row.
+        _record_stage_results(
+            engine,
+            run_id,
+            attempt,
+            [
+                StageResult(
+                    target=object_id.key,
+                    stage="processing",
+                    outcome="failed",
+                    error=str(error),
+                    details=(
+                        {
+                            "delivery_attempt": delivery_attempt,
+                            "delivery_attempts": MAX_DELIVERY_ATTEMPTS,
+                            "exhausted": True,
+                        }
+                        if exhausted
+                        else {}
+                    ),
+                )
+            ],
+        )
+    _record_retryable(engine, run_id, error, _failing_stage_of(results))
+    return RunState.RETRYABLE
+
+
 def _record_stale(
     engine: Engine,
     run_id: uuid.UUID,
@@ -953,6 +1135,26 @@ def _failing_stage_of(results: Sequence[StageResult]) -> str:
     return "processing"
 
 
+class _PendingBoundary(NamedTuple):
+    """A Boundary record claimed for the batch, with where its state goes."""
+
+    run_id: uuid.UUID
+    attempt: int
+    object_id: S3ObjectId
+    body: bytes
+    index: int
+
+
+class _SourceSucceeded(NamedTuple):
+    """A Source record whose own stages passed, pending the shared marts."""
+
+    run_id: uuid.UUID
+    attempt: int
+    object_id: S3ObjectId
+    results: list[StageResult]
+    index: int
+
+
 def process_one_message(
     message: SqsMessage,
     *,
@@ -963,14 +1165,33 @@ def process_one_message(
     processor: MessageProcessor,
 ) -> MessageResult:
     states: list[RunState] = []
-    successes: list[tuple[uuid.UUID, int, list[StageResult], int]] = []
+    successes: list[_SourceSucceeded] = []
+
+    def fail(
+        run_id: uuid.UUID,
+        attempt: int,
+        object_id: S3ObjectId,
+        results: Sequence[StageResult],
+        error: Exception,
+    ) -> RunState:
+        return _settle_failure(
+            engine,
+            run_id,
+            attempt,
+            object_id,
+            results,
+            error,
+            delivery_attempt=message.attempt,
+            sns=sns,
+        )
+
     parsed = _object_ids(message)
     boundary_events = [e for e in parsed.object_ids if _input_kind(e) == "boundary"]
     source_events = [e for e in parsed.object_ids if _input_kind(e) == "source"]
 
     # Boundary records first, as one release, so Source records in the same
     # message are enriched against the newest geography.
-    boundary_batch: list[tuple[uuid.UUID, int, S3ObjectId, bytes, int]] = []
+    boundary_batch: list[_PendingBoundary] = []
     for event in boundary_events:
         claimed = _claim(engine, s3, event, states)
         if claimed is None:
@@ -979,34 +1200,45 @@ def process_one_message(
         try:
             body = s3.read_version(object_id)
         except Exception as error:
-            _record_retryable(engine, run_id, error)
-            states.append(RunState.RETRYABLE)
+            states.append(fail(run_id, attempt, object_id, (), error))
             continue
-        boundary_batch.append((run_id, attempt, object_id, body, len(states)))
+        boundary_batch.append(
+            _PendingBoundary(run_id, attempt, object_id, body, len(states))
+        )
         states.append(RunState.RUNNING)
     if boundary_batch:
         try:
             shared = list(
                 processor.process_boundaries(
-                    [(object_id, body) for _, _, object_id, body, _ in boundary_batch]
+                    [(pending.object_id, pending.body) for pending in boundary_batch]
                 )
             )
         except SourceSnapshotError as error:
-            for run_id, attempt, object_id, _, index in boundary_batch:
-                own = _results_for(object_id, error.results)
-                _record_stage_results(engine, run_id, attempt, own)
-                _record_retryable(engine, run_id, error, _failing_stage_of(own))
-                states[index] = RunState.RETRYABLE
-        except Exception as error:
-            for run_id, _, _, _, index in boundary_batch:
-                _record_retryable(engine, run_id, error)
-                states[index] = RunState.RETRYABLE
-        else:
-            for run_id, attempt, object_id, _, index in boundary_batch:
-                successes.append(
-                    (run_id, attempt, _results_for(object_id, shared), index)
+            for pending in boundary_batch:
+                states[pending.index] = fail(
+                    pending.run_id,
+                    pending.attempt,
+                    pending.object_id,
+                    _results_for(pending.object_id, error.results),
+                    error,
                 )
-                states[index] = RunState.SUCCEEDED
+        except Exception as error:
+            for pending in boundary_batch:
+                states[pending.index] = fail(
+                    pending.run_id, pending.attempt, pending.object_id, (), error
+                )
+        else:
+            for pending in boundary_batch:
+                successes.append(
+                    _SourceSucceeded(
+                        pending.run_id,
+                        pending.attempt,
+                        pending.object_id,
+                        _results_for(pending.object_id, shared),
+                        pending.index,
+                    )
+                )
+                states[pending.index] = RunState.SUCCEEDED
 
     for event in source_events:
         claimed = _claim(engine, s3, event, states)
@@ -1016,15 +1248,16 @@ def process_one_message(
         try:
             body = s3.read_version(object_id)
             results = list(processor.process(object_id, body))
-            successes.append((run_id, attempt, results, len(states)))
+            successes.append(
+                _SourceSucceeded(run_id, attempt, object_id, results, len(states))
+            )
             states.append(RunState.SUCCEEDED)
         except SourceSnapshotError as error:
-            _record_stage_results(engine, run_id, attempt, error.results)
-            _record_retryable(engine, run_id, error, _failing_stage_of(error.results))
-            states.append(RunState.RETRYABLE)
+            states.append(
+                fail(run_id, attempt, object_id, error.results, error)
+            )
         except Exception as error:
-            _record_retryable(engine, run_id, error)
-            states.append(RunState.RETRYABLE)
+            states.append(fail(run_id, attempt, object_id, (), error))
 
     if successes:
         try:
@@ -1034,16 +1267,21 @@ def process_one_message(
             # no record in it complete: every successful source run in the
             # message is downgraded to retryable and carries the marts failure,
             # rather than only the last one being marked incomplete.
-            for run_id, attempt, results, index in successes:
-                _record_stage_results(
-                    engine, run_id, attempt, (*results, *error.results)
+            for success in successes:
+                states[success.index] = fail(
+                    success.run_id,
+                    success.attempt,
+                    success.object_id,
+                    (*success.results, *error.results),
+                    error,
                 )
-                _record_retryable(engine, run_id, error, _failing_stage_of(error.results))
-                states[index] = RunState.RETRYABLE
         else:
-            for run_id, attempt, results, _ in successes:
+            for success in successes:
                 _record_success(
-                    engine, run_id, attempt, (*results, *marts_results)
+                    engine,
+                    success.run_id,
+                    success.attempt,
+                    (*success.results, *marts_results),
                 )
 
     acknowledged = parsed.acknowledgable and all(
@@ -1053,6 +1291,65 @@ def process_one_message(
     if acknowledged:
         sqs.delete_message(message.receipt_handle)
     return MessageResult(acknowledged=acknowledged, states=tuple(states))
+
+
+class _VisibilityHeartbeat:
+    """Keep a received message invisible to other workers while it is worked on.
+
+    The queue hands the message to one worker for the length of its visibility
+    timeout. A message can take much longer than that — a Boundary release
+    re-enriches the whole country — so the worker refreshes the timeout to the
+    SQS maximum on a heartbeat for as long as it holds the message. A crashed
+    worker stops heartbeating, and the message becomes visible again by itself.
+    """
+
+    def __init__(self, sqs: SQSAdapter, receipt_handle: str):
+        self.sqs = sqs
+        self.receipt_handle = receipt_handle
+        self.interval = VISIBILITY_HEARTBEAT_SECONDS
+        self._stop = threading.Event()
+
+    def __enter__(self) -> _VisibilityHeartbeat:
+        self._beat()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exception) -> None:
+        self._stop.set()
+        self._thread.join(timeout=self.interval)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            self._beat()
+
+    def _beat(self) -> None:
+        try:
+            self.sqs.change_message_visibility(
+                self.receipt_handle, VISIBILITY_TIMEOUT_SECONDS
+            )
+        except Exception:
+            # Losing one heartbeat is not fatal: the message is still invisible
+            # for the timeout that was last set, and the work is not lost — a
+            # redelivery resumes the runs that were left open.
+            log.exception("Could not extend the visibility of the message")
+
+
+def _release_visibility(sqs: SQSAdapter, receipt_handle: str) -> None:
+    """Make the message visible again now, instead of after the granted timeout.
+
+    The heartbeat hands the queue six hours, which is what protects work in
+    progress. Once the work is over that has to be undone: SQS applies its
+    redrive policy when a message becomes visible, so a message that is left
+    unacknowledged has to be returned promptly for the retry — or the move to the
+    DLQ — to happen at all.
+    """
+    try:
+        sqs.change_message_visibility(receipt_handle, 0)
+    except Exception:
+        # The message is still safe: it becomes visible when the timeout the
+        # heartbeat last set lapses, just later than it should.
+        log.exception("Could not return the message to the queue for redelivery")
 
 
 def run_worker(
@@ -1080,14 +1377,23 @@ def run_worker(
             if message is None:
                 idle_sleep(IDLE_POLL_SECONDS)
                 continue
-            result = process_one_message(
-                message,
-                engine=engine,
-                s3=s3,
-                sqs=sqs,
-                sns=sns,
-                processor=processor,
-            )
+            acknowledged = False
+            with _VisibilityHeartbeat(sqs, message.receipt_handle):
+                try:
+                    result = process_one_message(
+                        message,
+                        engine=engine,
+                        s3=s3,
+                        sqs=sqs,
+                        sns=sns,
+                        processor=processor,
+                    )
+                    acknowledged = result.acknowledged
+                finally:
+                    if not acknowledged:
+                        # A crash or a retryable failure must not park the
+                        # message behind the six hours the heartbeat granted.
+                        _release_visibility(sqs, message.receipt_handle)
         except Exception:
             # The message was not acknowledged, so SQS redelivers it. One
             # message that cannot be processed must not take the worker down:

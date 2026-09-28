@@ -61,8 +61,21 @@ def transform_sources(*sources: str) -> TransformReport:
     """
     if not sources or "all" in sources:
         sources = SOURCE_NAMES
-    reports = [_transform_source(s) for s in sources]
+    reports = [_reported(s) for s in sources]
     return _merge_transform_reports(sources, reports)
+
+
+def _reported(source: str) -> TransformReport:
+    """Transform one source for the report API, which reports rather than rejects.
+
+    The event path treats a file that fails its own validation as a rejected
+    object version; this path is a hand-run over the latest raw version, so the
+    verdict belongs in the report the operator is reading.
+    """
+    try:
+        return _transform_source(source)
+    except SourceValidationError as error:
+        return TransformReport(source=source, errors=[f"Transform failed: {error}"])
 
 
 def transform_source_snapshot(
@@ -212,6 +225,13 @@ def _transform_source(
             report.errors.extend(membership_errors)
         log.info("Verification done, time %.3fs", time.perf_counter() - t)
 
+    except SourceValidationError:
+        # The version is rejected rather than retried (issue #7), so the caller
+        # has to be able to see the verdict; what was staged for it is still not
+        # verified and is thrown away.
+        if ingestion_run_id is not None:
+            _discard_unverified_staging(engine, source)
+        raise
     except Exception as e:
         report.errors.append(f"Transform failed: {e}")
         log.exception("Transform failed for %s", source)

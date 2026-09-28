@@ -178,7 +178,7 @@ Not part of the datalake; deliberately separate (ADR 0007).
 | `loaded_files` | append-only, no unique constraint | extract | load signature `(filename, filesize, modified_at)`; a re-extract is skipped unless `-f` |
 | `boundaries` | non-versioned, `level` 0-3 | extract (bootstrap) / boundaries release | `country_iso`, `name`, `level`, `area` km², `geometry` multipolygon, `geojson` (pre-simplified for the app) |
 | `ingestion_runs` | `run_id`; unique `(bucket, object_key, object_version_id)` | ingestion | one processing lifecycle: `input_kind` (`source`\|`boundary`), `state` (pending, running, succeeded, retryable, terminal, stale), `attempt_count`, `object_last_modified` |
-| `stage_results` | unique `(run_id, attempt, target, stage)` | ingestion | per-stage outcome, `row_count`, `error`, `details` jsonb, for stages extract / transform / load / marts / bootstrap |
+| `stage_results` | unique `(run_id, attempt, target, stage)` | ingestion | per-stage outcome, `row_count`, `error`, `details` jsonb, for stages processing / extract / transform / load / marts / bootstrap |
 | `source_memberships` | `(run_id, unit_key)` | ingestion | which units a snapshot carried, bad-quality ones included — lineage, **not** an active flag |
 
 ```mermaid
@@ -365,20 +365,26 @@ flowchart TB
     DLQ --> ALARM["CloudWatch alarm"]
     ALARM --> NOTIFY["SNS → email"]
     Q --> POLL["worker receives one message<br/>= the ingestion unit"]
+    POLL --> VIS["visibility extended to 6h,<br/>re-extended every minute"]
     POLL --> RUN["resolve the served version<br/>(head_object)"]
     RUN -->|"older than a succeeded run"| STALE["stale → settled, not retried"]
     RUN --> READ["GetObject(version_id) → /tmp, deleted after"]
     READ --> LEDGER["service.ingestion_runs"]
     POLL --> DEL["DeleteMessage when every record<br/>is succeeded / terminal / stale"]
+    READ -->|"content validation fails"| REJ["terminal → one SNS alert:<br/>upload a new version"]
+    READ -->|"infrastructure fails,<br/>5th delivery"| EXH["retryable + exhausted →<br/>visibility 0, redrive to the DLQ"]
+    REJ --> NOTIFY
     NOTIFY -.-> LOGS["CloudWatch Logs"]
     POLL -.-> LOGS
 ```
 
 The event wiring above is *designed* (AWS.md §2): the S3 notification, the SQS
-forwarding, the DLQ and the alarm live in the account, not in this repo. What runs
-today is `process_one_message` for one delivered message and the CLI pass; the
-receive loop, the redrive and the alert are listed in
-[§6](#6-planned-not-yet-built).
+forwarding, the redrive policy and the DLQ alarm live in the account, not in this
+repo. What runs today is the receive loop — `ingestion.run_worker` polls with
+long polling and hands each message to `process_one_message` alone — plus the CLI
+pass. A rejected object version is announced by the worker; a message that runs out of
+deliveries is announced by the DLQ alarm, so each problem is alerted once
+([§6](#6-planned-not-yet-built) lists what the account still owes).
 
 The bucket key is the contract: `sources/<source>.gpkg` and
 `boundaries/level-<n>.gpkg` are the only accepted keys, and the key alone
@@ -390,13 +396,24 @@ redelivery be recognised: an object whose `LastModified` is older than a
 succeeded run settles as `stale` instead of being re-processed, and a version
 already in `loaded_files` is not extracted twice.
 
+The same immutability decides the retry contract. A *rejected object version* —
+one that fails its own content validation, in the inspect step or in the
+transform that follows it — will fail identically on every delivery, so its run
+is `terminal` and it is alerted once. A database, S3 or marts failure is a
+property of the moment, so the run stays `retryable` and the delivery is repeated
+until SQS's `maxReceiveCount = 5` moves the message to the DLQ. The worker's
+attempt number is SQS's `ApproximateReceiveCount`, so a crashed worker's message
+is counted, not restarted for free. A message the worker keeps is handed straight
+back to the queue when the work is over, so the redrive happens then and not six
+hours later.
+
 ### 4.2 IAM and observability
 
 The worker's EC2 role needs `s3:GetObject`, `sqs:ReceiveMessage`,
 `DeleteMessage`, `ChangeMessageVisibility`, `GetQueueAttributes`,
 `sns:Publish`, and `logs:CreateLogStream` / `logs:PutLogEvents` (`AWS.md` §5, §3).
-Errors publish an SNS alert; a CloudWatch alarm on the DLQ pages the same topic
-(§4).
+A rejected object version publishes an SNS alert; a message that runs out of deliveries is
+dead-lettered and a CloudWatch alarm on the DLQ pages the same topic (§4).
 
 ### 4.3 Container stack
 
@@ -461,14 +478,14 @@ picture:
 
 From `AWS.md` and the parent issue #1, so this picture is not read as done:
 
-- **The polling loop.** `ingestion.process_one_message` is the whole message
-  unit, and `S3Adapter` is a real boto3 client, but nothing in the repo receives
-  from SQS yet — a long-running receive loop is still to be written.
-- **Failure routing.** `SNSAdapter.publish` and the SQS visibility/timeout calls
-  are Protocols with no implementation; the DLQ redrive and the alert on a
-  terminal run are a later slice (issue #7).
+- **The account-side event wiring.** The worker receives, retries, rejects,
+  alerts and dead-letters correctly, but the S3 notification forwarding to SQS,
+  the queue's `maxReceiveCount = 5` redrive policy and the DLQ CloudWatch alarm
+  are AWS-side configuration (Terraform, issue #10). Until they exist, a message
+  is retried by the queue's own visibility timeout and an exhausted message is
+  only visible in the logs.
 - **Terraform** (`AWS.md` §6) and the admin/API surfaces in the spec's Serving
   section do not exist.
-- **The CLI boundary path.** `python -m etl boundaries` loads a level but does not
-  run the release + geography rebuild that the event path performs (issue #5);
-  bootstrap enqueueing of boundary objects is issue #8.
+- **Operator startup.** The worker has no Compose service or documented
+  `docker compose` path yet (issue #8): `python -m etl worker` is the only way to
+  run it, and bootstrap enqueueing of boundary objects is part of that slice.
