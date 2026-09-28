@@ -49,6 +49,7 @@
       "shasum *": "allow",
       "which *": "allow",
       "source *": "allow",
+      "printenv*": "allow",
       "python *": "allow",
       "python3 *": "allow",
       "pytest *": "allow",
