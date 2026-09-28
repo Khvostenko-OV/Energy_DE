@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from sqlalchemy import text
 
 from etl.config import SOURCE_NAMES
 from etl.transform import transform_sources
@@ -262,3 +263,23 @@ def _staged_sources(_boundary_fixtures):
     for source in SOURCE_NAMES:
         report = transform_sources(source)
         assert report.passed, report.errors
+
+
+def drop_core_tables(engine) -> None:
+    """Drop both Core kinds and their per-kind property tables.
+
+    Shared by the integration modules that load Core from the fixtures
+    (`tests/test_marts.py`, `tests/test_viz_timescope.py`), so the drop list
+    lives in one place.  Dropping a Core table cascades to the marts that
+    read it, which is why the marts are dropped first in those modules.
+    """
+    from etl.config import CORE_SCHEMA
+
+    with engine.begin() as conn:
+        for table, links, props in (
+            ("generators", "generator_units_properties", "generator_properties"),
+            ("storages", "storage_units_properties", "storage_properties"),
+        ):
+            for name in (links, props):
+                conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.{name} CASCADE"))
+            conn.execute(text(f"DROP TABLE IF EXISTS {CORE_SCHEMA}.{table} CASCADE"))
