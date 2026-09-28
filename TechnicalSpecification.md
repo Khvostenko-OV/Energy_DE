@@ -40,6 +40,12 @@ by source type (Bio, Water, Solar, Wind, Gas), by date of commissioning
 - Save to PostGIS datalake. Table names should contain source type, date of load, number of load
 #### Load administrative and maritime boundaries
 - Load .gpkg files with boundaries into the non-versioned `service.boundaries` table (see Data layers — Service)
+#### Boundary release (event-driven, issue #5)
+- A Boundary object is published at its fixed key `boundaries/level-<n>.gpkg`. Before any write it must have exactly one layer, the columns `name`, `iso`, `level`, rows whose `level` all equal the key's level, non-null names, and valid non-null Polygon/MultiPolygon geometry in EPSG:4326; level 0 holds exactly one country outline
+- All Boundary objects of one message form one release, applied before its Source records. One invalid level rejects the whole release
+- In one transaction: delete only the published levels' rows, insert the new rows, recompute their area and viz GeoJSON, verify the whole layer (levels 0–3 present, one level-0 row, positive area, valid geometry), and write each object version to `loaded_files`. Any failure rolls back, so no partial release is ever visible. A release whose object versions are all in `loaded_files` is not applied again
+- Then rebuild geography once: re-enrich every staging Source and every Core unit of both kinds (including retained historical units) from its own geometry, recompute the state-dependent collisions, and refresh and verify the three marts
+- Spatial-join tie-break: a point on a shared border takes the alphabetically first polygon name, in both the transform and the rebuild
 ### 2. Transform
 - Input: list of tables to be transformed
 - Add primary keys

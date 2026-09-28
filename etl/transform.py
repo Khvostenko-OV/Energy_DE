@@ -7,6 +7,7 @@ import time
 import geopandas as gpd
 import numpy
 import pandas
+from psycopg2.extras import execute_values
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
@@ -138,14 +139,9 @@ def _transform_source(
 
         log.info("Spatial join against boundary levels 1/2/3...")
         t = time.perf_counter()
-        for level, col in BOUNDARY_LEVEL_COLUMNS.items():
-            layer = boundaries[boundaries["level"] == level][["name", "geometry"]]
-            joined = (
-                df[["unit_id", "geometry"]]
-                .sjoin(layer, how="left", predicate="intersects")
-                .drop_duplicates(subset="unit_id", keep="first")
-            )
-            df[col] = df["unit_id"].map(joined.set_index("unit_id")["name"])
+        geography = enrich_geography(df, boundaries)
+        for col in BOUNDARY_LEVEL_COLUMNS.values():
+            df[col] = geography[col]
             report.join_unmapped[col] = int(df[col].isna().sum())
         log.info(
             "Join coverage %s, time %.3fs",
@@ -232,6 +228,87 @@ def _transform_source(
     log.info("Total time: %.3fs", report.total_time)
 
     return report
+
+
+def enrich_geography(
+    points: gpd.GeoDataFrame, boundaries: gpd.GeoDataFrame
+) -> pandas.DataFrame:
+    """Derive state, region and district for every point from the boundary layer.
+
+    The single definition of administrative geography, shared by the transform
+    and by the rebuild after a Boundary release so the two cannot drift. A
+    point takes the name of the level-1/2/3 polygon it intersects; one on a
+    shared border takes the alphabetically first name, so the result is
+    deterministic; one outside every polygon of a level gets null.
+    """
+    frame = gpd.GeoDataFrame(
+        {"_row": range(len(points))}, geometry=points.geometry.values, crs=points.crs
+    )
+    result = pandas.DataFrame(index=points.index)
+    for level, column in BOUNDARY_LEVEL_COLUMNS.items():
+        layer = boundaries.loc[boundaries["level"] == level, ["name", "geometry"]]
+        joined = frame.sjoin(layer, how="left", predicate="intersects")
+        names = joined.groupby("_row")["name"].min()
+        result[column] = pandas.Series(
+            names.reindex(range(len(points))).to_numpy(), index=points.index, dtype=object
+        ).where(lambda values: values.notna(), None)
+    return result
+
+
+def reenrich_staging(
+    engine: Engine, source: str, boundaries: gpd.GeoDataFrame
+) -> tuple[int, list[str]]:
+    """Rederive a Source's staging geography in place after a Boundary release.
+
+    Only state, region and district change: identity, quality and properties
+    do not depend on boundaries. Returns (rows updated, verification errors).
+    """
+    staged = gpd.read_postgis(
+        f"SELECT unit_id, geometry FROM {STAGING_SCHEMA}.{source}",
+        engine,
+        geom_col="geometry",
+    )
+    geography = enrich_geography(staged, boundaries)
+    records = list(
+        zip(
+            staged["unit_id"],
+            geography["state"],
+            geography["region"],
+            geography["district"],
+        )
+    )
+    with engine.begin() as connection:
+        if records:
+            execute_values(
+                connection.connection.cursor(),
+                f"UPDATE {STAGING_SCHEMA}.{source} s "
+                "SET state = v.state, region = v.region, district = v.district "
+                "FROM (VALUES %s) AS v(unit_id, state, region, district) "
+                "WHERE s.unit_id = v.unit_id",
+                records,
+                template="(%s, %s::text, %s::text, %s::text)",
+                page_size=2000,
+            )
+    stored = pandas.read_sql(
+        text(f"SELECT unit_id, state, region, district FROM {STAGING_SCHEMA}.{source}"),
+        engine,
+    ).set_index("unit_id")
+    expected = geography.set_index(staged["unit_id"])
+    errors = []
+    mismatched = [
+        unit_id
+        for unit_id, row in expected.iterrows()
+        if tuple(_none(v) for v in stored.loc[unit_id]) != tuple(_none(v) for v in row)
+    ]
+    if mismatched:
+        errors.append(
+            f"Staging geography of {source} not rebuilt for {len(mismatched)} units"
+        )
+    return len(records), errors
+
+
+def _none(value):
+    return None if value is None or pandas.isna(value) else value
 
 
 def _discard_unverified_staging(engine: Engine | None, source: str) -> None:

@@ -76,8 +76,12 @@ A generated staging unit_id for units lacking a Reference ID (39 solar rows), de
 The single level-coded `service.boundaries` table of administrative and maritime polygons (0 country outline, 1 states + EEZ, 2 regions, 3 districts) used to assign each unit its state, region, and district by spatial join.
 
 **Boundary release**:
-A new published version of the polygons at one boundary level. It replaces every polygon at that level and requires every unit's administrative geography to be rederived.
+A new published version of the polygons at one boundary level. It replaces every polygon at that level and requires every unit's administrative geography to be rederived. Levels published in one message are applied together as one atomic batch, followed by a single geography rebuild of staging, Core, and the marts.
 _Avoid_: Partial boundaries, full boundary rebuild
+
+**Geography rebuild**:
+The single pass that rederives every unit's state, region, and district after a Boundary release: re-enrich each Source's staging table, then every Core unit of both kinds from its own geometry, then the state-dependent collisions and the marts. It runs once per release batch, whatever the number of levels it carried.
+_Avoid_: Enriching only the changed level, rebuilding from staging
 
 **State**:
 A Bundesland (federal state) or, for offshore units, the sea/EEZ area they fall in. A unit that joins to no boundary row keeps a null state, is flagged `collision`, and is reported under the "outside" bucket in the marts.

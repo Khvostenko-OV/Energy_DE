@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
+import geopandas as gpd
 import pandas
 from psycopg2.extras import execute_values
 from sqlalchemy import text
@@ -38,6 +39,7 @@ from etl.db_utils import (
 )
 from etl.reports import LoadReport
 from etl.source_data import synthetic_identity
+from etl.transform import enrich_geography
 from etl.verify import (
     _verify_load_generators,
     _verify_load_storages,
@@ -393,6 +395,81 @@ def _load(
         )
     log.info("Total time: %.3fs", report.total_time)
     return report
+
+
+# ------------------------------------------------------------------ #
+#  Geography rebuild after a Boundary release (issue #5)               #
+# ------------------------------------------------------------------ #
+
+
+@dataclass(frozen=True)
+class GeographyRebuild:
+    rows_updated: int
+    collisions: int
+    errors: tuple[str, ...]
+
+
+def rebuild_core_geography(
+    engine: Engine, kind: _CoreKind, boundaries
+) -> GeographyRebuild:
+    """Rederive state, region and district for every Core unit of a kind.
+
+    Every Core row is rebuilt from its own geometry, so units retained from
+    earlier snapshots are re-enriched too, not just those still in staging.
+    Outside-location and onshore-in-sea collisions depend on the state, so the
+    kind's collision annotation is then refreshed from scratch.
+    """
+    units = gpd.read_postgis(
+        f"SELECT unit_id, geometry FROM {CORE_SCHEMA}.{kind.core_table}",
+        engine,
+        geom_col="geometry",
+    )
+    geography = enrich_geography(units, boundaries)
+    records = [
+        (int(unit_id), state, region, district)
+        for unit_id, state, region, district in zip(
+            units["unit_id"],
+            geography["state"],
+            geography["region"],
+            geography["district"],
+        )
+    ]
+    with engine.begin() as conn:
+        if records:
+            execute_values(
+                conn.connection.cursor(),
+                f"UPDATE {CORE_SCHEMA}.{kind.core_table} c "
+                "SET state = v.state, region = v.region, district = v.district "
+                "FROM (VALUES %s) AS v(unit_id, state, region, district) "
+                "WHERE c.unit_id = v.unit_id",
+                records,
+                template="(%s::bigint, %s::text, %s::text, %s::text)",
+                page_size=2000,
+            )
+
+    _reset_collision_annotation(engine, affected_ids=None, kind=kind)
+    collision_df, close_units = _detect_collisions(engine, kind=kind, affected_ids=None)
+    _write_collision_links(engine, collision_df, close_units, kind=kind)
+
+    with engine.connect() as conn:
+        stored = {
+            int(unit_id): (state, region, district)
+            for unit_id, state, region, district in conn.execute(
+                text(
+                    f"SELECT unit_id, state, region, district "
+                    f"FROM {CORE_SCHEMA}.{kind.core_table}"
+                )
+            )
+        }
+    mismatched = [
+        unit_id for unit_id, *geo in records if stored.get(unit_id) != tuple(geo)
+    ]
+    errors = (
+        (f"Core geography of {kind.core_table} not rebuilt for {len(mismatched)} units",)
+        if mismatched
+        else ()
+    )
+    return GeographyRebuild(len(records), len(collision_df), errors)
 
 
 # ------------------------------------------------------------------ #

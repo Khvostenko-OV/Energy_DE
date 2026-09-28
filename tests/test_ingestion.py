@@ -12,7 +12,7 @@ import pytest
 from shapely.geometry import Point, box
 from sqlalchemy import create_engine, text
 
-from etl import db_utils, extract, ingestion, load, marts, transform, utils, verify
+from etl import boundaries, db_utils, extract, ingestion, load, marts, transform, utils, verify
 from etl.config import SOURCE_NAMES, STAGING_GENERATOR_SOURCES
 import etl.__main__ as cli_module
 from etl.__main__ import cli
@@ -616,6 +616,7 @@ def source_pipeline(tmp_path, monkeypatch):
     }
     module_schemas = {
         ingestion: ("SERVICE_SCHEMA",),
+        boundaries: ("SERVICE_SCHEMA", "STAGING_SCHEMA", "CORE_SCHEMA"),
         extract: ("RAW_SCHEMA", "SERVICE_SCHEMA"),
         transform: ("RAW_SCHEMA", "STAGING_SCHEMA", "SERVICE_SCHEMA"),
         load: ("STAGING_SCHEMA", "CORE_SCHEMA", "SERVICE_SCHEMA"),
@@ -645,7 +646,7 @@ def source_pipeline(tmp_path, monkeypatch):
         s3=s3,
     )
 
-    boundaries = gpd.GeoDataFrame(
+    test_layer = gpd.GeoDataFrame(
         {
             "country_iso": ["DEU", "DEU", "DEU"],
             "name": ["Test State", "Test Region", "Test District"],
@@ -655,7 +656,7 @@ def source_pipeline(tmp_path, monkeypatch):
         },
         crs="EPSG:4326",
     )
-    boundaries.to_postgis(
+    test_layer.to_postgis(
         "boundaries",
         ENGINE,
         schema=schemas["service"],
@@ -667,7 +668,7 @@ def source_pipeline(tmp_path, monkeypatch):
         "schemas": schemas,
         "s3": s3,
         "sqs": FakeSQS(),
-        "processor": ingestion.SourceSnapshotProcessor(ENGINE, s3=s3),
+        "processor": ingestion.PipelineProcessor(ENGINE, s3=s3),
     }
     with ENGINE.begin() as connection:
         for schema in reversed(tuple(schemas.values())):
@@ -1700,7 +1701,7 @@ def _records_message(handle, records):
     )
 
 
-class CountingProcessor(ingestion.SourceSnapshotProcessor):
+class CountingProcessor(ingestion.PipelineProcessor):
     """The real processor, counting how often the shared marts refresh runs."""
 
     def __init__(self, engine, *, s3):
@@ -2368,3 +2369,379 @@ def test_worker_never_loads_a_failed_sources_staging_through_another_source(
     assert _core_units(schemas, "gas") == verified_gas
     assert _core_units(schemas, "wind")
     assert marts.verify_marts(ENGINE) == []
+
+
+# ------------------------------------------------------------------ #
+#  Boundary releases (issue #5)                                        #
+# ------------------------------------------------------------------ #
+
+_BOUNDARY_FIXTURES = {
+    0: "germany_boundary",
+    1: "germany_states",
+    2: "germany_regions",
+    3: "germany_districts",
+}
+
+
+def _boundary_frame(level):
+    return gpd.read_file(
+        os.path.join(FIXTURE_DIR, "boundaries", f"{_BOUNDARY_FIXTURES[level]}.gpkg")
+    )
+
+
+def _keys_message(handle, records):
+    """One SQS message with one S3 record per (key, version) pair."""
+    return ingestion.SqsMessage(
+        receipt_handle=handle,
+        body=json.dumps(
+            {
+                "Records": [
+                    {
+                        "eventSource": "aws:s3",
+                        "s3": {
+                            "bucket": {"name": "energy-data"},
+                            "object": {"key": key, "versionId": version_id},
+                        },
+                    }
+                    for key, version_id in records
+                ]
+            }
+        ),
+    )
+
+
+def _boundary_snapshot(schemas):
+    """Every boundary row as (level, name) -> (geometry hash, area, has geojson)."""
+    return {
+        (row["level"], row["name"]): (row["shape"], row["area"], row["geojson"])
+        for row in _query(
+            f"SELECT level, name, md5(ST_AsEWKB(geometry)) AS shape, area, "
+            f"geojson IS NOT NULL AS geojson FROM {schemas['service']}.boundaries"
+        )
+    }
+
+
+def _geography(schemas, table_schema, table, source=None):
+    """(energy_source, reference_id or coordinates) -> (state, region, district)."""
+    x, y = ("x_coordinates", "y_coordinates") if table_schema == "stage" else (
+        "longitude",
+        "latitude",
+    )
+    where = "WHERE energy_source = :source" if source else ""
+    return {
+        (row["energy_source"], _unit_key(row["reference_id"], row["x"], row["y"])): (
+            row["state"],
+            row["region"],
+            row["district"],
+        )
+        for row in _query(
+            f"SELECT energy_source, reference_id, {x} AS x, {y} AS y, state, region, "
+            f"district FROM {schemas[table_schema]}.{table} {where}",
+            {"source": source},
+        )
+    }
+
+
+def _publish_all_sources(pipeline, tmp_path):
+    s3 = pipeline["s3"]
+    for source in SOURCE_NAMES:
+        s3.put(
+            f"sources/{source}.gpkg",
+            f"{source}-v1",
+            _frame_bytes(tmp_path, f"{source}-v1.gpkg", _fixture_frame(source)),
+        )
+    result = ingestion.process_one_message(
+        _records_message("all-sources", [(s, f"{s}-v1") for s in SOURCE_NAMES]),
+        engine=ENGINE,
+        s3=s3,
+        sqs=pipeline["sqs"],
+        sns=FakeSNS(),
+        processor=pipeline["processor"],
+    )
+    assert result.acknowledged
+
+
+def _publish_boundaries(pipeline, tmp_path, releases, handle, processor=None):
+    """Publish {level: frame} as new object versions in one message."""
+    s3 = pipeline["s3"]
+    records = []
+    for level, frame in releases.items():
+        key = f"boundaries/level-{level}.gpkg"
+        version_id = f"{handle}-level-{level}"
+        s3.put(key, version_id, _frame_bytes(tmp_path, f"{version_id}.gpkg", frame))
+        records.append((key, version_id))
+    return ingestion.process_one_message(
+        _keys_message(handle, records),
+        engine=ENGINE,
+        s3=s3,
+        sqs=pipeline["sqs"],
+        sns=FakeSNS(),
+        processor=processor or pipeline["processor"],
+    )
+
+
+def _renamed_states():
+    """Level 1 with Baden-Württemberg shrunk west of x=9.2 and Bayern renamed and grown north."""
+    states = _boundary_frame(1)
+    bw = states["name"] == "Baden-Württemberg"
+    bayern = states["name"] == "Bayern"
+    states.loc[bw, "geometry"] = box(8.0, 47.5, 9.2, 49.0)
+    states.loc[bayern, "geometry"] = box(10.0, 47.0, 13.0, 49.7)
+    states.loc[bayern, "name"] = "Freistaat Bayern"
+    return states
+
+
+def test_boundary_release_replaces_one_level_and_rebuilds_all_geography(
+    fixture_boundaries, tmp_path
+):
+    schemas = fixture_boundaries["schemas"]
+    _publish_all_sources(fixture_boundaries, tmp_path)
+    # bio-3 (in Bayern) becomes a retained historical Core unit, absent from staging.
+    bio = _fixture_frame("bio")
+    assert _deliver(
+        fixture_boundaries, tmp_path, "bio", "bio-v2", bio[bio["reference_id"] != "bio-3"]
+    ).acknowledged
+    before = _boundary_snapshot(schemas)
+    assert _geography(schemas, "core", "generators", "bio")[("bio", "bio-3")][0] == "Bayern"
+    assert "outside location" not in " ".join(
+        _collision_reasons(schemas, "bio", "bio-2")
+    )
+    assert any(
+        "outside location" in r for r in _collision_reasons(schemas, "storage", "storage-5")
+    )
+    counting = CountingProcessor(ENGINE, s3=fixture_boundaries["s3"])
+
+    result = _publish_boundaries(
+        fixture_boundaries, tmp_path, {1: _renamed_states()}, "states-v2", counting
+    )
+
+    assert result.acknowledged
+    assert result.states == (ingestion.RunState.SUCCEEDED,)
+    assert counting.finalized == 1
+
+    # Only level 1 was replaced; levels 0, 2 and 3 are byte-for-byte unchanged.
+    after = _boundary_snapshot(schemas)
+    assert {k: v for k, v in after.items() if k[0] != 1} == {
+        k: v for k, v in before.items() if k[0] != 1
+    }
+    assert {name for level, name in after if level == 1} == {
+        "Baden-Württemberg",
+        "Freistaat Bayern",
+        "North Sea",
+    }
+    assert all(area > 0 and has_geojson for _, area, has_geojson in after.values())
+    assert verify._verify_boundaries(ENGINE) == []
+
+    # Every Source's staging was re-enriched against the new release.
+    for source in SOURCE_NAMES:
+        staged = _geography(schemas, "stage", source)
+        states = {geo[0] for geo in staged.values()}
+        assert "Bayern" not in states, source
+        assert states <= {"Baden-Württemberg", "Freistaat Bayern", "North Sea", None}
+
+    # Core geography was rebuilt for every unit, historical ones included.
+    core = {
+        **_geography(schemas, "core", "generators"),
+        **_geography(schemas, "core", "storages"),
+    }
+    assert "Bayern" not in {geo[0] for geo in core.values()}
+    assert core[("bio", "bio-3")] == ("Freistaat Bayern", "München", "München (Stadt)")
+    # Units at x=9.22 fell out of the shrunk state but keep their region/district.
+    assert core[("bio", "bio-2")] == (None, "Stuttgart", "Stuttgart (Stadt)")
+    assert core[("storage", "storage-5")][0] == "Freistaat Bayern"
+    # Staging and Core agree for every unit both hold.
+    for source in SOURCE_NAMES:
+        for key, geo in _geography(schemas, "stage", source).items():
+            if key in core:
+                assert core[key] == geo, key
+
+    # State-dependent collisions were recomputed in both directions.
+    assert any("outside location" in r for r in _collision_reasons(schemas, "bio", "bio-2"))
+    assert not any(
+        "outside location" in r
+        for r in _collision_reasons(schemas, "storage", "storage-5")
+    )
+
+    # Marts were refreshed on the new geography and reconcile to Core.
+    assert marts.verify_marts(ENGINE) == []
+    mart_states = {
+        row["state"]
+        for row in _query(f"SELECT state FROM {schemas['marts']}.installation_counts")
+    }
+    assert "Freistaat Bayern" in mart_states and "Bayern" not in mart_states
+
+    # The release has an Ingestion run, stage results and a ledger entry.
+    run = _query(
+        f"SELECT run_id, input_kind, state FROM {schemas['service']}.ingestion_runs "
+        "WHERE object_key = 'boundaries/level-1.gpkg'"
+    )[0]
+    assert (run["input_kind"], run["state"]) == ("boundary", "succeeded")
+    stages = {
+        (row["stage"], row["target"])
+        for row in _query(
+            f"SELECT stage, target FROM {schemas['service']}.stage_results "
+            "WHERE run_id = :run_id",
+            {"run_id": str(run["run_id"])},
+        )
+    }
+    assert ("extract", "boundaries/level-1.gpkg") in stages
+    assert {("transform", source) for source in SOURCE_NAMES} <= stages
+    assert {("load", "generators"), ("load", "storages"), ("marts", "marts")} <= stages
+    assert _query(
+        f"SELECT loaded_to FROM {schemas['service']}.loaded_files "
+        "WHERE object_key = 'boundaries/level-1.gpkg' "
+        "AND object_version_id = 'states-v2-level-1'"
+    ) == [{"loaded_to": f"{schemas['service']}.boundaries"}]
+
+    # A redelivery of the applied release changes nothing.
+    redelivered = ingestion.process_one_message(
+        _keys_message("again", [("boundaries/level-1.gpkg", "states-v2-level-1")]),
+        engine=ENGINE,
+        s3=fixture_boundaries["s3"],
+        sqs=fixture_boundaries["sqs"],
+        sns=FakeSNS(),
+        processor=fixture_boundaries["processor"],
+    )
+    assert redelivered.acknowledged
+    assert _boundary_snapshot(schemas) == after
+
+
+def test_boundary_levels_in_one_message_apply_as_one_batch_with_one_rebuild(
+    fixture_boundaries, tmp_path, monkeypatch
+):
+    schemas = fixture_boundaries["schemas"]
+    _publish_all_sources(fixture_boundaries, tmp_path)
+    before = _boundary_snapshot(schemas)
+    rebuilds = []
+    original_rebuild = ingestion.rebuild_geography
+
+    def counting_rebuild(engine):
+        rebuilds.append(engine)
+        return original_rebuild(engine)
+
+    monkeypatch.setattr(ingestion, "rebuild_geography", counting_rebuild)
+    regions = _boundary_frame(2)
+    regions.loc[regions["name"] == "Stuttgart", "name"] = "Region Stuttgart"
+    districts = _boundary_frame(3)
+    districts.loc[districts["name"] == "München (Stadt)", "name"] = "Landeshauptstadt München"
+    counting = CountingProcessor(ENGINE, s3=fixture_boundaries["s3"])
+
+    result = _publish_boundaries(
+        fixture_boundaries, tmp_path, {2: regions, 3: districts}, "rd-v2", counting
+    )
+
+    assert result.acknowledged
+    assert result.states == (ingestion.RunState.SUCCEEDED,) * 2
+    assert len(rebuilds) == 1
+    assert counting.finalized == 1
+    after = _boundary_snapshot(schemas)
+    assert {k: v for k, v in after.items() if k[0] in (0, 1)} == {
+        k: v for k, v in before.items() if k[0] in (0, 1)
+    }
+    core = _geography(schemas, "core", "generators")
+    assert core[("bio", "bio-1")] == ("Baden-Württemberg", "Region Stuttgart", "Stuttgart (Stadt)")
+    assert core[("bio", "bio-3")] == ("Bayern", "München", "Landeshauptstadt München")
+    assert marts.verify_marts(ENGINE) == []
+
+
+def test_boundary_batch_with_an_invalid_level_changes_nothing(
+    fixture_boundaries, tmp_path
+):
+    schemas = fixture_boundaries["schemas"]
+    _publish_all_sources(fixture_boundaries, tmp_path)
+    before = _boundary_snapshot(schemas)
+    core_before = _geography(schemas, "core", "generators")
+    regions = _boundary_frame(2)
+    regions.loc[regions["name"] == "Stuttgart", "name"] = "Region Stuttgart"
+    wrong_level = _boundary_frame(3)
+    wrong_level["level"] = 2  # published at the level-3 key
+
+    result = _publish_boundaries(
+        fixture_boundaries, tmp_path, {2: regions, 3: wrong_level}, "bad-batch"
+    )
+
+    assert not result.acknowledged
+    assert result.states == (ingestion.RunState.RETRYABLE,) * 2
+    assert _boundary_snapshot(schemas) == before
+    assert _geography(schemas, "core", "generators") == core_before
+    assert _query(
+        f"SELECT 1 FROM {schemas['service']}.loaded_files "
+        "WHERE object_key LIKE 'boundaries/%'"
+    ) == []
+    failures = {
+        row["target"]: row["error"]
+        for row in _query(
+            f"SELECT target, error FROM {schemas['service']}.stage_results "
+            "WHERE outcome = 'failed'"
+        )
+    }
+    assert "expected level 3" in failures["boundaries/level-3.gpkg"]
+
+
+def test_boundary_release_that_leaves_the_layer_incomplete_is_rolled_back(
+    source_pipeline, tmp_path
+):
+    """The replacement is verified inside its transaction, so a failure leaves no trace.
+
+    The plain `source_pipeline` layer has no level 0; replacing level 1 would
+    leave it incomplete, so the delete and insert must be rolled back.
+    """
+    schemas = source_pipeline["schemas"]
+    before = _query(
+        f"SELECT level, name FROM {schemas['service']}.boundaries ORDER BY level, name"
+    )
+
+    result = _publish_boundaries(source_pipeline, tmp_path, {1: _renamed_states()}, "partial")
+
+    assert result.states == (ingestion.RunState.RETRYABLE,)
+    assert (
+        _query(
+            f"SELECT level, name FROM {schemas['service']}.boundaries ORDER BY level, name"
+        )
+        == before
+    )
+    error = _query(
+        f"SELECT error FROM {schemas['service']}.stage_results WHERE outcome = 'failed'"
+    )[0]["error"]
+    assert "missing level 0" in error
+
+
+def test_a_failed_geography_rebuild_fails_the_boundary_release(
+    fixture_boundaries, tmp_path, monkeypatch
+):
+    """A rebuild that cannot re-enrich a Source fails the release.
+
+    The Boundary rows are already replaced when the rebuild runs, so a silently
+    skipped staging source would acknowledge a release whose units still carry
+    the old geography.
+    """
+    schemas = fixture_boundaries["schemas"]
+    _publish_all_sources(fixture_boundaries, tmp_path)
+
+    def broken(engine, source, boundaries):
+        raise RuntimeError("staging table is locked")
+
+    real_reenrich = boundaries.reenrich_staging
+    monkeypatch.setattr(boundaries, "reenrich_staging", broken)
+
+    result = _publish_boundaries(fixture_boundaries, tmp_path, {1: _renamed_states()}, "broken")
+
+    assert result.states == (ingestion.RunState.RETRYABLE,)
+    assert "staging table is locked" in (
+        _query(
+            f"SELECT error FROM {schemas['service']}.stage_results WHERE outcome = 'failed'"
+        )[0]["error"]
+    )
+
+    # Redelivery: the release itself is already applied, so only the geography
+    # is redone — the release is not applied a second time.
+    monkeypatch.setattr(boundaries, "reenrich_staging", real_reenrich)
+    redelivered = _publish_boundaries(
+        fixture_boundaries, tmp_path, {1: _renamed_states()}, "broken"
+    )
+
+    assert redelivered.acknowledged
+    assert redelivered.states == (ingestion.RunState.SUCCEEDED,)
+    assert "Freistaat Bayern" in {
+        state for state, _, _ in _geography(schemas, "core", "generators", "bio").values()
+    }

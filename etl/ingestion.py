@@ -15,6 +15,15 @@ from urllib.parse import unquote_plus
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from etl.boundaries import (
+    BoundaryObject,
+    BoundaryReplacementError,
+    BoundaryValidationError,
+    GeographyReport,
+    inspect_boundary_gpkg,
+    rebuild_geography,
+    replace_boundary_levels,
+)
 from etl.config import SERVICE_SCHEMA, SOURCE_NAMES
 from etl.db_utils import _create_log_table, _ensure_schema
 from etl.extract import extract_source_snapshot
@@ -130,6 +139,10 @@ class MessageProcessor(Protocol):
         self, object_id: S3ObjectId, body: bytes
     ) -> Sequence[StageResult]: ...
 
+    def process_boundaries(
+        self, objects: Sequence[tuple[S3ObjectId, bytes]]
+    ) -> Sequence[StageResult]: ...
+
     def finalize(self) -> Sequence[StageResult]: ...
 
 
@@ -160,7 +173,9 @@ class Boto3S3Adapter:
         return response["Body"].read()
 
 
-class SourceSnapshotProcessor:
+class PipelineProcessor:
+    """The production processor: Source snapshots, Boundary releases, marts."""
+
     def __init__(self, engine: Engine, *, s3: S3Adapter):
         self.engine = engine
         self.s3 = s3
@@ -260,6 +275,115 @@ class SourceSnapshotProcessor:
 
         return tuple(results)
 
+    def process_boundaries(
+        self, objects: Sequence[tuple[S3ObjectId, bytes]]
+    ) -> Sequence[StageResult]:
+        """Apply the Boundary objects of one message as one release (issue #5).
+
+        Every level is validated before anything is written; one invalid level
+        rejects the whole batch. The levels are then replaced in a single
+        transaction and the geography of every staging Source and Core unit is
+        rebuilt once. Each object gets its own `extract` result; the rebuild
+        results are shared by the batch.
+
+        The rebuild runs even when the release was already applied, which is
+        what makes a redelivery of a message whose rebuild failed safe: the
+        replacement is skipped, the geography is redone.
+        """
+        validated: list[BoundaryObject] = []
+        failures: dict[str, str] = {}
+        for object_id, body in objects:
+            try:
+                release = _inspect_boundary(object_id, body)
+            except BoundaryValidationError as error:
+                failures[object_id.key] = str(error)
+                continue
+            validated.append(
+                BoundaryObject(
+                    release=release,
+                    bucket=object_id.bucket,
+                    object_key=object_id.key,
+                    object_version_id=object_id.version_id,
+                    ingestion_run_id=self._run_id(object_id),
+                )
+            )
+        if failures:
+            rejected = ", ".join(sorted(failures))
+            raise SourceSnapshotError(
+                [
+                    StageResult(
+                        target=object_id.key,
+                        stage="extract",
+                        outcome="failed",
+                        error=failures.get(
+                            object_id.key,
+                            f"not applied: Boundary batch rejected by {rejected}",
+                        ),
+                    )
+                    for object_id, _ in objects
+                ],
+                f"extract failed: Boundary batch rejected by {rejected}",
+            )
+
+        try:
+            replaced = replace_boundary_levels(self.engine, validated)
+        except BoundaryReplacementError as error:
+            raise SourceSnapshotError(
+                [
+                    StageResult(
+                        target=obj.object_key,
+                        stage="extract",
+                        outcome="failed",
+                        error=str(error),
+                    )
+                    for obj in validated
+                ],
+                f"extract failed: {error}",
+            ) from error
+        results = [
+            StageResult(
+                target=obj.object_key,
+                stage="extract",
+                outcome="succeeded",
+                row_count=replaced.rows[obj.release.level],
+                details={
+                    "level": obj.release.level,
+                    "object_version_id": obj.object_version_id,
+                    "batch_levels": list(replaced.levels),
+                    "reused": replaced.reused,
+                },
+            )
+            for obj in validated
+        ]
+
+        try:
+            geography = rebuild_geography(self.engine)
+        except Exception as error:
+            raise SourceSnapshotError(
+                [*results, _rebuild_result("boundaries", "transform", 0, GeographyReport(), error=f"{error}")],
+                f"geography rebuild failed: {error}",
+            ) from error
+        for target, rows in geography.staging.items():
+            results.append(_rebuild_result(target, "transform", rows, geography))
+        for target, rows in geography.core.items():
+            results.append(
+                _rebuild_result(
+                    target,
+                    "load",
+                    rows,
+                    geography,
+                    collisions=geography.collisions.get(target, 0),
+                )
+            )
+        failed = [result for result in results if result.outcome == "failed"]
+        if failed:
+            raise SourceSnapshotError(
+                results,
+                "geography rebuild failed: "
+                + "; ".join(f"{r.target}: {r.error}" for r in failed),
+            )
+        return tuple(results)
+
     def finalize(self) -> Sequence[StageResult]:
         ensure_core_tables(self.engine)
         marts = build_marts(self.engine)
@@ -320,6 +444,34 @@ class SourceSnapshotProcessor:
         if run_id is None:
             raise RuntimeError("No ingestion run for object version")
         return str(run_id)
+
+
+def _inspect_boundary(object_id: S3ObjectId, body: bytes):
+    """Validate a Boundary object body against the level of its fixed key."""
+    level = BOUNDARY_KEYS.index(object_id.key)
+    with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as handle:
+        path = Path(handle.name)
+        handle.write(body)
+    try:
+        return inspect_boundary_gpkg(path, expected_level=level)
+    except BoundaryValidationError:
+        raise
+    except Exception as error:
+        raise BoundaryValidationError(f"Unreadable Boundary GPKG: {error}") from error
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def _rebuild_result(target, stage, rows, geography, **details) -> StageResult:
+    errors = geography.errors.get(target, [])
+    return StageResult(
+        target=target,
+        stage=stage,
+        outcome="failed" if errors else "succeeded",
+        row_count=rows,
+        error="; ".join(errors) or None,
+        details={"geography_rebuild": True, **details},
+    )
 
 
 def _ensure_service_metadata(engine: Engine) -> None:
@@ -706,8 +858,42 @@ def _record_failure(
         )
 
 
-def _failing_stage(error: SourceSnapshotError) -> str:
-    for result in reversed(error.results):
+def _claim(
+    engine: Engine, s3: S3Adapter, event: S3ObjectId, states: list[RunState]
+) -> tuple[uuid.UUID, int, S3ObjectId] | None:
+    """Start or resume the run for an event, or settle it without work.
+
+    Returns None — having appended the settled state — for a version whose run
+    is already settled or that S3 has superseded; otherwise the run and the
+    version stamped with its served timestamp.
+    """
+    run_id, attempt, state = _start_run(engine, event)
+    if state in {RunState.SUCCEEDED, RunState.TERMINAL, RunState.STALE}:
+        states.append(state)
+        return None
+    try:
+        object_id = _resolve_current(engine, s3, event)
+    except StaleObjectError as error:
+        _record_stale(engine, run_id, error)
+        states.append(RunState.STALE)
+        return None
+    _stamp_last_modified(engine, run_id, object_id.last_modified)
+    return run_id, attempt, object_id
+
+
+def _results_for(
+    object_id: S3ObjectId, results: Sequence[StageResult]
+) -> list[StageResult]:
+    """A Boundary run's share of batch results: its own extract, plus the rest."""
+    return [
+        result
+        for result in results
+        if result.stage != "extract" or result.target == object_id.key
+    ]
+
+
+def _failing_stage_of(results: Sequence[StageResult]) -> str:
+    for result in reversed(results):
         if result.outcome == "failed":
             return result.stage
     return "processing"
@@ -722,21 +908,57 @@ def process_one_message(
     sns: SNSAdapter,
     processor: MessageProcessor,
 ) -> MessageResult:
-    states = []
+    states: list[RunState] = []
     successes: list[tuple[uuid.UUID, int, list[StageResult], int]] = []
     parsed = _object_ids(message)
-    for event in parsed.object_ids:
-        run_id, attempt, state = _start_run(engine, event)
-        if state in {RunState.SUCCEEDED, RunState.TERMINAL, RunState.STALE}:
-            states.append(state)
+    boundary_events = [e for e in parsed.object_ids if _input_kind(e) == "boundary"]
+    source_events = [e for e in parsed.object_ids if _input_kind(e) == "source"]
+
+    # Boundary records first, as one release, so Source records in the same
+    # message are enriched against the newest geography.
+    boundary_batch: list[tuple[uuid.UUID, int, S3ObjectId, bytes, int]] = []
+    for event in boundary_events:
+        claimed = _claim(engine, s3, event, states)
+        if claimed is None:
             continue
+        run_id, attempt, object_id = claimed
         try:
-            object_id = _resolve_current(engine, s3, event)
-        except StaleObjectError as error:
-            _record_stale(engine, run_id, error)
-            states.append(RunState.STALE)
+            body = s3.read_version(object_id)
+        except Exception as error:
+            _record_retryable(engine, run_id, error)
+            states.append(RunState.RETRYABLE)
             continue
-        _stamp_last_modified(engine, run_id, object_id.last_modified)
+        boundary_batch.append((run_id, attempt, object_id, body, len(states)))
+        states.append(RunState.RUNNING)
+    if boundary_batch:
+        try:
+            shared = list(
+                processor.process_boundaries(
+                    [(object_id, body) for _, _, object_id, body, _ in boundary_batch]
+                )
+            )
+        except SourceSnapshotError as error:
+            for run_id, attempt, object_id, _, index in boundary_batch:
+                own = _results_for(object_id, error.results)
+                _record_stage_results(engine, run_id, attempt, own)
+                _record_retryable(engine, run_id, error, _failing_stage_of(own))
+                states[index] = RunState.RETRYABLE
+        except Exception as error:
+            for run_id, _, _, _, index in boundary_batch:
+                _record_retryable(engine, run_id, error)
+                states[index] = RunState.RETRYABLE
+        else:
+            for run_id, attempt, object_id, _, index in boundary_batch:
+                successes.append(
+                    (run_id, attempt, _results_for(object_id, shared), index)
+                )
+                states[index] = RunState.SUCCEEDED
+
+    for event in source_events:
+        claimed = _claim(engine, s3, event, states)
+        if claimed is None:
+            continue
+        run_id, attempt, object_id = claimed
         try:
             body = s3.read_version(object_id)
             results = list(processor.process(object_id, body))
@@ -744,7 +966,7 @@ def process_one_message(
             states.append(RunState.SUCCEEDED)
         except SourceSnapshotError as error:
             _record_stage_results(engine, run_id, attempt, error.results)
-            _record_retryable(engine, run_id, error, _failing_stage(error))
+            _record_retryable(engine, run_id, error, _failing_stage_of(error.results))
             states.append(RunState.RETRYABLE)
         except Exception as error:
             _record_retryable(engine, run_id, error)
@@ -762,7 +984,7 @@ def process_one_message(
                 _record_stage_results(
                     engine, run_id, attempt, (*results, *error.results)
                 )
-                _record_retryable(engine, run_id, error, _failing_stage(error))
+                _record_retryable(engine, run_id, error, _failing_stage_of(error.results))
                 states[index] = RunState.RETRYABLE
         else:
             for run_id, attempt, results, _ in successes:

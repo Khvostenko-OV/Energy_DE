@@ -89,44 +89,50 @@ def _verify_membership_matches_staging(
 
 def _verify_boundaries(engine: Engine) -> list[str]:
     """Verify the boundaries table carries levels 0-3, one level-0 row, and areas."""
-    errors: list[str] = []
     with engine.connect() as conn:
-        counts = dict(
-            conn.execute(
-                text(
-                    f"SELECT level, COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
-                    f"GROUP BY level ORDER BY level"
-                )
-            ).fetchall()
-        )
-        names = conn.execute(
+        return _verify_boundaries_on(conn)
+
+
+def _verify_boundaries_on(conn) -> list[str]:
+    """`_verify_boundaries` on an open connection, so a Boundary release can
+    verify its replacement inside the transaction that made it (issue #5)."""
+    errors: list[str] = []
+    counts = dict(
+        conn.execute(
             text(
-                f"SELECT level, name FROM {SERVICE_SCHEMA}.boundaries "
-                f"ORDER BY level LIMIT 1"
+                f"SELECT level, COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
+                f"GROUP BY level ORDER BY level"
             )
+        ).fetchall()
+    )
+    for level in range(4):
+        if level not in counts:
+            errors.append(f"Boundaries missing level {level}")
+
+    if counts.get(0, 0) != 1:
+        errors.append(f"Expected exactly 1 country-outline row at level 0, got {counts.get(0)}")
+
+    bad_area = conn.execute(
+        text(
+            f"SELECT COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
+            f"WHERE area IS NULL OR area <= 0"
         )
+    ).scalar()
+    if bad_area:
+        errors.append(f"{bad_area} boundaries have null or non-positive area")
 
-        for level in range(4):
-            if level not in counts:
-                errors.append(f"Boundaries missing level {level}")
+    invalid = conn.execute(
+        text(
+            f"SELECT COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
+            f"WHERE geometry IS NULL OR NOT ST_IsValid(geometry)"
+        )
+    ).scalar()
+    if invalid:
+        errors.append(f"{invalid} boundaries have null or invalid geometry")
 
-        if counts.get(0, 0) != 1:
-            errors.append(f"Expected exactly 1 country-outline row at level 0, got {counts.get(0)}")
-
-        bad_area = conn.execute(
-            text(
-                f"SELECT COUNT(*) FROM {SERVICE_SCHEMA}.boundaries "
-                f"WHERE area IS NULL OR area <= 0"
-            )
-        ).scalar()
-        if bad_area:
-            errors.append(f"{bad_area} boundaries have null or non-positive area")
-
-        if not errors:
-            levels = ", ".join(f"{k}:{counts[k]}" for k in sorted(counts))
-            level_names = ", ".join(f"{row[1]}" for row in names.fetchall())
-            log.info("Boundaries verified (%s rows; sample names: %s)", levels, level_names)
-
+    if not errors:
+        levels = ", ".join(f"{k}:{counts[k]}" for k in sorted(counts))
+        log.info("Boundaries verified (%s rows)", levels)
     return errors
 
 
