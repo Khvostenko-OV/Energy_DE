@@ -51,6 +51,9 @@ class VersionedS3:
         self.objects = {}
         self.last_modified = {}
         self.reads = []
+        # Per key, how many more reads raise instead of returning the body, so
+        # a test can make one object version unreadable and then redeliver it.
+        self.read_failures = {}
 
     def put(self, key: str, version_id: str, body: bytes) -> None:
         self.current[key] = version_id
@@ -66,6 +69,9 @@ class VersionedS3:
 
     def read_version(self, object_id: ingestion.S3ObjectId) -> bytes:
         self.reads.append(object_id)
+        if self.read_failures.get(object_id.key, 0) > 0:
+            self.read_failures[object_id.key] -= 1
+            raise OSError(f"transient S3 read failure for {object_id.key}")
         return self.objects[object_id.version_id]
 
 
@@ -75,6 +81,25 @@ class FakeSQS:
 
     def delete_message(self, receipt_handle: str) -> None:
         self.deleted.append(receipt_handle)
+
+
+class ScriptedSQS(FakeSQS):
+    """A queue the worker can receive from, one scripted receive per poll.
+
+    `None` in the script stands for an empty receive, so a test can put an idle
+    poll between two messages.
+    """
+
+    def __init__(self, *polls):
+        super().__init__()
+        self.polls = list(polls)
+        self.receives = 0
+
+    def receive_message(self):
+        self.receives += 1
+        if not self.polls:
+            return None
+        return self.polls.pop(0)
 
 
 class FakeSNS:
@@ -141,35 +166,30 @@ class FailingProcessor:
         return ()
 
 
-def _two_record_message(handle: str = "receipt-1") -> ingestion.SqsMessage:
+def _s3_record(key: str, version_id: str):
+    return {
+        "eventSource": "aws:s3",
+        "s3": {
+            "bucket": {"name": "energy-data"},
+            "object": {"key": key, "versionId": version_id},
+        },
+    }
+
+
+def _message(handle: str, records) -> ingestion.SqsMessage:
+    """One SQS message carrying one S3 record per (key, version) pair."""
     return ingestion.SqsMessage(
         receipt_handle=handle,
         body=json.dumps(
-            {
-                "Records": [
-                    {
-                        "eventSource": "aws:s3",
-                        "s3": {
-                            "bucket": {"name": "energy-data"},
-                            "object": {
-                                "key": "sources/solar.gpkg",
-                                "versionId": "version-1",
-                            },
-                        },
-                    },
-                    {
-                        "eventSource": "aws:s3",
-                        "s3": {
-                            "bucket": {"name": "energy-data"},
-                            "object": {
-                                "key": "sources/wind.gpkg",
-                                "versionId": "version-1",
-                            },
-                        },
-                    },
-                ]
-            }
+            {"Records": [_s3_record(key, version_id) for key, version_id in records]}
         ),
+    )
+
+
+def _two_record_message(handle: str = "receipt-1") -> ingestion.SqsMessage:
+    return _message(
+        handle,
+        [("sources/solar.gpkg", "version-1"), ("sources/wind.gpkg", "version-1")],
     )
 
 
@@ -510,6 +530,7 @@ def test_cli_keeps_local_stage_commands_and_run_all():
         "marts",
         "run-all",
         "bootstrap",
+        "worker",
     ):
         assert command in invocation.output
 
@@ -563,25 +584,7 @@ def _write_source_snapshot(tmp_path, name, rows):
 
 
 def _source_message(version_id, source="solar"):
-    return ingestion.SqsMessage(
-        receipt_handle=f"receipt-{version_id}",
-        body=json.dumps(
-            {
-                "Records": [
-                    {
-                        "eventSource": "aws:s3",
-                        "s3": {
-                            "bucket": {"name": "energy-data"},
-                            "object": {
-                                "key": f"sources/{source}.gpkg",
-                                "versionId": version_id,
-                            },
-                        },
-                    }
-                ]
-            }
-        ),
-    )
+    return _message(f"receipt-{version_id}", [(f"sources/{source}.gpkg", version_id)])
 
 
 def _decomposed_properties(engine, core_schema, energy_source, reference_id):
@@ -706,22 +709,7 @@ def _write_storage_snapshot(tmp_path, name, rows):
 
 
 def _storage_message(version_id, key="sources/storage.gpkg"):
-    return ingestion.SqsMessage(
-        receipt_handle=f"receipt-{version_id}",
-        body=json.dumps(
-            {
-                "Records": [
-                    {
-                        "eventSource": "aws:s3",
-                        "s3": {
-                            "bucket": {"name": "energy-data"},
-                            "object": {"key": key, "versionId": version_id},
-                        },
-                    }
-                ]
-            }
-        ),
-    )
+    return _message(f"receipt-{version_id}", [(key, version_id)])
 
 
 def test_worker_loads_a_storage_snapshot_into_the_storage_kind(source_pipeline, tmp_path):
@@ -1679,25 +1667,8 @@ def _frame_bytes(tmp_path, name, frame):
 
 def _records_message(handle, records):
     """One SQS message carrying one S3 record per (source, version) pair."""
-    return ingestion.SqsMessage(
-        receipt_handle=handle,
-        body=json.dumps(
-            {
-                "Records": [
-                    {
-                        "eventSource": "aws:s3",
-                        "s3": {
-                            "bucket": {"name": "energy-data"},
-                            "object": {
-                                "key": f"sources/{source}.gpkg",
-                                "versionId": version_id,
-                            },
-                        },
-                    }
-                    for source, version_id in records
-                ]
-            }
-        ),
+    return _message(
+        handle, [(f"sources/{source}.gpkg", version_id) for source, version_id in records]
     )
 
 
@@ -2389,27 +2360,6 @@ def _boundary_frame(level):
     )
 
 
-def _keys_message(handle, records):
-    """One SQS message with one S3 record per (key, version) pair."""
-    return ingestion.SqsMessage(
-        receipt_handle=handle,
-        body=json.dumps(
-            {
-                "Records": [
-                    {
-                        "eventSource": "aws:s3",
-                        "s3": {
-                            "bucket": {"name": "energy-data"},
-                            "object": {"key": key, "versionId": version_id},
-                        },
-                    }
-                    for key, version_id in records
-                ]
-            }
-        ),
-    )
-
-
 def _boundary_snapshot(schemas):
     """Every boundary row as (level, name) -> (geometry hash, area, has geojson)."""
     return {
@@ -2471,7 +2421,7 @@ def _publish_boundaries(pipeline, tmp_path, releases, handle, processor=None):
         s3.put(key, version_id, _frame_bytes(tmp_path, f"{version_id}.gpkg", frame))
         records.append((key, version_id))
     return ingestion.process_one_message(
-        _keys_message(handle, records),
+        _message(handle, records),
         engine=ENGINE,
         s3=s3,
         sqs=pipeline["sqs"],
@@ -2595,7 +2545,7 @@ def test_boundary_release_replaces_one_level_and_rebuilds_all_geography(
 
     # A redelivery of the applied release changes nothing.
     redelivered = ingestion.process_one_message(
-        _keys_message("again", [("boundaries/level-1.gpkg", "states-v2-level-1")]),
+        _message("again", [("boundaries/level-1.gpkg", "states-v2-level-1")]),
         engine=ENGINE,
         s3=fixture_boundaries["s3"],
         sqs=fixture_boundaries["sqs"],
@@ -2745,3 +2695,539 @@ def test_a_failed_geography_rebuild_fails_the_boundary_release(
     assert "Freistaat Bayern" in {
         state for state, _, _ in _geography(schemas, "core", "generators", "bio").values()
     }
+
+# ------------------------------------------------------------------ #
+#  One SQS message at a time (issue #6)                              #
+# ------------------------------------------------------------------ #
+
+class ThrottledSQS(ScriptedSQS):
+    """A queue whose first receive fails, the way SQS throttles a request."""
+
+    def __init__(self, error, *polls):
+        super().__init__(*polls)
+        self.error = error
+
+    def receive_message(self):
+        if self.error is not None:
+            error, self.error = self.error, None
+            raise error
+        return super().receive_message()
+
+
+class FakeSqsClient:
+    """The boto3 sqs client surface the adapter uses, one canned reply per call."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def receive_message(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.replies.pop(0) if self.replies else {}
+
+    def delete_message(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def test_boto3_sqs_receives_exactly_one_message_per_call():
+    body = _two_record_message().body
+    client = FakeSqsClient(
+        {"Messages": [{"MessageId": "id-1", "ReceiptHandle": "receipt-1", "Body": body}]},
+        {},
+    )
+    sqs = ingestion.Boto3SQSAdapter(client, queue_url="https://sqs.eu/queue")
+
+    first = sqs.receive_message()
+
+    assert (first.receipt_handle, first.body) == ("receipt-1", body)
+    # An empty receive is not an error: the worker simply has nothing to do.
+    assert sqs.receive_message() is None
+    # One receive, one message. SQS batches the S3 records of a single upload
+    # inside the body already, and asking for more would fuse separate messages
+    # into one work unit with one acknowledgement.
+    assert [call["MaxNumberOfMessages"] for call in client.calls] == [1, 1]
+    assert client.calls[0]["WaitTimeSeconds"] == ingestion.LONG_POLL_SECONDS
+    assert {call["QueueUrl"] for call in client.calls} == {"https://sqs.eu/queue"}
+
+    sqs.delete_message("receipt-1")
+
+    assert client.calls[-1] == {
+        "QueueUrl": "https://sqs.eu/queue",
+        "ReceiptHandle": "receipt-1",
+    }
+
+
+def _queue_sources(s3, *sources, version="version-42"):
+    """Put the given Sources in the bucket at one version, and say so."""
+    for source in sources:
+        s3.put(f"sources/{source}.gpkg", version, b"version-42-content")
+    return [
+        _message(f"receipt-{source}", [(f"sources/{source}.gpkg", version)])
+        for source in sources
+    ]
+
+
+def test_run_worker_processes_queued_messages_one_at_a_time(source_pipeline):
+    s3 = source_pipeline["s3"]
+    schemas = source_pipeline["schemas"]
+    sqs = ScriptedSQS(*_queue_sources(s3, "solar", "wind", "gas"))
+    processor = FakeProcessor()
+
+    processed = ingestion.run_worker(
+        engine=source_pipeline["engine"],
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=processor,
+        max_messages=3,
+        idle_sleep=lambda seconds: pytest.fail("the queue never ran dry"),
+    )
+
+    assert processed == 3
+    # Each message was received on its own and settled on its own terms.
+    assert sqs.receives == 3
+    assert sqs.deleted == ["receipt-solar", "receipt-wind", "receipt-gas"]
+    assert [object_id.key for object_id in processor.objects] == [
+        "sources/solar.gpkg",
+        "sources/wind.gpkg",
+        "sources/gas.gpkg",
+    ]
+    assert [dict(row) for row in _query(
+        f"SELECT object_key, state FROM {schemas['service']}.ingestion_runs "
+        "ORDER BY created_at"
+    )] == [
+        {"object_key": f"sources/{source}.gpkg", "state": "succeeded"}
+        for source in ("solar", "wind", "gas")
+    ]
+
+
+def test_run_worker_keeps_polling_after_an_empty_receive(source_pipeline):
+    sqs = ScriptedSQS(
+        None, *_queue_sources(source_pipeline["s3"], "solar")
+    )
+    processor = FakeProcessor()
+    slept = []
+
+    processed = ingestion.run_worker(
+        engine=source_pipeline["engine"],
+        s3=source_pipeline["s3"],
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=processor,
+        max_messages=1,
+        idle_sleep=slept.append,
+    )
+
+    # Queued work resumes on their own after a restart, so an empty queue
+    # pauses the worker instead of ending it.
+    assert processed == 1
+    assert slept == [ingestion.IDLE_POLL_SECONDS]
+    assert sqs.receives == 2
+    assert sqs.deleted == ["receipt-solar"]
+
+
+def test_run_worker_survives_a_failed_receive(source_pipeline):
+    """A receive that fails must not take the worker down.
+
+    A failure outside the per-record handling — SQS throttling, a dropped
+    connection — leaves the queue untouched, and the message behind it is a
+    different piece of work that still gets processed.
+    """
+    sqs = ThrottledSQS(
+        RuntimeError("SQS throttled the request"),
+        *_queue_sources(source_pipeline["s3"], "wind"),
+    )
+    processor = FakeProcessor()
+    slept = []
+
+    processed = ingestion.run_worker(
+        engine=source_pipeline["engine"],
+        s3=source_pipeline["s3"],
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=processor,
+        max_messages=1,
+        idle_sleep=slept.append,
+    )
+
+    assert processed == 1
+    assert [object_id.key for object_id in processor.objects] == ["sources/wind.gpkg"]
+    assert sqs.deleted == ["receipt-wind"]
+    assert slept == [ingestion.IDLE_POLL_SECONDS]
+
+
+def test_worker_command_runs_the_message_loop(source_pipeline, monkeypatch):
+    sqs = ScriptedSQS(_message("receipt-solar", [("sources/solar.gpkg", "version-42")]))
+    processor = FakeProcessor()
+    monkeypatch.setattr(cli_module, "get_engine", lambda: source_pipeline["engine"])
+    monkeypatch.setattr(cli_module, "_s3_adapter", lambda: source_pipeline["s3"])
+    monkeypatch.setattr(cli_module, "_sqs_adapter", lambda queue_url: sqs)
+    monkeypatch.setattr(cli_module, "_sns_adapter", lambda topic_arn: FakeSNS())
+    monkeypatch.setattr(cli_module, "PipelineProcessor", lambda engine, *, s3: processor)
+
+    invocation = CliRunner().invoke(
+        cli,
+        [
+            "worker",
+            "--queue-url",
+            "https://sqs.eu/queue",
+            "--topic-arn",
+            "arn:aws:sns:eu:123456789012:ingestion",
+            "--max-messages",
+            "1",
+        ],
+    )
+
+    assert invocation.exit_code == 0, invocation.output
+    assert "Worker processed 1 message(s)." in invocation.output
+    assert sqs.receives == 1
+    assert sqs.deleted == ["receipt-solar"]
+
+
+def test_boundary_and_source_records_in_one_message_apply_in_ingestion_order(
+    fixture_boundaries, tmp_path, monkeypatch
+):
+    """One message carrying a Boundary release and a Source snapshot.
+
+    The Source record is listed first, so the order cannot come from the body:
+    the release is applied and its geography rebuilt before the Source is
+    extracted, which is why the rebuild finds no staging of that Source to
+    re-enrich — the Source enriched itself against the new polygons. Both
+    records get their own Ingestion run and their own stage results, and one
+    message is acknowledged once both are done.
+    """
+    s3 = fixture_boundaries["s3"]
+    sqs = fixture_boundaries["sqs"]
+    schemas = fixture_boundaries["schemas"]
+    staging_at_rebuild = []
+    original_rebuild = ingestion.rebuild_geography
+
+    def recording_rebuild(engine):
+        staging_at_rebuild.append(
+            [
+                row["table_name"]
+                for row in _query(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = :schema",
+                    {"schema": schemas["stage"]},
+                )
+            ]
+        )
+        return original_rebuild(engine)
+
+    monkeypatch.setattr(ingestion, "rebuild_geography", recording_rebuild)
+    counting = CountingProcessor(ENGINE, s3=s3)
+    s3.put(
+        "sources/bio.gpkg",
+        "bio-v1",
+        _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")),
+    )
+    s3.put(
+        "boundaries/level-1.gpkg",
+        "states-v2",
+        _frame_bytes(tmp_path, "states-v2.gpkg", _renamed_states()),
+    )
+
+    result = ingestion.process_one_message(
+        _message(
+            "mixed-1",
+            [("sources/bio.gpkg", "bio-v1"), ("boundaries/level-1.gpkg", "states-v2")],
+        ),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=counting,
+    )
+
+    assert result.acknowledged
+    assert result.states == (ingestion.RunState.SUCCEEDED,) * 2
+    assert sqs.deleted == ["mixed-1"]
+    # One release, one geography rebuild, one marts refresh for the message.
+    assert staging_at_rebuild == [[]]
+    assert counting.finalized == 1
+
+    runs = {
+        row["object_key"]: row
+        for row in _query(
+            f"SELECT run_id, object_key, input_kind, state "
+            f"FROM {schemas['service']}.ingestion_runs"
+        )
+    }
+    assert set(runs) == {"sources/bio.gpkg", "boundaries/level-1.gpkg"}
+    assert runs["boundaries/level-1.gpkg"]["input_kind"] == "boundary"
+    assert {row["state"] for row in runs.values()} == {"succeeded"}
+
+    def stages_of(object_key):
+        return {
+            (row["stage"], row["target"])
+            for row in _query(
+                f"SELECT stage, target FROM {schemas['service']}.stage_results "
+                "WHERE run_id = :run_id",
+                {"run_id": str(runs[object_key]["run_id"])},
+            )
+        }
+
+    # The release owns its own extract; the rebuild had nothing to re-enrich.
+    assert stages_of("boundaries/level-1.gpkg") == {
+        ("extract", "boundaries/level-1.gpkg"),
+        ("marts", "marts"),
+    }
+    # The Source record carries the full chain of its own, on its own table.
+    assert stages_of("sources/bio.gpkg") == {
+        ("extract", "sources/bio.gpkg"),
+        ("transform", "bio"),
+        ("load", "generators"),
+        ("marts", "marts"),
+    }
+
+    # Each record's stages name the table that record itself produced: the
+    # mixed message does not let one record work on another's snapshot.
+    details = {
+        row["stage"]: row["details"]
+        for row in _query(
+            f"SELECT stage, details FROM {schemas['service']}.stage_results "
+            "WHERE run_id = :run_id",
+            {"run_id": str(runs["sources/bio.gpkg"]["run_id"])},
+        )
+    }
+    raw_table = details["extract"]["raw_table"]
+    assert raw_table.startswith("bio_")
+    assert details["transform"]["raw_table"] == raw_table
+    assert _query(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = :schema AND table_name = :name",
+        {"schema": schemas["raw"], "name": raw_table},
+    ) == [{"?column?": 1}]
+
+    # The Source was enriched against the new release, and everything reconciles.
+    assert _geography(schemas, "core", "generators", "bio")[
+        ("bio", "bio-3")
+    ] == ("Freistaat Bayern", "München", "München (Stadt)")
+    assert _query(
+        f"SELECT loaded_to FROM {schemas['service']}.loaded_files "
+        "WHERE object_version_id = 'states-v2'"
+    ) == [{"loaded_to": f"{schemas['service']}.boundaries"}]
+    assert marts.verify_marts(ENGINE) == []
+
+
+def test_a_rejected_snapshot_does_not_block_the_other_records(
+    fixture_boundaries, tmp_path
+):
+    """A snapshot that fails validation is explained and skipped, not retried in place.
+
+    The valid record in the same message still runs its whole chain, so one
+    malformed upload cannot hold up the files beside it. The message itself
+    stays undeleted while the rejected record has no settled state yet (issue #7
+    makes the rejection terminal and announces it).
+    """
+    s3 = fixture_boundaries["s3"]
+    sqs = fixture_boundaries["sqs"]
+    schemas = fixture_boundaries["schemas"]
+    s3.put(
+        "sources/solar.gpkg",
+        "solar-bad",
+        _write_mixed_source_snapshot(tmp_path, "mixed.gpkg"),
+    )
+    s3.put(
+        "sources/bio.gpkg",
+        "bio-v1",
+        _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")),
+    )
+
+    result = ingestion.process_one_message(
+        _message(
+            "solar-bad",
+            [("sources/solar.gpkg", "solar-bad"), ("sources/bio.gpkg", "bio-v1")],
+        ),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=fixture_boundaries["processor"],
+    )
+
+    assert result.states == (ingestion.RunState.RETRYABLE, ingestion.RunState.SUCCEEDED)
+    assert not result.acknowledged
+    assert sqs.deleted == []
+
+    # The healthy record progressed all the way, against its own run.
+    bio_run = _run_ids(schemas, "bio-v1")["sources/bio.gpkg"]
+    assert set(_core_units(schemas, "bio")) == _good_members(schemas, bio_run)
+    assert {
+        row["stage"]
+        for row in _query(
+            f"SELECT stage FROM {schemas['service']}.stage_results "
+            "WHERE run_id = :run_id",
+            {"run_id": bio_run},
+        )
+    } == {"extract", "transform", "load", "marts"}
+
+    # The rejected record left nothing behind and says why it failed.
+    assert _core_units(schemas, "solar") == {}
+    assert _raw_versions(schemas, "solar") == 0
+    solar_run = _run_ids(schemas, "solar-bad")["sources/solar.gpkg"]
+    failed = _query(
+        f"SELECT stage, target, outcome, error FROM {schemas['service']}.stage_results "
+        "WHERE run_id = :run_id",
+        {"run_id": solar_run},
+    )
+    assert [dict(row) for row in failed] == [
+        {
+            "stage": "extract",
+            "target": "sources/solar.gpkg",
+            "outcome": "failed",
+            "error": "Source GPKG requires homogeneous Energy source",
+        }
+    ]
+    assert marts.verify_marts(ENGINE) == []
+
+
+def test_a_rejected_boundary_release_does_not_block_the_source_records(
+    fixture_boundaries, tmp_path
+):
+    """A Boundary record rejected by validation leaves the geography as it was.
+
+    The Source records behind it in the same message are enriched against the
+    unchanged boundaries, so a bad release cannot half-apply itself.
+    """
+    s3 = fixture_boundaries["s3"]
+    sqs = fixture_boundaries["sqs"]
+    schemas = fixture_boundaries["schemas"]
+    before = _boundary_snapshot(schemas)
+    mislabelled = _boundary_frame(3)
+    mislabelled["level"] = 2  # published at the level-3 key
+    s3.put(
+        "boundaries/level-3.gpkg",
+        "districts-bad",
+        _frame_bytes(tmp_path, "districts-bad.gpkg", mislabelled),
+    )
+    s3.put(
+        "sources/bio.gpkg",
+        "bio-v1",
+        _frame_bytes(tmp_path, "bio-v1.gpkg", _fixture_frame("bio")),
+    )
+
+    result = ingestion.process_one_message(
+        _message(
+            "boundary-bad",
+            [
+                ("boundaries/level-3.gpkg", "districts-bad"),
+                ("sources/bio.gpkg", "bio-v1"),
+            ],
+        ),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=fixture_boundaries["processor"],
+    )
+
+    assert result.states == (ingestion.RunState.RETRYABLE, ingestion.RunState.SUCCEEDED)
+    assert not result.acknowledged
+    assert sqs.deleted == []
+
+    # Nothing of the release was written, not even the load ledger.
+    assert _boundary_snapshot(schemas) == before
+    assert _query(
+        f"SELECT 1 FROM {schemas['service']}.loaded_files "
+        "WHERE object_key LIKE 'boundaries/%'"
+    ) == []
+    boundary_run = _run_ids(schemas, "districts-bad")["boundaries/level-3.gpkg"]
+    rejected = _query(
+        f"SELECT target, outcome, error FROM {schemas['service']}.stage_results "
+        "WHERE run_id = :run_id",
+        {"run_id": boundary_run},
+    )
+    assert [dict(row) for row in rejected] == [
+        {
+            "target": "boundaries/level-3.gpkg",
+            "outcome": "failed",
+            "error": "Boundary GPKG expected level 3, found [2]",
+        }
+    ]
+
+    # The Source behind it was enriched against the boundaries still in place.
+    assert _geography(schemas, "core", "generators", "bio")[
+        ("bio", "bio-1")
+    ] == ("Baden-Württemberg", "Stuttgart", "Stuttgart (Stadt)")
+    assert marts.verify_marts(ENGINE) == []
+
+
+def test_redelivery_of_a_message_processes_only_the_unsettled_records(
+    fixture_boundaries, tmp_path
+):
+    """A message kept for redelivery is safe to send again.
+
+    The settled record is not redone — one raw snapshot, one attempt, one set of
+    stage results — while the record that could not be read is retried, and the
+    message is acknowledged once every record has a settled state.
+    """
+    s3 = fixture_boundaries["s3"]
+    sqs = fixture_boundaries["sqs"]
+    schemas = fixture_boundaries["schemas"]
+    counting = CountingProcessor(ENGINE, s3=s3)
+    for source in ("solar", "bio"):
+        s3.put(
+            f"sources/{source}.gpkg",
+            f"{source}-v1",
+            _frame_bytes(tmp_path, f"{source}-v1.gpkg", _fixture_frame(source)),
+        )
+    s3.read_failures["sources/solar.gpkg"] = 1
+    records = [("sources/solar.gpkg", "solar-v1"), ("sources/bio.gpkg", "bio-v1")]
+
+    first = ingestion.process_one_message(
+        _message("receipt-1", records),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=counting,
+    )
+
+    assert first.states == (ingestion.RunState.RETRYABLE, ingestion.RunState.SUCCEEDED)
+    assert not first.acknowledged
+    assert sqs.deleted == []
+    assert _core_units(schemas, "solar") == {}
+    assert set(_core_units(schemas, "bio")) == _good_members(
+        schemas, _run_ids(schemas, "bio-v1")["sources/bio.gpkg"]
+    )
+    assert counting.finalized == 1
+
+    redelivered = ingestion.process_one_message(
+        _message("receipt-2", records),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        sns=FakeSNS(),
+        processor=counting,
+    )
+
+    assert redelivered.acknowledged
+    assert redelivered.states == (ingestion.RunState.SUCCEEDED,) * 2
+    assert sqs.deleted == ["receipt-2"]
+    assert counting.finalized == 2
+    assert set(_core_units(schemas, "solar")) == _good_members(
+        schemas, _run_ids(schemas, "solar-v1")["sources/solar.gpkg"]
+    )
+
+    runs = {
+        row["object_key"]: row
+        for row in _query(
+            f"SELECT object_key, state, attempt_count "
+            f"FROM {schemas['service']}.ingestion_runs"
+        )
+    }
+    assert runs["sources/solar.gpkg"]["attempt_count"] == 2
+    # The record that already succeeded was skipped, not repeated.
+    assert runs["sources/bio.gpkg"]["attempt_count"] == 1
+    assert _raw_versions(schemas, "bio") == 1
+    assert [
+        row["attempt"]
+        for row in _query(
+            f"SELECT DISTINCT attempt FROM {schemas['service']}.stage_results "
+            f"WHERE run_id = :run_id",
+            {"run_id": _run_ids(schemas, "bio-v1")["sources/bio.gpkg"]},
+        )
+    ] == [1]
+    assert marts.verify_marts(ENGINE) == []

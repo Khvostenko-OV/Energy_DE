@@ -18,6 +18,14 @@
 - All files are treated consequently via SQS 
 - All extracted files are logged in loaded_files table and not extracted twice.
 
+### The message contract (issue #6)
+- The worker receives **one** SQS message at a time (long polling) and decodes every S3 record it carries. Separate messages are never combined, because one message is also one acknowledgement
+- Within a message the order is fixed: Boundary records first as a single release, then Source records. Source rows are enriched with Boundary geography, so the release has to be applied first
+- Records are processed independently: each one is its own Ingestion run with its own result, and a failing record never blocks the others in the same message
+- The geography rebuild and the three materialized views are refreshed **once** per message, after the last record
+- The message is deleted only when every record is successful, terminally skipped, or stale. If one record is still retryable the message stays, and redelivery processes only the records that are not settled yet
+- Every failure is retryable today, including a deterministically invalid file; retries, DLQ redrive, and SNS alerts are issue #7. The topic is read from `SNS_TOPIC_ARN` and the queue from `SQS_QUEUE_URL`, the bucket from `S3_BUCKET`
+
 ## 3. Logging
 - All ETL logs are sent to CloudWatch Logs
 

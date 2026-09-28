@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 import tempfile
@@ -40,6 +41,13 @@ from etl.transform import transform_source_snapshot
 BOUNDARY_KEYS = tuple(f"boundaries/level-{level}.gpkg" for level in range(4))
 SOURCE_KEYS = tuple(f"sources/{source}.gpkg" for source in SOURCE_NAMES)
 ACCEPTED_KEYS = frozenset(BOUNDARY_KEYS + SOURCE_KEYS)
+
+# How long one receive waits for a message before returning empty, and how long
+# the worker pauses after an empty receive before asking again. The wait is
+# SQS long polling, so an idle worker costs no requests; the pause only paces
+# the loop once a receive has come back empty.
+LONG_POLL_SECONDS = 20
+IDLE_POLL_SECONDS = 5.0
 
 log = logging.getLogger(__name__)
 
@@ -127,6 +135,8 @@ class S3Adapter(Protocol):
 
 
 class SQSAdapter(Protocol):
+    def receive_message(self) -> SqsMessage | None: ...
+
     def delete_message(self, receipt_handle: str) -> None: ...
 
 
@@ -171,6 +181,50 @@ class Boto3S3Adapter:
             VersionId=object_id.version_id,
         )
         return response["Body"].read()
+
+
+class Boto3SQSAdapter:
+    """The one ingestion queue, received one message at a time.
+
+    SQS batches the S3 records of a single upload into the body of one message
+    already, and this worker keeps that a unit of work: asking for more than
+    one message would combine independent messages whose records then share a
+    single acknowledgement.
+    """
+
+    def __init__(self, client, queue_url: str):
+        self.client = client
+        self.queue_url = queue_url
+
+    def receive_message(self) -> SqsMessage | None:
+        response = self.client.receive_message(
+            QueueUrl=self.queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=LONG_POLL_SECONDS,
+        )
+        messages = response.get("Messages") or []
+        if not messages:
+            return None
+        message = messages[0]
+        return SqsMessage(message["ReceiptHandle"], message["Body"])
+
+    def delete_message(self, receipt_handle: str) -> None:
+        self.client.delete_message(
+            QueueUrl=self.queue_url, ReceiptHandle=receipt_handle
+        )
+
+
+class Boto3SNSAdapter:
+    """The one topic carrying ingestion and DLQ alerts (issue #7 publishes)."""
+
+    def __init__(self, client, topic_arn: str):
+        self.client = client
+        self.topic_arn = topic_arn
+
+    def publish(self, subject: str, message: str) -> None:
+        self.client.publish(
+            TopicArn=self.topic_arn, Subject=subject, Message=message
+        )
 
 
 class PipelineProcessor:
@@ -999,3 +1053,53 @@ def process_one_message(
     if acknowledged:
         sqs.delete_message(message.receipt_handle)
     return MessageResult(acknowledged=acknowledged, states=tuple(states))
+
+
+def run_worker(
+    *,
+    engine: Engine,
+    s3: S3Adapter,
+    sqs: SQSAdapter,
+    sns: SNSAdapter,
+    processor: MessageProcessor,
+    max_messages: int | None = None,
+    idle_sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Process queued messages one at a time until the worker is stopped.
+
+    `max_messages` stops the loop after that many received messages (a one-shot
+    drain); the production setting of None runs until the process is stopped.
+    An empty receive only pauses the loop, because queued work resumes on its
+    own after a restart and an empty queue is a pause, not an exit. Returns the
+    number of messages processed.
+    """
+    processed = 0
+    while max_messages is None or processed < max_messages:
+        try:
+            message = sqs.receive_message()
+            if message is None:
+                idle_sleep(IDLE_POLL_SECONDS)
+                continue
+            result = process_one_message(
+                message,
+                engine=engine,
+                s3=s3,
+                sqs=sqs,
+                sns=sns,
+                processor=processor,
+            )
+        except Exception:
+            # The message was not acknowledged, so SQS redelivers it. One
+            # message that cannot be processed must not take the worker down:
+            # the next message is a different piece of work.
+            log.exception("Message processing failed, continuing with the queue")
+            idle_sleep(IDLE_POLL_SECONDS)
+            continue
+        log.info(
+            "Message %s: %s [%s]",
+            message.receipt_handle,
+            "acknowledged" if result.acknowledged else "kept for redelivery",
+            ", ".join(state.value for state in result.states) or "no records",
+        )
+        processed += 1
+    return processed

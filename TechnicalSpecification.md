@@ -102,6 +102,16 @@ Each Unit table carries a complete Source snapshot and is therefore authoritativ
 - Generation capacity pivot table (state / energy_source)
 - Storage capacity pivot table (state / source_type)
 
+### Event-driven worker (issue #6)
+The event-driven path runs the stages above per uploaded object instead of by hand. One SQS message is the worker's unit of work and is never combined with another message: it is received alone, every S3 record it carries is decoded, and those records are processed in one fixed pass.
+- Receive one message at a time (SQS long polling; an empty receive pauses the worker, it does not stop it)
+- Order within a message: all Boundary records first, as a single release, then the Source records in the order the queue delivered them. The order matters because Source rows are enriched with the Boundary geography that has to be current first
+- Independence: each record is its own Ingestion run, with its own attempts, stage results, and terminal error. One failing record never keeps the other records of the same message from progressing, and each Source record uses exactly the raw table(s) that record produced
+- Downstream rebuild once per message: after the last record the geography is rebuilt and the three marts are refreshed and verified once, not once per record
+- Acknowledgement: the message is deleted from the queue only when every record is successful, terminally skipped, or stale. A retryable record keeps the message, and redelivery repeats only the records that are not settled yet — a record that already succeeded is not applied again
+- Today every failure is retryable, including a deterministically invalid file; making such a record terminal, with retries, DLQ, and SNS alerts, is issue #7
+- The Boundary release rules are described under Extract. Retries, DLQ, SNS alerts, and visibility timeout handling follow in issue #7
+
 ## Serving
 ### 1. Visualization
 - Dashboard with map

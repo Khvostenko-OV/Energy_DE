@@ -109,6 +109,10 @@ A dated snapshot table `raw.<source>_<YYYYMMDD>_<n>` produced by one extract loa
 One processing lifecycle for one immutable S3 object version or local source file. It records the input identity, current stage, attempts, outcome, and any terminal error.
 _Avoid_: Load signature, SQS message
 
+**Queue message**:
+One SQS message — the event-driven worker's unit of work, called a *message* in the docs and the code. It carries every S3 record the queue batched for it; those records are processed independently but in one order — Boundary records as a single release first, then Source records — and the message is acknowledged only once every record is successful, terminally skipped, or stale. Anything retryable is left for redelivery, which repeats only the unsettled records.
+_Avoid_: Ingestion run, batch, file
+
 **Load signature**:
 The immutable identity of successfully extracted input. For S3 ingestion it is `(bucket, object_key, version_id)`; for local ingestion it is `(filename, filesize, modified_at)`. A signature is logged only after extraction verification succeeds; duplicate input is skipped unless a local run is forced with `-f`.
 _Avoid_: Message ID, filename alone

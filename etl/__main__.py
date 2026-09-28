@@ -8,8 +8,12 @@ from etl.config import SOURCE_NAMES, boundaries_manifest, get_engine, sources_da
 from etl.extract import extract_boundaries, extract_source
 from etl.ingestion import (
     Boto3S3Adapter,
+    Boto3SNSAdapter,
+    Boto3SQSAdapter,
     BootstrapConfig,
+    PipelineProcessor,
     bootstrap as bootstrap_ingestion,
+    run_worker,
 )
 from etl.load import load_generators, load_storages
 from etl.marts import build_marts
@@ -25,10 +29,22 @@ def cli(verbose: bool):
     logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=level)
 
 
-def _s3_adapter() -> Boto3S3Adapter:
+def _client(service: str):
     import boto3
 
-    return Boto3S3Adapter(boto3.client("s3"))
+    return boto3.client(service)
+
+
+def _s3_adapter() -> Boto3S3Adapter:
+    return Boto3S3Adapter(_client("s3"))
+
+
+def _sqs_adapter(queue_url: str) -> Boto3SQSAdapter:
+    return Boto3SQSAdapter(_client("sqs"), queue_url)
+
+
+def _sns_adapter(topic_arn: str) -> Boto3SNSAdapter:
+    return Boto3SNSAdapter(_client("sns"), topic_arn)
 
 
 @cli.command()
@@ -49,6 +65,39 @@ def bootstrap(bucket: str):
         click.echo(f"  {check.key} ({requirement}): {check.message}")
     if not result.worker_start_allowed:
         raise SystemExit(1)
+
+
+@cli.command()
+@click.option("--queue-url", envvar="SQS_QUEUE_URL", required=True, help="Queue carrying the S3 ObjectCreated events.")
+@click.option("--topic-arn", envvar="SNS_TOPIC_ARN", required=True, help="Topic for ingestion and DLQ alerts.")
+@click.option("--max-messages", type=int, default=None, help="Stop after this many messages (default: run until stopped).")
+def worker(queue_url: str, topic_arn: str, max_messages: int | None):
+    """Run the event-driven ingestion worker, one SQS message at a time.
+
+    Each message is an ordered work unit: its Boundary records are applied as
+    one release before its Source records, every record is processed
+    independently, and the message is acknowledged only when all of them are
+    successful or terminally skipped — anything retryable stays for SQS
+    redelivery. The three marts are refreshed once per message. Run
+    `python -m etl bootstrap` first: the worker expects the Boundary levels to
+    be in place.
+    """
+    click.echo(f"\nIngestion worker reading {queue_url}")
+    engine = get_engine()
+    s3 = _s3_adapter()
+    try:
+        processed = run_worker(
+            engine=engine,
+            s3=s3,
+            sqs=_sqs_adapter(queue_url),
+            sns=_sns_adapter(topic_arn),
+            processor=PipelineProcessor(engine, s3=s3),
+            max_messages=max_messages,
+        )
+    except KeyboardInterrupt:
+        click.echo("Worker stopped.")
+        return
+    click.echo(f"Worker processed {processed} message(s).")
 
 
 @cli.command()
