@@ -30,7 +30,7 @@ aggregates) runs in the containerized stack. Design work recorded in:
   Docker Hub, data-volume seed, read-only role provisioning; `docs/containerization.md`)
 - GitHub Actions (`.github/workflows/ci.yml`: byte-compile + pipeline/viz image build on
   every push/PR, #14; `.github/workflows/publish-docker.yml`: pushes both images to Docker
-  Hub as `khvostenko/energy-etl` / `khvostenko/energy-viz` on `main`)
+  Hub as `khvostenko/aws-energy-etl` / `khvostenko/aws-energy-viz` on `main`)
 
 ## Data
 

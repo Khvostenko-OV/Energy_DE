@@ -421,8 +421,8 @@ dead-lettered and a CloudWatch alarm on the DLQ pages the same topic (§4).
 flowchart LR
     subgraph host["Server / dev machine — Docker Compose"]
         NG["nginx :80<br/>only published surface"]
-        VIZ["viz container<br/>Streamlit + PyDeck :8501<br/>image khvostenko/energy-viz"]
-        PIPE["pipeline container<br/>python -m etl run-all<br/>image khvostenko/energy-etl"]
+        VIZ["viz container<br/>Streamlit + PyDeck :8501<br/>image khvostenko/aws-energy-viz"]
+        PIPE["pipeline container<br/>python -m etl run-all<br/>image khvostenko/aws-energy-etl"]
         DB[("db container<br/>PostGIS 16 + PostGIS 3.4<br/>volume db_data")]
         VOL[("etl_data volume<br/>raw GPKGs + docker.env<br/>(seeded once)")]
     end
@@ -450,7 +450,7 @@ flowchart LR
 ```mermaid
 flowchart LR
     MAIN["push to main"] --> PUB["publish-docker.yml"]
-    PUB --> HUB[("Docker Hub<br/>khvostenko/energy-etl<br/>khvostenko/energy-viz")]
+    PUB --> HUB[("Docker Hub<br/>khvostenko/aws-energy-etl<br/>khvostenko/aws-energy-viz")]
     HUB --> COMPOSE["docker compose pull"]
     PR["any push / PR"] --> CI["ci.yml<br/>compileall + image builds"]
 ```

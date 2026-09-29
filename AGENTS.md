@@ -66,7 +66,7 @@ cheap gates only (byte-compile via `python -m compileall` + pipeline/viz image b
 because it has no PostGIS service — and must never require the raw data. The publish
 workflow
 (`.github/workflows/publish-docker.yml`) pushes both images to Docker Hub
-(`khvostenko/energy-etl`, `khvostenko/energy-viz`) on `main`, which `compose.yaml`
+(`khvostenko/aws-energy-etl`, `khvostenko/aws-energy-viz`) on `main`, which `compose.yaml`
 pulls (`build_compose.yaml`/`local_compose.yaml` still build from source).
 The raw data stays private either way.
 

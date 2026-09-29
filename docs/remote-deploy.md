@@ -65,7 +65,7 @@ export DB_USER=etl DB_PASSWORD='<you-know>'
 ## 5. Pull images + seed the data volume (once per machine)
 
 The pipeline and viz images are published to Docker Hub by CI
-(`khvostenko/energy-etl`, `khvostenko/energy-viz` — see
+(`khvostenko/aws-energy-etl`, `khvostenko/aws-energy-viz` — see
 `docs/containerization.md` → "CI & publishing"), so the server only **pulls**:
 
 ```bash

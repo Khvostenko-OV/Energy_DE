@@ -19,7 +19,7 @@ workflow — the server deployment does not use it; see "Server startup path").
 
 ```
  host machine (docker)
- ├─ images pulled from Docker Hub:  khvostenko/energy-etl, khvostenko/energy-viz
+ ├─ images pulled from Docker Hub:  khvostenko/aws-energy-etl, khvostenko/aws-energy-viz
  ├─ data/sources/*.gpkg, data/boundaries/*.gpkg   (private, git-ignored)
  ├─ scripts/seed_data_volume.sh  ── once per machine ──►  volume: etl_data
  │                                                       (data + docker.env)
@@ -31,7 +31,7 @@ workflow — the server deployment does not use it; see "Server startup path").
 
 The stack ships as **three compose variants**: `compose.yaml` is the server/deploy
 variant — the pipeline and viz containers are **pulled from Docker Hub**
-(`khvostenko/energy-etl`, `khvostenko/energy-viz`, both `latest` by default; see
+(`khvostenko/aws-energy-etl`, `khvostenko/aws-energy-viz`, both `latest` by default; see
 "CI & publishing" below); the viz container publishes no host port, `nginx`
 (port `${NGINX_PORT:-80}`) is the only externally reachable surface, proxying to
 `viz:8501` with WebSocket upgrade headers for Streamlit's live runtime
@@ -51,9 +51,9 @@ pulled — used for testing local image changes without publishing.
 
 | What | Where |
 |------|-------|
-| Pipeline image | pulled from Docker Hub (`khvostenko/energy-etl:latest`, `${PIPELINE_IMAGE}` override), built by CI and published on `main`; exposes `python -m etl` unchanged |
+| Pipeline image | pulled from Docker Hub (`khvostenko/aws-energy-etl:latest`, `${PIPELINE_IMAGE}` override), built by CI and published on `main`; exposes `python -m etl` unchanged |
 | PostGIS database | `db` service; PostGIS extension enabled by the image on first init; the read-only `viz_reader` role provisioned from `docker/viz_reader.sql` on the same init; **not published to the host** in the server variants |
-| Visualization app | `viz` service (Streamlit + PyDeck, no auth), pulled from Docker Hub (`khvostenko/energy-viz:latest`, `${VIZ_IMAGE}` override), reads `core`/`service`/`marts` as `viz_reader`; publishes `http://localhost:8501` in `local_compose.yaml` only |
+| Visualization app | `viz` service (Streamlit + PyDeck, no auth), pulled from Docker Hub (`khvostenko/aws-energy-viz:latest`, `${VIZ_IMAGE}` override), reads `core`/`service`/`marts` as `viz_reader`; publishes `http://localhost:8501` in `local_compose.yaml` only |
 | External entry point | `nginx` service (`nginx:stable-alpine`), publishes `${NGINX_PORT:-80}` → `viz:8501` with WebSocket support; only in `compose.yaml` / `build_compose.yaml` (server variants) |
 | Raw data + connection settings | detached named volume `etl_data`, seeded once per machine — **local variant only** |
 | Volume mount | `etl_data` → `/app/data` in `local_compose.yaml` (so `run-all`'s `data/sources/...`, `data/boundaries/...` resolve and both containers source `docker.env`); the server variants mount no data volume |
@@ -300,8 +300,8 @@ Two GitHub Actions workflows keep the images honest:
   and builds **both** the pipeline and viz images. Never requires the private
   raw data and never runs the integration suite.
 - `.github/workflows/publish-docker.yml` — on every push to `main`, builds and
-  pushes the images to Docker Hub as `khvostenko/energy-etl` and
-  `khvostenko/energy-viz` (both tagged `latest`, the tags `compose.yaml` pulls).
+  pushes the images to Docker Hub as `khvostenko/aws-energy-etl` and
+  `khvostenko/aws-energy-viz` (both tagged `latest`, the tags `compose.yaml` pulls).
   Needs the `DOCKER_PASSWORD` repo secret. The images carry no raw data or
   connection settings by design — the seed provides those at deploy time. The
   build-from-source variants are not affected: `build_compose.yaml` and
@@ -318,8 +318,8 @@ Two GitHub Actions workflows keep the images honest:
 | `POSTGRES_PORT` | `5433` | host port for the db (`local_compose.yaml` only; the server variants publish no db port) |
 | `VIZ_PORT` | `8501` | host port for the viz app (`local_compose.yaml` only) |
 | `NGINX_PORT` | `80` | host port for the nginx reverse proxy (`compose.yaml`, server variant) |
-| `PIPELINE_IMAGE` | `khvostenko/energy-etl:latest` | pipeline image `compose.yaml` pulls (override to pin a tag/registry) |
-| `VIZ_IMAGE` | `khvostenko/energy-viz:latest` | viz image `compose.yaml` pulls (override to pin a tag/registry) |
+| `PIPELINE_IMAGE` | `khvostenko/aws-energy-etl:latest` | pipeline image `compose.yaml` pulls (override to pin a tag/registry) |
+| `VIZ_IMAGE` | `khvostenko/aws-energy-viz:latest` | viz image `compose.yaml` pulls (override to pin a tag/registry) |
 | `DATABASE_URL` | — (required) | the pipeline role's PostGIS URL; server variants read it from the environment (no seeded volume) |
 | `S3_BUCKET` | — (required) | versioned data bucket holding the fixed `boundaries/` and `sources/` keys |
 | `SQS_QUEUE_URL` | — (required) | queue carrying the S3 ObjectCreated events |

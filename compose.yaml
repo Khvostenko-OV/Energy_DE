@@ -44,7 +44,7 @@
 #             domain.
 #
 # Images: the pipeline and viz containers are pulled from Docker Hub
-# (`khvostenko/energy-etl`, `khvostenko/energy-viz`, both `latest` by default;
+# (`khvostenko/aws-energy-etl`, `khvostenko/aws-energy-viz`, both `latest` by default;
 # `${PIPELINE_IMAGE}` / `${VIZ_IMAGE}` override to pin another tag or registry).
 # The build-from-source twin of this file — the same stack that compiles both
 # images from this repo — is `build_compose.yaml`.
@@ -96,7 +96,7 @@ services:
       start_period: 10s
 
   pipeline:
-    image: ${PIPELINE_IMAGE:-khvostenko/energy-etl:latest}
+    image: ${PIPELINE_IMAGE:-khvostenko/aws-energy-etl:latest}
     # The server startup path (issue #8): explicit bootstrap — database
     # preconditions, fixed S3 key checks, current Boundary releases, current
     # Source object versions enqueued — then the ingestion worker. A fatal
@@ -117,7 +117,7 @@ services:
         condition: service_healthy
 
   viz:
-    image: ${VIZ_IMAGE:-khvostenko/energy-viz:latest}
+    image: ${VIZ_IMAGE:-khvostenko/aws-energy-viz:latest}
     restart: always
     # "streamlit run viz/app.py --server.headless --server.address
     # 0.0.0.0 --server.port 8501" is the image's default command; nothing to
