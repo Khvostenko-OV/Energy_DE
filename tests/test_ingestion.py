@@ -120,6 +120,17 @@ class FakeSNS:
         return "\n".join(message for _, message in self.messages)
 
 
+class RecordingSQS(FakeSQS):
+    """A queue that also records what was sent to it (the startup/redrive path)."""
+
+    def __init__(self):
+        super().__init__()
+        self.sent = []
+
+    def send_message(self, body: str) -> None:
+        self.sent.append(body)
+
+
 class FakeProcessor:
     def __init__(self):
         self.objects = []
@@ -541,6 +552,8 @@ def test_cli_keeps_local_stage_commands_and_run_all():
         "run-all",
         "bootstrap",
         "worker",
+        "startup",
+        "redrive",
     ):
         assert command in invocation.output
 
@@ -557,6 +570,380 @@ def test_run_all_keeps_existing_stage_order(monkeypatch):
 
     assert invocation.exit_code == 0
     assert calls == ["boundaries", "extract", "transform", "load", "marts"]
+
+
+def _publish_boundary_levels(s3, tmp_path, handle="startup"):
+    """Put a valid GPKG at every fixed Boundary key as one object version."""
+    for level in range(4):
+        key = f"boundaries/level-{level}.gpkg"
+        s3.put(
+            key,
+            f"{handle}-level-{level}",
+            _frame_bytes(tmp_path, f"{handle}-l{level}.gpkg", _boundary_frame(level)),
+        )
+
+
+def _publish_source_snapshots(s3, tmp_path, handle="startup"):
+    """Put a valid Source GPKG at every fixed Source key as one object version."""
+    for source in SOURCE_NAMES:
+        s3.put(
+            f"sources/{source}.gpkg",
+            f"{handle}-{source}",
+            _frame_bytes(tmp_path, f"{handle}-{source}.gpkg", _fixture_frame(source)),
+        )
+
+
+def _insert_run(schemas, object_id, state, terminal_error=None):
+    """Insert an Ingestion run directly, without the worker processing it."""
+    with ENGINE.begin() as connection:
+        connection.execute(
+            text(
+                f"INSERT INTO {schemas['service']}.ingestion_runs "
+                "(run_id, bucket, object_key, object_version_id, input_kind, state, "
+                "terminal_error) "
+                "VALUES (:run_id, :bucket, :object_key, :object_version_id, 'source', "
+                ":state, :error)"
+            ),
+            {
+                "run_id": str(uuid.uuid4()),
+                "bucket": object_id.bucket,
+                "object_key": object_id.key,
+                "object_version_id": object_id.version_id,
+                "state": state.value,
+                "error": terminal_error,
+            },
+        )
+
+
+def _matviews(schemas):
+    return _query(
+        "SELECT count(*) AS n FROM pg_matviews WHERE schemaname = :schema "
+        "AND matviewname IN ('installation_counts','generation_capacity',"
+        "'storage_capacity')",
+        {"schema": schemas["marts"]},
+    )[0]["n"]
+
+
+def test_startup_applies_boundaries_then_enqueues_current_source_versions(
+    fixture_boundaries, tmp_path
+):
+    schemas = fixture_boundaries["schemas"]
+    s3 = fixture_boundaries["s3"]
+    sqs = RecordingSQS()
+    _publish_boundary_levels(s3, tmp_path)
+    _publish_source_snapshots(s3, tmp_path)
+
+    result = ingestion.run_startup(
+        ingestion.BootstrapConfig(bucket="energy-data"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        processor=fixture_boundaries["processor"],
+    )
+
+    assert result.worker_start_allowed
+    assert result.metadata_ready
+    assert result.enqueued == tuple(
+        ingestion.S3ObjectId("energy-data", f"sources/{source}.gpkg", f"startup-{source}")
+        for source in SOURCE_NAMES
+    )
+    assert result.known == ()
+    # The four releases were applied and ledgered, and the layer is complete.
+    # (The fixture's own filename-based load logged bucket-less rows; the
+    # S3 releases are the ones with a bucket.)
+    assert _query(
+        f"SELECT count(*) AS n FROM {schemas['service']}.loaded_files "
+        "WHERE bucket IS NOT NULL"
+    ) == [{"n": 4}]
+    assert verify._verify_boundaries(ENGINE) == []
+    # The marts were refreshed once by the bootstrap itself.
+    assert _matviews(schemas) == 3
+    # One S3-record message per source version, in the worker's format.
+    assert len(sqs.sent) == len(SOURCE_NAMES)
+    assert json.loads(sqs.sent[0])["Records"][0]["s3"]["object"] == {
+        "key": "sources/bio.gpkg",
+        "versionId": "startup-bio",
+    }
+    # The bootstrap created no Ingestion run: a run belongs to the worker's
+    # processing of the enqueued message, not to the enqueue.
+    assert _query(f"SELECT 1 FROM {schemas['service']}.ingestion_runs") == []
+
+
+def test_startup_refuses_the_worker_for_a_missing_boundary(fixture_boundaries, tmp_path):
+    s3 = fixture_boundaries["s3"]
+    sqs = RecordingSQS()
+    _publish_boundary_levels(s3, tmp_path)
+    del s3.current["boundaries/level-2.gpkg"]
+
+    result = ingestion.run_startup(
+        ingestion.BootstrapConfig(bucket="energy-data"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        processor=fixture_boundaries["processor"],
+    )
+
+    assert not result.worker_start_allowed
+    assert sqs.sent == []
+    schemas = fixture_boundaries["schemas"]
+    assert _query(
+        f"SELECT 1 FROM {schemas['service']}.loaded_files WHERE bucket IS NOT NULL"
+    ) == []
+
+
+def test_startup_refuses_the_worker_for_an_invalid_boundary(fixture_boundaries, tmp_path):
+    s3 = fixture_boundaries["s3"]
+    sqs = RecordingSQS()
+    _publish_boundary_levels(s3, tmp_path)
+    wrong_level = _boundary_frame(3)
+    wrong_level["level"] = 2  # published at the level-3 key
+    s3.put(
+        "boundaries/level-3.gpkg",
+        "startup-bad-level",
+        _frame_bytes(tmp_path, "bad-level.gpkg", wrong_level),
+    )
+
+    result = ingestion.run_startup(
+        ingestion.BootstrapConfig(bucket="energy-data"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        processor=fixture_boundaries["processor"],
+    )
+
+    assert not result.worker_start_allowed
+    assert sqs.sent == []
+    schemas = fixture_boundaries["schemas"]
+    assert _query(
+        f"SELECT 1 FROM {schemas['service']}.loaded_files WHERE bucket IS NOT NULL"
+    ) == []
+
+
+def test_startup_treats_a_missing_source_as_non_fatal(fixture_boundaries, tmp_path):
+    s3 = fixture_boundaries["s3"]
+    sqs = RecordingSQS()
+    _publish_boundary_levels(s3, tmp_path)
+    _publish_source_snapshots(s3, tmp_path)
+    del s3.current["sources/bio.gpkg"]
+
+    result = ingestion.run_startup(
+        ingestion.BootstrapConfig(bucket="energy-data"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        processor=fixture_boundaries["processor"],
+    )
+
+    assert result.worker_start_allowed
+    assert result.enqueued == tuple(
+        ingestion.S3ObjectId("energy-data", f"sources/{source}.gpkg", f"startup-{source}")
+        for source in SOURCE_NAMES
+        if source != "bio"
+    )
+
+
+def test_startup_does_not_reenqueue_versions_the_worker_settled(
+    fixture_boundaries, tmp_path
+):
+    schemas = fixture_boundaries["schemas"]
+    s3 = fixture_boundaries["s3"]
+    sqs = RecordingSQS()
+    processor = fixture_boundaries["processor"]
+    _publish_boundary_levels(s3, tmp_path)
+    _publish_source_snapshots(s3, tmp_path)
+
+    first = ingestion.run_startup(
+        ingestion.BootstrapConfig(bucket="energy-data"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        processor=processor,
+    )
+    assert len(first.enqueued) == len(SOURCE_NAMES)
+
+    # The worker drains the enqueued messages: every version ends succeeded.
+    for index, body in enumerate(sqs.sent):
+        processed = ingestion.process_one_message(
+            ingestion.SqsMessage(receipt_handle=f"receipt-{index}", body=body),
+            engine=ENGINE,
+            s3=s3,
+            sqs=sqs,
+            sns=FakeSNS(),
+            processor=processor,
+        )
+        assert processed.acknowledged
+
+    second = ingestion.run_startup(
+        ingestion.BootstrapConfig(bucket="energy-data"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        processor=processor,
+    )
+
+    assert second.worker_start_allowed
+    assert second.enqueued == ()
+    assert len(second.known) == len(SOURCE_NAMES)
+    assert len(sqs.sent) == len(SOURCE_NAMES)
+
+
+@pytest.mark.parametrize(
+    "state,error",
+    [
+        (ingestion.RunState.SUCCEEDED, None),
+        (ingestion.RunState.STALE, "Superseded object version"),
+        (ingestion.RunState.TERMINAL, "extract failed: rejected"),
+        (
+            ingestion.RunState.RETRYABLE,
+            "delivery attempts exhausted after 5 deliveries, so the message "
+            "goes to the DLQ",
+        ),
+    ],
+)
+def test_startup_does_not_reenqueue_a_known_version_in_any_settled_state(
+    fixture_boundaries, tmp_path, state, error
+):
+    schemas = fixture_boundaries["schemas"]
+    s3 = fixture_boundaries["s3"]
+    sqs = RecordingSQS()
+    _publish_boundary_levels(s3, tmp_path)
+    _publish_source_snapshots(s3, tmp_path)
+    object_id = ingestion.S3ObjectId("energy-data", "sources/wind.gpkg", "startup-wind")
+    _insert_run(schemas, object_id, state, terminal_error=error)
+
+    result = ingestion.run_startup(
+        ingestion.BootstrapConfig(bucket="energy-data"),
+        engine=ENGINE,
+        s3=s3,
+        sqs=sqs,
+        processor=fixture_boundaries["processor"],
+    )
+
+    assert result.worker_start_allowed
+    assert object_id in result.known
+    assert object_id not in result.enqueued
+    # The other five sources are still unknown, so only wind's message is absent.
+    assert len(sqs.sent) == len(SOURCE_NAMES) - 1
+    assert all(
+        json.loads(body)["Records"][0]["s3"]["object"]["key"] != object_id.key
+        for body in sqs.sent
+    )
+
+
+def test_redrive_reenqueues_failed_and_dlq_versions_only(fixture_boundaries):
+    schemas = fixture_boundaries["schemas"]
+    sqs = RecordingSQS()
+    succeeded = ingestion.S3ObjectId("energy-data", "sources/bio.gpkg", "v-succeeded")
+    stale = ingestion.S3ObjectId("energy-data", "sources/gas.gpkg", "v-stale")
+    terminal = ingestion.S3ObjectId("energy-data", "sources/hydro.gpkg", "v-terminal")
+    failed = ingestion.S3ObjectId("energy-data", "sources/solar.gpkg", "v-failed")
+    dlq = ingestion.S3ObjectId("energy-data", "sources/wind.gpkg", "v-dlq")
+    _insert_run(schemas, succeeded, ingestion.RunState.SUCCEEDED)
+    _insert_run(schemas, stale, ingestion.RunState.STALE, terminal_error="superseded")
+    _insert_run(schemas, terminal, ingestion.RunState.TERMINAL, terminal_error="rejected")
+    _insert_run(schemas, failed, ingestion.RunState.RETRYABLE, terminal_error="marts failed")
+    _insert_run(
+        schemas,
+        dlq,
+        ingestion.RunState.RETRYABLE,
+        terminal_error="delivery attempts exhausted after 5 deliveries",
+    )
+
+    redriven = ingestion.redrive(engine=ENGINE, sqs=sqs)
+
+    assert redriven == (failed, dlq)
+    assert len(sqs.sent) == 2
+    assert json.loads(sqs.sent[0])["Records"][0]["s3"]["object"] == {
+        "key": "sources/solar.gpkg",
+        "versionId": "v-failed",
+    }
+
+
+def test_redrive_with_a_key_narrows_to_that_key(fixture_boundaries):
+    schemas = fixture_boundaries["schemas"]
+    sqs = RecordingSQS()
+    other = ingestion.S3ObjectId("energy-data", "sources/bio.gpkg", "v-failed")
+    mine = ingestion.S3ObjectId("energy-data", "sources/solar.gpkg", "v-failed")
+    _insert_run(schemas, other, ingestion.RunState.RETRYABLE)
+    _insert_run(schemas, mine, ingestion.RunState.RETRYABLE)
+
+    redriven = ingestion.redrive(engine=ENGINE, sqs=sqs, key="sources/solar.gpkg")
+
+    assert redriven == (mine,)
+    assert len(sqs.sent) == 1
+
+
+def _startup_cli(monkeypatch, result):
+    """The startup command with its AWS seam replaced by recorders."""
+    calls = []
+    monkeypatch.setattr("etl.__main__.get_engine", lambda: object())
+    monkeypatch.setattr("etl.__main__._s3_adapter", lambda: object(), raising=False)
+    monkeypatch.setattr("etl.__main__._sqs_adapter", lambda url: object(), raising=False)
+    monkeypatch.setattr("etl.__main__._sns_adapter", lambda arn: object(), raising=False)
+    monkeypatch.setattr(
+        "etl.__main__.run_startup", lambda *args, **kwargs: calls.append("startup") or result
+    )
+    monkeypatch.setattr(
+        "etl.__main__.run_worker", lambda **kwargs: calls.append("worker")
+    )
+    return calls
+
+
+def test_startup_command_bootstraps_before_the_worker(monkeypatch):
+    result = ingestion.StartupResult(
+        metadata_ready=True,
+        worker_start_allowed=True,
+        checks=(),
+        release_results=(),
+        enqueued=(),
+        known=(),
+    )
+    calls = _startup_cli(monkeypatch, result)
+
+    invocation = CliRunner().invoke(
+        cli,
+        ["startup", "--bucket", "energy-data", "--queue-url", "https://queue", "--topic-arn", "arn"],
+    )
+
+    assert invocation.exit_code == 0
+    assert calls == ["startup", "worker"]
+    assert "Worker start     : allowed" in invocation.output
+
+
+def test_startup_command_refuses_the_worker_after_a_fatal_boundary(monkeypatch):
+    result = ingestion.StartupResult(
+        metadata_ready=True,
+        worker_start_allowed=False,
+        checks=(),
+        release_results=(),
+        enqueued=(),
+        known=(),
+    )
+    calls = _startup_cli(monkeypatch, result)
+
+    invocation = CliRunner().invoke(
+        cli,
+        ["startup", "--bucket", "energy-data", "--queue-url", "https://queue", "--topic-arn", "arn"],
+    )
+
+    assert invocation.exit_code == 1
+    assert calls == ["startup"]
+    assert "Worker start     : blocked" in invocation.output
+
+
+def test_redrive_command_reenqueues_failed_versions(monkeypatch):
+    redriven = (ingestion.S3ObjectId("energy-data", "sources/solar.gpkg", "v-failed"),)
+    monkeypatch.setattr("etl.__main__.get_engine", lambda: object())
+    monkeypatch.setattr("etl.__main__._sqs_adapter", lambda url: object(), raising=False)
+    monkeypatch.setattr(
+        "etl.__main__.redrive_versions", lambda *args, **kwargs: redriven
+    )
+
+    invocation = CliRunner().invoke(cli, ["redrive", "--queue-url", "https://queue"])
+
+    assert invocation.exit_code == 0
+    assert "Redriven 1 object version(s)" in invocation.output
+    assert "sources/solar.gpkg (v-failed)" in invocation.output
 
 
 def _solar_snapshot(rows):

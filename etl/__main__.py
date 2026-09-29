@@ -13,6 +13,8 @@ from etl.ingestion import (
     BootstrapConfig,
     PipelineProcessor,
     bootstrap as bootstrap_ingestion,
+    redrive as redrive_versions,
+    run_startup,
     run_worker,
 )
 from etl.load import load_generators, load_storages
@@ -47,6 +49,18 @@ def _sns_adapter(topic_arn: str) -> Boto3SNSAdapter:
     return Boto3SNSAdapter(_client("sns"), topic_arn)
 
 
+def _echo_check_report(title: str, result) -> None:
+    """The shared bootstrap report head: metadata, worker start, key checks."""
+    click.echo(f"\n{title}:")
+    click.echo(f"  Metadata ready   : {'yes' if result.metadata_ready else 'no'}")
+    click.echo(
+        f"  Worker start     : {'allowed' if result.worker_start_allowed else 'blocked'}"
+    )
+    for check in result.checks:
+        requirement = "required" if check.required else "optional"
+        click.echo(f"  {check.key} ({requirement}): {check.message}")
+
+
 @cli.command()
 @click.option("--bucket", envvar="S3_BUCKET", required=True, help="Versioned S3 data bucket.")
 def bootstrap(bucket: str):
@@ -55,14 +69,7 @@ def bootstrap(bucket: str):
         engine=get_engine(),
         s3=_s3_adapter(),
     )
-    click.echo("\nBootstrap report:")
-    click.echo(f"  Metadata ready   : {'yes' if result.metadata_ready else 'no'}")
-    click.echo(
-        f"  Worker start     : {'allowed' if result.worker_start_allowed else 'blocked'}"
-    )
-    for check in result.checks:
-        requirement = "required" if check.required else "optional"
-        click.echo(f"  {check.key} ({requirement}): {check.message}")
+    _echo_check_report("Bootstrap report", result)
     if not result.worker_start_allowed:
         raise SystemExit(1)
 
@@ -98,6 +105,79 @@ def worker(queue_url: str, topic_arn: str, max_messages: int | None):
         click.echo("Worker stopped.")
         return
     click.echo(f"Worker processed {processed} message(s).")
+
+
+@cli.command()
+@click.option("--bucket", envvar="S3_BUCKET", required=True, help="Versioned S3 data bucket.")
+@click.option("--queue-url", envvar="SQS_QUEUE_URL", required=True, help="Queue carrying the S3 ObjectCreated events.")
+@click.option("--topic-arn", envvar="SNS_TOPIC_ARN", required=True, help="Topic for ingestion and DLQ alerts.")
+def startup(bucket: str, queue_url: str, topic_arn: str):
+    """Bootstrap the server deployment, then run the ingestion worker.
+
+    The explicit startup path (issue #8): database preconditions and the fixed
+    S3 key checks, the current Boundary releases applied with their downstream
+    rebuild, and the current Source object versions enqueued — then the worker.
+    A fatal Boundary condition (a missing or invalid release) refuses the
+    worker start, so the container crash-loops until the operator fixes it.
+    """
+    engine = get_engine()
+    s3 = _s3_adapter()
+    processor = PipelineProcessor(engine, s3=s3)
+    result = run_startup(
+        BootstrapConfig(bucket=bucket),
+        engine=engine,
+        s3=s3,
+        sqs=_sqs_adapter(queue_url),
+        processor=processor,
+    )
+
+    _echo_check_report("Startup report", result)
+    if result.release_results:
+        applied = sorted(
+            {
+                str(detail)
+                for stage in result.release_results
+                for name, detail in stage.details.items()
+                if name == "level"
+            }
+        )
+        click.echo(f"  Boundary release : applied (levels {', '.join(applied)})")
+    else:
+        click.echo("  Boundary release : already current")
+    click.echo(f"  Enqueued         : {len(result.enqueued)} source object version(s)")
+    for object_id in result.enqueued:
+        click.echo(f"    {object_id.key} ({object_id.version_id})")
+    click.echo(f"  Already known    : {len(result.known)} source object version(s)")
+
+    if not result.worker_start_allowed:
+        raise SystemExit(1)
+
+    click.echo(f"\nIngestion worker reading {queue_url}")
+    run_worker(
+        engine=engine,
+        s3=s3,
+        sqs=_sqs_adapter(queue_url),
+        sns=_sns_adapter(topic_arn),
+        processor=processor,
+    )
+
+
+@cli.command()
+@click.option("--queue-url", envvar="SQS_QUEUE_URL", required=True, help="Queue the S3 ObjectCreated events are redriven to.")
+@click.option("--key", default=None, help="Redrive only this object key (default: every failed or DLQ object version).")
+def redrive(queue_url: str, key: str | None):
+    """Re-enqueue failed or DLQ object versions for another attempt.
+
+    The explicit recovery path (issue #8): every object version the worker left
+    unsettled — a retryable failure, or a message the queue moved to the DLQ —
+    is sent back to the queue, which resumes its run on the next delivery.
+    Settled versions (succeeded, stale, terminal) are left alone.
+    """
+    redriven = redrive_versions(get_engine(), sqs=_sqs_adapter(queue_url), key=key)
+
+    click.echo(f"\nRedriven {len(redriven)} object version(s):")
+    for object_id in redriven:
+        click.echo(f"  {object_id.key} ({object_id.version_id})")
 
 
 @cli.command()

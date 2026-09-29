@@ -169,6 +169,8 @@ class S3Adapter(Protocol):
 class SQSAdapter(Protocol):
     def receive_message(self) -> SqsMessage | None: ...
 
+    def send_message(self, body: str) -> None: ...
+
     def change_message_visibility(
         self, receipt_handle: str, timeout_seconds: int
     ) -> None: ...
@@ -249,6 +251,9 @@ class Boto3SQSAdapter:
             message["Body"],
             attempt=int(attributes.get("ApproximateReceiveCount", 1)),
         )
+
+    def send_message(self, body: str) -> None:
+        self.client.send_message(QueueUrl=self.queue_url, MessageBody=body)
 
     def change_message_visibility(
         self, receipt_handle: str, timeout_seconds: int
@@ -420,7 +425,10 @@ class PipelineProcessor:
         return tuple(results)
 
     def process_boundaries(
-        self, objects: Sequence[tuple[S3ObjectId, bytes]]
+        self,
+        objects: Sequence[tuple[S3ObjectId, bytes]],
+        *,
+        run_id_factory: Callable[[S3ObjectId], str] | None = None,
     ) -> Sequence[StageResult]:
         """Apply the Boundary objects of one message as one release (issue #5).
 
@@ -433,7 +441,13 @@ class PipelineProcessor:
         The rebuild runs even when the release was already applied, which is
         what makes a redelivery of a message whose rebuild failed safe: the
         replacement is skipped, the geography is redone.
+
+        `run_id_factory` overrides where the load ledger's `ingestion_run_id`
+        comes from. The worker passes nothing and uses the run it started for
+        the object version; the startup bootstrap (issue #8) passes a factory,
+        because it applies releases without creating Ingestion runs.
         """
+        run_id_of = run_id_factory or self._run_id
         validated: list[BoundaryObject] = []
         failures: dict[str, str] = {}
         for object_id, body in objects:
@@ -448,7 +462,7 @@ class PipelineProcessor:
                     bucket=object_id.bucket,
                     object_key=object_id.key,
                     object_version_id=object_id.version_id,
-                    ingestion_run_id=self._run_id(object_id),
+                    ingestion_run_id=run_id_of(object_id),
                 )
             )
         if failures:
@@ -705,6 +719,242 @@ def bootstrap(
         ),
         checks=tuple(checks),
     )
+
+
+@dataclass(frozen=True)
+class StartupResult:
+    """What the explicit startup bootstrap did, and whether the worker may start.
+
+    `release_results` carries the boundary-release, geography-rebuild and
+    marts stage results of the bootstrap itself (empty when every release was
+    already current). `enqueued` holds the Source object versions sent to the
+    queue; `known` the ones skipped because the service already holds a run
+    for them.
+    """
+
+    metadata_ready: bool
+    worker_start_allowed: bool
+    checks: tuple[BootstrapCheck, ...]
+    release_results: tuple[StageResult, ...]
+    enqueued: tuple[S3ObjectId, ...]
+    known: tuple[S3ObjectId, ...]
+
+
+def run_startup(
+    config: BootstrapConfig,
+    *,
+    engine: Engine,
+    s3: S3Adapter,
+    sqs: SQSAdapter,
+    processor: MessageProcessor,
+) -> StartupResult:
+    """Bootstrap a server deployment, then report whether the worker may start.
+
+    The explicit startup path (issue #8), in order:
+
+    1. database preconditions and the fixed S3 key checks (`bootstrap`);
+    2. the current Boundary releases applied as one batch, with the downstream
+       geography rebuilt and the marts refreshed once;
+    3. the current Source object versions enqueued for the worker.
+
+    A missing or invalid Boundary condition is fatal: the result says the
+    worker must not start, so the caller refuses it. A missing Source object is
+    non-fatal. No Ingestion run is created here — a run belongs to the worker's
+    processing of a message, not to the bootstrap that only prepares and
+    enqueues it.
+    """
+    try:
+        report = bootstrap(config, engine=engine, s3=s3)
+    except Exception as error:
+        log.error("Startup bootstrap failed: %s", error)
+        return StartupResult(
+            metadata_ready=False,
+            worker_start_allowed=False,
+            checks=(),
+            release_results=(),
+            enqueued=(),
+            known=(),
+        )
+    if not report.worker_start_allowed:
+        return _refused(report)
+
+    try:
+        release_results = tuple(
+            _apply_boundary_releases(config, engine, s3, processor)
+        )
+        enqueued, known = _enqueue_current_sources(config, engine, s3, sqs)
+    except Exception as error:
+        log.error("Startup bootstrap failed: %s", error)
+        return _refused(report)
+
+    return StartupResult(
+        metadata_ready=report.metadata_ready,
+        worker_start_allowed=True,
+        checks=report.checks,
+        release_results=release_results,
+        enqueued=enqueued,
+        known=known,
+    )
+
+
+def _refused(report: BootstrapResult) -> StartupResult:
+    """The startup result for a deployment the worker must not start against."""
+    return StartupResult(
+        metadata_ready=report.metadata_ready,
+        worker_start_allowed=False,
+        checks=report.checks,
+        release_results=(),
+        enqueued=(),
+        known=(),
+    )
+
+
+def _apply_boundary_releases(
+    config: BootstrapConfig,
+    engine: Engine,
+    s3: S3Adapter,
+    processor: MessageProcessor,
+) -> Sequence[StageResult]:
+    """Load the new Boundary releases, then refresh the marts once.
+
+    A release already in the load ledger was applied from that exact immutable
+    version before, so only never-seen versions are processed — an S3 version
+    cannot change under a ledgered id. One invalid level rejects the whole
+    batch, so a bad file can never partially apply. The marts are refreshed
+    once afterwards, so a boundary-only change leaves no stale pivots even when
+    no Source object is available to carry a worker message.
+    """
+    pending: list[tuple[S3ObjectId, bytes]] = []
+    for key in BOUNDARY_KEYS:
+        object_id = s3.head_current(config.bucket, key)
+        if object_id is None:
+            continue
+        body = s3.read_version(object_id)
+        if _release_ledgered(engine, object_id):
+            continue
+        pending.append((object_id, body))
+    if not pending:
+        return ()
+    results = list(
+        processor.process_boundaries(
+            pending, run_id_factory=lambda _: str(uuid.uuid4())
+        )
+    )
+    results.extend(processor.finalize())
+    return results
+
+
+def _release_ledgered(engine: Engine, object_id: S3ObjectId) -> bool:
+    return _has_row(engine, "loaded_files", object_id)
+
+
+def _enqueue_current_sources(
+    config: BootstrapConfig,
+    engine: Engine,
+    s3: S3Adapter,
+    sqs: SQSAdapter,
+) -> tuple[tuple[S3ObjectId, ...], tuple[S3ObjectId, ...]]:
+    """Enqueue the current version of every available Source object.
+
+    A version the service already holds a run for is left alone, whatever that
+    run's state: succeeded, stale and terminal versions are settled, a DLQ
+    version's run is still there (the message left the queue, not the run), and
+    an in-flight retryable version's message is still in the queue for SQS to
+    redeliver. Re-enqueuing any of them would duplicate work, so only
+    never-seen versions are sent — and no Ingestion run is created for them.
+    """
+    enqueued: list[S3ObjectId] = []
+    known: list[S3ObjectId] = []
+    for key in SOURCE_KEYS:
+        object_id = s3.head_current(config.bucket, key)
+        if object_id is None:
+            continue
+        if _has_run(engine, object_id):
+            known.append(object_id)
+            continue
+        sqs.send_message(_s3_event_body(object_id))
+        enqueued.append(object_id)
+    return tuple(enqueued), tuple(known)
+
+
+def _has_run(engine: Engine, object_id: S3ObjectId) -> bool:
+    """True if the service holds an Ingestion run for this exact object version."""
+    return _has_row(engine, "ingestion_runs", object_id)
+
+
+def _has_row(engine: Engine, table: str, object_id: S3ObjectId) -> bool:
+    """True if `service.<table>` holds a row for this exact S3 object version."""
+    with engine.connect() as connection:
+        return (
+            connection.execute(
+                text(
+                    f"SELECT 1 FROM {SERVICE_SCHEMA}.{table} "
+                    "WHERE bucket = :bucket AND object_key = :object_key "
+                    "AND object_version_id = :version"
+                ),
+                {
+                    "bucket": object_id.bucket,
+                    "object_key": object_id.key,
+                    "version": object_id.version_id,
+                },
+            ).first()
+            is not None
+        )
+
+
+def _s3_event_body(object_id: S3ObjectId) -> str:
+    """The S3 ObjectCreated event body the worker's message parser accepts."""
+    return json.dumps(
+        {
+            "Records": [
+                {
+                    "eventSource": "aws:s3",
+                    "s3": {
+                        "bucket": {"name": object_id.bucket},
+                        "object": {
+                            "key": object_id.key,
+                            "versionId": object_id.version_id,
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+
+def redrive(
+    engine: Engine,
+    *,
+    sqs: SQSAdapter,
+    key: str | None = None,
+) -> tuple[S3ObjectId, ...]:
+    """Re-enqueue failed or DLQ object versions for another attempt.
+
+    The explicit recovery path (issue #8): every object version the worker left
+    unsettled — a retryable failure, or a message the queue spent its deliveries
+    on and moved to the DLQ — is sent back to the queue, whose redelivery
+    resumes the version's existing run. Settled versions (succeeded, stale,
+    terminal) are left alone, and `key` narrows the redrive to one object key.
+    """
+    query = (
+        f"SELECT bucket, object_key, object_version_id "
+        f"FROM {SERVICE_SCHEMA}.ingestion_runs WHERE state = :state"
+    )
+    parameters: dict[str, object] = {"state": RunState.RETRYABLE.value}
+    if key is not None:
+        query += " AND object_key = :object_key"
+        parameters["object_key"] = key
+    query += " ORDER BY object_key"
+    with engine.connect() as connection:
+        rows = connection.execute(text(query), parameters).mappings().all()
+    redriven: list[S3ObjectId] = []
+    for row in rows:
+        object_id = S3ObjectId(
+            row["bucket"], row["object_key"], row["object_version_id"]
+        )
+        sqs.send_message(_s3_event_body(object_id))
+        redriven.append(object_id)
+    return tuple(redriven)
 
 
 @dataclass(frozen=True)

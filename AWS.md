@@ -26,6 +26,11 @@
 - The message is deleted only when every record is successful, terminally skipped, or stale. If one record is still retryable the message stays, and redelivery processes only the records that are not settled yet
 - The topic is read from `SNS_TOPIC_ARN`, the queue from `SQS_QUEUE_URL`, the bucket from `S3_BUCKET`
 
+### Startup and recovery (issue #8)
+- The server container runs `python -m etl startup`: an explicit bootstrap — database preconditions, the fixed S3 key checks, the current Boundary releases applied with their downstream rebuild, the current Source object versions enqueued — and only then the worker. A missing or invalid Boundary is fatal: the container refuses the worker start and crash-loops until it is fixed; a missing Source is non-fatal
+- The bootstrap creates no Ingestion run and mounts no data volume — the worker reads S3 through the event queue. Repeated starts are idempotent: ledgered Boundary releases are skipped and Source versions that already have a run (succeeded, stale, terminal, DLQ, in-flight) are not re-enqueued
+- Recovery: `python -m etl redrive` re-enqueues failed or DLQ object versions (`--key` narrows to one key); the queue's redelivery resumes each version's existing run
+
 ### Retries, rejection, DLQ, and alerting (issue #7)
 - **Rejected object version → terminal, alerted once.** A file that fails its own content validation can never be ingested as it stands, because an S3 version is immutable and validating it again gives the same answer. The worker does not spend five deliveries finding that out: the run becomes `terminal`, one SNS alert names the key, version, and the fix (upload a new version), and the message is deleted so the files behind it are not held up. A redelivery of the same message does not alert again
 - **Infrastructure failure → retried, then DLQ.** Database, S3, and marts failures are retried on the next delivery, up to the queue's `maxReceiveCount = 5`. The worker takes the attempt number from SQS's `ApproximateReceiveCount`, so a redelivery after a crashed worker also counts

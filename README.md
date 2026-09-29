@@ -92,8 +92,10 @@ docker compose -f local_compose.yaml up --build --wait db viz
   (`docker/viz_reader.sql`); `pipeline` runs `run-all` on demand
   (`docker compose -f local_compose.yaml run --rm pipeline`); `viz` serves the
   Streamlit app on http://localhost:8501. (The server/deploy variant is
-  `compose.yaml` — nginx entry point, no published viz port, images **pulled**
-  from Docker Hub; `build_compose.yaml` is its build-from-source twin.)
+  `compose.yaml` — nginx entry point, no published viz port, no published
+  PostGIS port, no data volume: `pipeline` runs `python -m etl startup`, the
+  explicit bootstrap-then-worker path reading S3/SQS/SNS;
+  `build_compose.yaml` is its build-from-source twin.)
 - Verify the marts:
   `docker compose -f local_compose.yaml exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"`
 - *Alternative: seed a remote PostGIS and point the seed script's `DB_HOST`/`DB_PORT`
@@ -114,7 +116,7 @@ The suite is hermetic: it needs its own database and nothing else — no raw dat
 pre-seeded dev database, and it never reads `data/`.
 
 ```sh
-.venv/bin/python -m pytest                                 # 374 tests, ~11s
+.venv/bin/python -m pytest                                 # 475 tests, ~50s
 ```
 
 Set `TEST_DATABASE_URL` in `.env` (see `.env.example`) to any throwaway database name —
