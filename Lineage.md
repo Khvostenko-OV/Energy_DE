@@ -409,11 +409,13 @@ hours later.
 
 ### 4.2 IAM and observability
 
-The worker's EC2 role needs `s3:GetObject`, `sqs:ReceiveMessage`,
-`DeleteMessage`, `ChangeMessageVisibility`, `GetQueueAttributes`,
-`sns:Publish`, and `logs:CreateLogStream` / `logs:PutLogEvents` (`AWS.md` §5, §3).
-A rejected object version publishes an SNS alert; a message that runs out of deliveries is
-dead-lettered and a CloudWatch alarm on the DLQ pages the same topic (§4).
+The worker's EC2 role needs `s3:GetObject` and `s3:GetObjectVersion` on the fixed accepted
+keys, `sqs:ReceiveMessage`, `DeleteMessage`, `ChangeMessageVisibility`, `SendMessage`,
+`sns:Publish`, and `logs:CreateLogStream` / `logs:PutLogEvents` (`AWS.md` §5, §3). It is
+not granted `s3:ListBucket` or `sqs:GetQueueAttributes`: nothing in the worker lists the
+bucket or inspects the queue — the delivery count arrives as a message attribute on the
+receive call. A rejected object version publishes an SNS alert; a message that runs out of
+deliveries is dead-lettered and a CloudWatch alarm on the DLQ pages the same topic (§4).
 
 ### 4.3 Container stack
 

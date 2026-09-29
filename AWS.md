@@ -24,7 +24,7 @@
 - Records are processed independently: each one is its own Ingestion run with its own result, and a failing record never blocks the others in the same message
 - The geography rebuild and the three materialized views are refreshed **once** per message, after the last record
 - The message is deleted only when every record is successful, terminally skipped, or stale. If one record is still retryable the message stays, and redelivery processes only the records that are not settled yet
-- The topic is read from `SNS_TOPIC_ARN`, the queue from `SQS_QUEUE_URL`, the bucket from `S3_BUCKET`
+- The topic is read from `SNS_TOPIC_ARN`, the queue from `SQS_QUEUE_URL`, the bucket from `S3_BUCKET`, and the region from `AWS_DEFAULT_REGION` — the container cannot reach the instance metadata service, so the region is handed to it rather than discovered
 
 ### Startup and recovery (issue #8)
 - The server container runs `python -m etl startup`: an explicit bootstrap — database preconditions, the fixed S3 key checks, the current Boundary releases applied with their downstream rebuild, the current Source object versions enqueued — and only then the worker. A missing or invalid Boundary is fatal: the container refuses the worker start and crash-loops until it is fixed; a missing Source is non-fatal
@@ -40,14 +40,41 @@
 
 ## 3. Logging
 - All ETL logs are sent to CloudWatch Logs
+- Two log groups under `log_group_prefix`: the Compose stack's container logs (one stream per
+  container — a container's log file cannot be told apart from its path, so the stack shares
+  one group rather than claiming a group per service), and the CloudWatch agent's own log, so
+  that "the logs stopped arriving" is answerable. 30-day retention, set by Terraform
+- Worker metrics are derived from log lines the worker already prints (started,
+  bootstrap blocked, boundary applied, ETL errors). Metrics only, no alarm: the two alert
+  paths below already report problems
+- A pattern only fires if it can match the line it was written for, so each one is checked
+  against the output of `python -m etl startup`. A `?` on a line that starts its own text
+  would publish nothing while looking configured
 
 ## 4. Notifications
 - Errors in ETL trigger SNS-alert with email subscription
 - CloudWatch Alarm on DLQ → SNS
+- Both alarms sit on the queue's own `AWS/SQS` metrics, so no problem is announced twice
 
 ## 5. IAM role for EC2
-- s3:GetObject, sqs:ReceiveMessage, DeleteMessage, ChangeMessageVisibility, GetQueueAttributes,
-sns:Publish; logs:CreateLogStream, logs:PutLogEvents
+- s3:GetObject, s3:GetObjectVersion (on the fixed accepted keys only),
+sqs:ReceiveMessage, DeleteMessage, ChangeMessageVisibility, SendMessage,
+sns:Publish; logs:CreateLogStream, PutLogEvents
+- No `s3:ListBucket` and no `sqs:GetQueueAttributes`: the worker addresses its keys
+directly and reads the delivery count off the message it receives, so neither is granted
+- The region is handed to the container as `AWS_DEFAULT_REGION` rather than discovered,
+because a container cannot count on reaching the instance metadata service
 
 ## 6. Terraform
 - Use Terraform for scripting
+- `terraform/` provisions the bucket, queue + DLQ, topic, instance profile, log groups,
+  metrics and alarms (#10, `docs/adr/0010-terraform-deployment-contract.md`); the operator
+  steps are in `terraform/README.md`
+- The delivery contract (six-hour visibility, five deliveries, fourteen-day DLQ retention) is
+  not a variable: it is the contract `etl/ingestion.py` is written against, stated once in
+  `locals` and pinned against the Python constants by `tests/test_terraform_config.py`
+- The instance profile grants no `cloudwatch:PutMetricData` — the worker metrics are
+  log-derived and the queue metrics are native, so nothing on the host publishes a metric
+- The AWS provider has no resource for attaching an instance profile, so the attachment is one
+  `aws ec2 modify-instance-attribute` call and a Terraform `check` block warns on later plans
+  when the host is not running under the profile

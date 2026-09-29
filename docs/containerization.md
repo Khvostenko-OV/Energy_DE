@@ -39,7 +39,8 @@ variant — the pipeline and viz containers are **pulled from Docker Hub**
 database stays internal to the compose network. The pipeline container runs
 the server startup path (`python -m etl startup`, issue #8) and mounts **no
 data volume**: the worker reads its input from S3/SQS/SNS, with settings
-(`DATABASE_URL`, `S3_BUCKET`, `SQS_QUEUE_URL`, `SNS_TOPIC_ARN`) supplied by the
+(`DATABASE_URL`, `S3_BUCKET`, `SQS_QUEUE_URL`, `SNS_TOPIC_ARN`,
+`AWS_DEFAULT_REGION`) supplied by the
 operator's environment. `local_compose.yaml` is the local-dev twin — identical
 stack, but the pipeline runs the `run-all` CLI workflow against the mounted
 `etl_data` seed volume, the app is published directly on host port
@@ -188,7 +189,8 @@ which bootstraps the deployment **before** the worker starts:
 
 The bootstrap creates no Ingestion runs and mounts no data volume: the worker
 reads S3 through the event queue. Settings come from the environment
-(`DATABASE_URL`, `S3_BUCKET`, `SQS_QUEUE_URL`, `SNS_TOPIC_ARN` for the
+(`DATABASE_URL`, `S3_BUCKET`, `SQS_QUEUE_URL`, `SNS_TOPIC_ARN`,
+`AWS_DEFAULT_REGION` for the
 pipeline; `VIZ_DATABASE_URL` for the app) — the compose files declare them
 required (`${VAR:?}`), so `docker compose up` fails fast when one is missing.
 
@@ -324,6 +326,7 @@ Two GitHub Actions workflows keep the images honest:
 | `S3_BUCKET` | — (required) | versioned data bucket holding the fixed `boundaries/` and `sources/` keys |
 | `SQS_QUEUE_URL` | — (required) | queue carrying the S3 ObjectCreated events |
 | `SNS_TOPIC_ARN` | — (required) | topic for ingestion and DLQ alerts |
+| `AWS_DEFAULT_REGION` | — (required) | region the worker container builds its AWS clients in; without it boto3 would look for one on the instance metadata service |
 | `VIZ_DATABASE_URL` | — (required) | the read-only `viz_reader` URL the app connects as; must match `docker/viz_reader.sql` |
 | `DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`/`DB_NAME` | `etl`/`etl`/`db`/`5432`/`energy_de` | what the seed script writes into `docker.env` `DATABASE_URL` (for the pipeline) |
 | `VIZ_USER`/`VIZ_PASSWORD` | `viz_reader`/`viz` | what the seed script writes into `docker.env` `VIZ_DATABASE_URL` (for the viz app); must match `docker/viz_reader.sql` |

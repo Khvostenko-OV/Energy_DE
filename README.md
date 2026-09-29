@@ -28,9 +28,14 @@ aggregates) runs in the containerized stack. Design work recorded in:
   read-only `viz_reader` role)
 - Docker (containerized stack — `compose.yaml`: db + pipeline + viz images pulled from
   Docker Hub, data-volume seed, read-only role provisioning; `docs/containerization.md`)
-- GitHub Actions (`.github/workflows/ci.yml`: byte-compile + pipeline/viz image build on
-  every push/PR, #14; `.github/workflows/publish-docker.yml`: pushes both images to Docker
-  Hub as `khvostenko/aws-energy-etl` / `khvostenko/aws-energy-viz` on `main`)
+- Terraform (`terraform/` — the AWS infrastructure the event-driven deployment runs on:
+  S3 bucket, SQS queue + DLQ, SNS topic, EC2 instance profile, CloudWatch logs/metrics/
+  alarms, #10; operator steps in `terraform/README.md`, decisions in
+  `docs/adr/0010-terraform-deployment-contract.md`)
+- GitHub Actions (`.github/workflows/ci.yml`: byte-compile + pipeline/viz image build +
+  `terraform fmt`/`validate` on every push/PR, #14/#10; `.github/workflows/publish-docker.yml`:
+  pushes both images to Docker Hub as `khvostenko/aws-energy-etl` /
+  `khvostenko/aws-energy-viz` on `main`)
 
 ## Data
 
@@ -100,6 +105,9 @@ docker compose -f local_compose.yaml up --build --wait db viz
   `docker compose -f local_compose.yaml exec -T db psql -U etl -d energy_de -c "SELECT * FROM marts.installation_counts ORDER BY state LIMIT 8"`
 - *Alternative: seed a remote PostGIS and point the seed script's `DB_HOST`/`DB_PORT`
   env at it — see `docs/remote-deploy.md`.
+- *AWS: the server stack reads S3 through the SQS queue, so the bucket, queue, topic, instance
+  profile and CloudWatch resources come from Terraform — see `terraform/README.md` for the
+  apply and the two operator steps that follow it.*
 
 ### Dev host (CI-style)
 

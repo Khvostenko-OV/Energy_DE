@@ -137,6 +137,10 @@ The staging `unit_id`, persisted under that column name in `source_memberships.u
 **Input kind**:
 What an Ingestion run was handed: `source` or `boundary`. It is derived from the accepted S3 key, not the file content, and is recorded on the run for reporting; which processor handles an object is decided by the accepted-key set and the processor the worker is given.
 
+**Accepted key**:
+The fixed S3 key layout an object must land on to be ingested: six Source keys (`sources/{solar,storage,bio,wind,gas,hydro}.gpkg`) and four Boundary levels (`boundaries/level-{0,1,2,3}.gpkg`). The set is the worker's contract (`etl.ingestion.ACCEPTED_KEYS`), and Terraform declares the same list so the bucket policy can name the objects; `tests/test_terraform_config.py` fails if the two lists drift apart.
+_Avoid_: filename, prefix
+
 **Staging**:
 The transform layer: raw rows enriched with state, region, and district via spatial joins, keyed by a natural `unit_id`, quality-gated by `bad_quality`, and with the whitelisted secondary attributes decomposed into normalized properties (the rest staying in `secondary_attributes`). Staging carries both the `geometry` point and explicit `x_coordinates` / `y_coordinates`.
 

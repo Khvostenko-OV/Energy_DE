@@ -5,6 +5,11 @@ Streamlit viz app + data-volume seed, `docs/containerization.md`) on a remote
 server. The server only needs Docker — nothing private (raw data, connection
 settings) is cloned or committed; it is transferred and seeded per machine.
 
+> **On AWS** the server stack does not read the transferred data at all: it
+> reads S3 through the SQS queue, and steps 3 and 5 are replaced by
+> `terraform/README.md` (the apply, plus attaching the instance profile and
+> installing the CloudWatch agent config).
+
 ## 0. Prereqs
 
 - Linux server (x86_64/amd64 or arm64 — the `db` image is multi-arch). The
@@ -94,7 +99,8 @@ docker compose up -d --wait pipeline viz nginx
 
 The pipeline container mounts no data volume — the worker reads S3 through the
 event queue — and takes its settings from the environment (`DATABASE_URL`,
-`S3_BUCKET`, `SQS_QUEUE_URL`, `SNS_TOPIC_ARN`; `VIZ_DATABASE_URL` for the app).
+`S3_BUCKET`, `SQS_QUEUE_URL`, `SNS_TOPIC_ARN`, `AWS_DEFAULT_REGION`;
+`VIZ_DATABASE_URL` for the app).
 The compose files declare them required, so `up` fails fast when one is
 missing. PostGIS is not published to the host; `nginx` (port 80 by default,
 `NGINX_PORT`) is the only externally reachable surface and proxies to

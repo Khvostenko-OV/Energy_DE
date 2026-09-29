@@ -9,6 +9,10 @@ seed, read-only `viz_reader` role provisioning (dev-host SQL seam in
 `docker/viz_reader.sql`), and a smoke seam (`local_compose.yaml`,
 `scripts/seed_data_volume.sh`, `scripts/smoke_etl_container.sh`; see
 `docs/containerization.md`).
+The AWS deployment's infrastructure is Terraform (`terraform/`): S3 bucket, SQS
+queue + DLQ, SNS topic, EC2 instance profile, CloudWatch log groups/metrics/alarms
+(#10), with an operator hand-off in `terraform/README.md` and the decisions in
+`docs/adr/0010-terraform-deployment-contract.md`.
 Treat `TechnicalSpecification.md` as the single authoritative source for data models, table
 schemas (raw/staging/service/core/marts), and pipeline design.
 
@@ -16,6 +20,12 @@ schemas (raw/staging/service/core/marts), and pipeline design.
 - Python (Pandas, GeoPandas) for ETL — in use
 - PostgreSQL + PostGIS (PostGIS required for spatial joins) — in use
 - Docker for the containerized stack — in use (compose: db + pipeline + viz, #13/#15/#28)
+- Terraform for the AWS infrastructure — in use (`terraform/`, #10; provider `hashicorp/aws`
+  ~> 5.0, `required_version >= 1.6.0`). Local verification is a Docker runner:
+  `docker run --rm -v "$PWD/terraform:/tf" -w /tf hashicorp/terraform:1.9.5 <fmt|validate>`
+  (there is no `terraform` binary on this machine). Credentials are never configured — the
+  provider takes the operator's ambient AWS config, and state/`*.tfvars` stay out of git
+  (`terraform/.gitignore`)
 - Streamlit + PyDeck for the visualization app — in use (the `viz/` package, issues #23+,
   shipped as its own compose `viz` service behind the read-only `viz_reader` role, #28;
   the aborted Dash/Metabase approaches were dropped with the `dash-viz-service` branch
@@ -37,6 +47,9 @@ Gotchas:
   `requirements-viz.txt` (its own pandas/SQLAlchemy/psycopg2 set, no click/geopandas).
   For project-wide dev, install all three: `-r requirements.txt -r requirements-viz.txt -r requirements-dev.txt`.
 - `DATABASE_URL` and the raw data are required to run the pipeline; both stay out of git.
+- Terraform state and `terraform.tfvars` stay out of git too (`terraform/.gitignore`); the
+  committed config carries no account id (it reads `data.aws_caller_identity`) and no
+  credential, and `terraform/terraform.tfvars.example` is the only example file.
 
 ## Conventions to follow
 - Where the spec and files conflict, the files/source datasets win — note the discrepancy rather than silently assuming.
@@ -59,12 +72,17 @@ does not exist yet is enough. The suite **refuses to run** if `TEST_DATABASE_URL
 at the same database as `DATABASE_URL`, and with `TEST_DATABASE_URL` unset it overwrites
 `DATABASE_URL` with an unreachable placeholder so no test can reach dev data. The viz
 unit seams (`tests/test_viz_*.py`) take no database but do need `requirements-viz.txt`
-installed. The containerized stack has its own smoke
+installed. `tests/test_terraform_config.py` takes no database either: it parses
+`terraform/*.tf` with `python-hcl2` (pinned `<5.0` in `requirements-dev.txt`, because 5.x
+returns a different shape), and pins the accepted-key layout and the delivery contract
+against `etl/ingestion.py`. The containerized stack has its own smoke
 seam (`scripts/smoke_etl_container.sh`, #13; extended by #28 for db + pipeline + viz).
-CI (`.github/workflows/ci.yml`, #14) does *not* run the integration suite — it runs
-cheap gates only (byte-compile via `python -m compileall` + pipeline/viz image builds),
-because it has no PostGIS service — and must never require the raw data. The publish
-workflow
+CI (`.github/workflows/ci.yml`, #14/#10) does *not* run the integration suite — it runs
+cheap gates only (byte-compile via `python -m compileall`, pipeline/viz image builds, and
+`terraform fmt -check` + `init -backend=false` + `validate` via `hashicorp/setup-terraform`
+plus `tests/test_terraform_config.py`, which needs no database, no data and no
+credentials), because it has no PostGIS service — and must never require the raw data or AWS
+credentials. The publish workflow
 (`.github/workflows/publish-docker.yml`) pushes both images to Docker Hub
 (`khvostenko/aws-energy-etl`, `khvostenko/aws-energy-viz`) on `main`, which `compose.yaml`
 pulls (`build_compose.yaml`/`local_compose.yaml` still build from source).

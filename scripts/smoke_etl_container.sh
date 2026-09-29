@@ -168,6 +168,7 @@ step "Server variant deployment contract (compose.yaml, issue #8)"
 # so the required settings get dummy values here.
 server_config="$(DATABASE_URL=postgresql://etl:etl@db:5432/energy_de \
     S3_BUCKET=dummy SQS_QUEUE_URL=https://dummy SNS_TOPIC_ARN=arn:dummy \
+    AWS_DEFAULT_REGION=eu-central-1 \
     VIZ_DATABASE_URL=postgresql://viz_reader:viz@db:5432/energy_de \
     docker compose -f compose.yaml config)" || fail "compose.yaml does not render"
 if echo "$server_config" | grep -q "etl_data"; then
