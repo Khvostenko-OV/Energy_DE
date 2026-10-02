@@ -1,46 +1,4 @@
-"""Streamlit entrypoint for the German Energy Units map (issues #23-#26).
-
-T2 (#24): renders one IconLayer per checked energy source with
-active-units timescope filtering, a sidebar check-all toggle, per-source
-checkboxes, a date-range timescope, and a hover card for every unit.
-
-T3 (#25): a live header above the map.  The header shows the active drill
-level and the count of displayed areas — or the single area's name when
-exactly one area is shown (e.g. "Region Berlin") — plus total installed
-capacity (MW), the active-unit count, and the displayed area in km².  All
-figures recompute on every rerun (source/timescope/level changes) and pull
-from the same predicate the map renders.
-
-T4 (#26): the administrative-level slice.  An area multiselect below the
-level selectbox picks the displayed areas at the active level (starts empty;
-empty selection means all areas), a choropleth GeoJsonLayer colors each area
-by its live capacity (per-area unit count on hover), computed from the same
-source/timescope filters as the unit layers and header, and the camera refits to
-the selected areas' bounding box only when the level or area selection
-changes — session-state camera survives every other rerun.  With a proper
-subset of areas picked, the unit points and every header figure narrow to
-those areas (units whose state/region/district names one of them); on
-the all-areas selection every active unit renders and counts, including
-offshore units that belong to no polygon at the active level.  At the country
-level ("Germany") the area multiselect is omitted and the choropleth gives
-way to a plain country-boundary outline — there is nothing to compare by
-color within a single polygon.
-
-The T4 fetch path is the render-optimized one (docs/Viz_optimazation.md):
-units come back in **one pandas frame via at most two queries** (generators
-once with `energy_source = ANY(:sources)`, storages once), the per-area
-choropleth fill is a pandas groupby over that frame's `name` column — no
-spatial join — and the boundary layer outlines **every** area at the level
-while filling only the selected ones.  The header's scope/capacity/unit-count
-figures derive from the same frame and boundary rows, so a rerun issues the
-two unit queries plus one boundaries query.
-
-T1 tracer (#23): when the core tables are absent — or the database is
-unreachable — the app hides the data widgets and shows only a full-width
-"No core tables" notice plus the empty basemap deck.  Widget defaults come
-from `viz.config`, the deck from `viz.map_builder`, the fetch from `viz.data`,
-the tooltip from `viz.tooltip`, and the header strings from `viz.header`.
-The choropleth and camera seams live in `viz.choropleth` / `viz.viewport`.
+"""Streamlit entrypoint for the German Energy Units map
 """
 
 from __future__ import annotations
@@ -290,11 +248,11 @@ map_style_label = st.sidebar.selectbox("Map style", list(MAP_STYLES))
 
 # Manual invalidation of the boundary data cache after a pipeline re-run; the
 # click itself reruns the script, and the next fetch misses the cache.
-st.sidebar.button(
-    "Reload data",
-    on_click=st.cache_data.clear,
-    help="Re-fetch the cached boundary data after loading new data with the pipeline.",
-)
+# st.sidebar.button(
+#     "Reload data",
+#     on_click=st.cache_data.clear,
+#     help="Re-fetch the cached boundary data after loading new data with the pipeline.",
+# )
 
 # ── Fetch + render ─────────────────────────────────────────────────────── #
 
